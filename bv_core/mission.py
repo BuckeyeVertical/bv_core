@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 
+import os
+import yaml
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from mavros_msgs.msg import Waypoint
+from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool
-from std_msgs.msg import UInt16
-import math
+from sensor_msgs.msg import NavSatFix
+
+from ament_index_python.packages import get_package_share_directory
 
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
@@ -17,124 +21,195 @@ class MissionRunner(Node):
     def __init__(self):
         super().__init__('mission_runner')
 
-        # 1) Create clients for mission push, arming, and mode switching
-        self.cli_push = self.create_client(WaypointPush,   '/mavros/mission/push')
-        self.cli_arm  = self.create_client(CommandBool,     '/mavros/cmd/arming')
-        self.cli_mode = self.create_client(SetMode,         '/mavros/set_mode')
+        # Load all parameters from mission_params.yaml
+        mission_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'mission_params.yaml'
+        )
+        with open(mission_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
 
-        # 2) Subscribe to '/mavros/mission/reached' with BEST_EFFORT QoS
-        be_qos = QoSProfile(depth=10)
-        be_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        self.points         = cfg.get('points', [])
+        self.scan_points    = cfg.get('scan_points', [])
+        self.deliver_points = cfg.get('deliver_points', [])
 
-        self.reached_sub = self.create_subscription(
-            UInt16,
-            '/mavros/mission/reached',
-            self.reached_cb,
-            qos_profile=be_qos
+        # Scalar parameters
+        self.max_vel       = cfg.get('max_velocity', 1.0)
+        self.time_to_max   = cfg.get('time_to_max', 1.0)
+        self.wp_tol        = cfg.get('waypoint_tolerance', 1.0)
+
+        # Old/Manual RTL code
+        self.home_lat = None
+        self.home_lon = None
+        self.home_alt = None
+
+        gps_qos = QoSProfile(depth=10)
+        gps_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            '/mavros/global_position/global',
+            self.gps_cb,
+            qos_profile=gps_qos
+        )
+        self.get_logger().info('Waiting for first GPS fix to set home position…')
+        while rclpy.ok() and self.home_lat is None:
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        # Manual/Old RTL code
+        self.destroy_subscription(self.gps_sub)
+        self.get_logger().info(
+            f'Home set → lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}'
         )
 
-        # Wait for all three services to become available
+        # Create MAVROS service clients
+        self.cli_push = self.create_client(WaypointPush, '/mavros/mission/push')
+        self.cli_arm  = self.create_client(CommandBool,   '/mavros/cmd/arming')
+        self.cli_mode = self.create_client(SetMode,       '/mavros/set_mode')
+
+        reach_qos = QoSProfile(depth=10)
+        reach_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.reached_sub = self.create_subscription(
+            WaypointReached,
+            '/mavros/mission/reached',
+            self.reached_cb,
+            qos_profile=reach_qos
+        )
+
         for client, name in [
             (self.cli_push, '/mavros/mission/push'),
             (self.cli_arm,  '/mavros/cmd/arming'),
-            (self.cli_mode, '/mavros/set_mode')
+            (self.cli_mode, '/mavros/set_mode'),
         ]:
             while not client.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(f'Waiting for {name}…')
 
-        # 3) Build a 5-point square mission at 10 m altitude
-        home_lat = 47.397742   # SITL default home latitude
-        home_lon = 8.545594    # SITL default home longitude
-        side_m   = 15.0        # 15-meter square side length
-        # Approximate 15 m in degrees: 1° ≈ 111 km → 15 m ≈ 0.000135°
-        delta_deg = side_m / 111000.0
+        # Subscribe to /mavros/state to detect AUTO.MISSION → LOITER/HOLD
+        state_qos = QoSProfile(depth=10)
+        state_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.state_sub = self.create_subscription(
+            MavState,
+            '/mavros/state',
+            self.state_cb,
+            qos_profile=state_qos
+        )
 
-        self.wp_list = []
+        self.in_auto_mission = False
 
-        # WP0: home → climb to 10 m (index=0, is_current=True)
-        wp0 = Waypoint()
-        wp0.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp0.command      = MAV_CMD_NAV_WAYPOINT
-        wp0.is_current   = True
-        wp0.autocontinue = True
-        wp0.param1 = 0.0; wp0.param2 = 0.0; wp0.param3 = 0.0
-        wp0.param4 = float('nan')      # “unset” yaw → use MPC_YAW_MODE
-        wp0.x_lat  = home_lat
-        wp0.y_long = home_lon
-        wp0.z_alt  = 10.0
-        self.wp_list.append(wp0)
+        # FSM state variables
+        self.state = 'lap'
+        self.lap_count = 1
+        self.deliver_index = 0
 
-        # WP1: 15 m north of home
-        wp1 = Waypoint()
-        wp1.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp1.command      = MAV_CMD_NAV_WAYPOINT
-        wp1.is_current   = False
-        wp1.autocontinue = True
-        wp1.param1 = 0.0; wp1.param2 = 0.0; wp1.param3 = 0.0
-        wp1.param4 = float('nan')
-        wp1.x_lat  = home_lat + delta_deg
-        wp1.y_long = home_lon
-        wp1.z_alt  = 10.0
-        self.wp_list.append(wp1)
+        # Start the first lap
+        self.start_lap()
 
-        # WP2: 15 m northeast (home_lat + delta, home_lon + delta)
-        wp2 = Waypoint()
-        wp2.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp2.command      = MAV_CMD_NAV_WAYPOINT
-        wp2.is_current   = False
-        wp2.autocontinue = True
-        wp2.param1 = 0.0; wp2.param2 = 0.0; wp2.param3 = 0.0
-        wp2.param4 = float('nan')
-        wp2.x_lat  = home_lat + delta_deg
-        wp2.y_long = home_lon + delta_deg
-        wp2.z_alt  = 10.0
-        self.wp_list.append(wp2)
 
-        # WP3: 15 m east of home (home_lat, home_lon + delta)
-        wp3 = Waypoint()
-        wp3.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp3.command      = MAV_CMD_NAV_WAYPOINT
-        wp3.is_current   = False
-        wp3.autocontinue = True
-        wp3.param1 = 0.0; wp3.param2 = 0.0; wp3.param3 = 0.0
-        wp3.param4 = float('nan')
-        wp3.x_lat  = home_lat
-        wp3.y_long = home_lon + delta_deg
-        wp3.z_alt  = 10.0
-        self.wp_list.append(wp3)
+    
+    # Convert a list of [lat, lon, alt] triplets into mavros_msgs/Waypoint messages
+    
+    def build_waypoints(self, waypoint_list):
+        wp_list = []
+        for i, (lat, lon, alt) in enumerate(waypoint_list):
+            wp = Waypoint()
+            wp.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
+            wp.command      = MAV_CMD_NAV_WAYPOINT
+            wp.is_current   = (i == 0)
+            wp.autocontinue = True
+            wp.param1       = 0.0
+            wp.param2       = 0.0
+            wp.param3       = 0.0
+            wp.param4       = float('nan')
+            wp.x_lat        = lat
+            wp.y_long       = lon
+            wp.z_alt        = alt
+            wp_list.append(wp)
+        return wp_list
 
-        # WP4: return to home at 10 m
-        wp4 = Waypoint()
-        wp4.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp4.command      = MAV_CMD_NAV_WAYPOINT
-        wp4.is_current   = False
-        wp4.autocontinue = True
-        wp4.param1 = 0.0; wp4.param2 = 0.0; wp4.param3 = 0.0
-        wp4.param4 = float('nan')
-        wp4.x_lat  = home_lat
-        wp4.y_long = home_lon
-        wp4.z_alt  = 10.0
-        self.wp_list.append(wp4)
 
-        # 4) Push → arm → set to AUTO.MISSION
+    
+    # Lap state
+    
+    def start_lap(self):
+        self.state = 'lap'
+        self.get_logger().info(f'Starting lap {self.lap_count} …')
+        self.wp_list = self.build_waypoints(self.points)
         self.push_mission()
 
+
+    
+    # Scan state
+    
+    def start_scan(self):
+        self.state = 'scan'
+        self.get_logger().info('Starting scan state …')
+        self.wp_list = self.build_waypoints(self.scan_points)
+        self.push_mission()
+
+
+    
+    # Deliver state
+    
+    def start_deliver(self):
+        self.state = 'deliver'
+        idx = self.deliver_index
+        lat, lon, alt = self.deliver_points[idx]
+        self.get_logger().info(f'Delivering to point {idx + 1} …')
+
+        wp = Waypoint()
+        wp.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
+        wp.command      = MAV_CMD_NAV_WAYPOINT
+        wp.is_current   = True
+        wp.autocontinue = True
+        wp.param1       = 0.0
+        wp.param2       = 0.0
+        wp.param3       = 0.0
+        wp.param4       = float('nan')
+        wp.x_lat        = lat
+        wp.y_long       = lon
+        wp.z_alt        = alt
+
+        self.wp_list = [wp]
+        self.push_mission()
+
+
+    
+    # RTL Code
+    
+    def return_to_rtl(self):
+        self.state = 'return'
+        self.get_logger().info('Switching to AUTO.RTL …')
+        mode_req = SetMode.Request()
+        mode_req.base_mode   = 0
+        mode_req.custom_mode = 'AUTO.RTL'
+        future = self.cli_mode.call_async(mode_req)
+        future.add_done_callback(self.mode_cb)
+
+
+    
+    # Push the current self.wp_list to /mavros/mission/push, then arms and switches to AUTO.MISSION.
+    
     def push_mission(self):
         req = WaypointPush.Request()
         req.start_index = 0
         req.waypoints   = self.wp_list
 
-        self.get_logger().info(f'Pushing {len(self.wp_list)} waypoints…')
+        self.get_logger().info(
+            f'Pushing {len(self.wp_list)} waypoint(s) for state="{self.state}" …'
+        )
         future = self.cli_push.call_async(req)
         future.add_done_callback(self.push_cb)
+
 
     def push_cb(self, future):
         resp = future.result()
         if not resp.success:
             self.get_logger().error(f'Mission push failed (result={resp.result})')
             return
-        self.get_logger().info('Mission pushed ✓ → arming vehicle…')
+        self.get_logger().info('Mission pushed ✓ → Arming vehicle …')
         self.arm_vehicle()
+
 
     def arm_vehicle(self):
         arm_req = CommandBool.Request()
@@ -142,13 +217,15 @@ class MissionRunner(Node):
         future = self.cli_arm.call_async(arm_req)
         future.add_done_callback(self.arm_cb)
 
+
     def arm_cb(self, future):
         resp = future.result()
         if not resp.success:
             self.get_logger().error('Arming FAILED')
             return
-        self.get_logger().info('Armed ✓ → switching to AUTO.MISSION…')
+        self.get_logger().info('Armed ✓ → Setting mode to AUTO.MISSION …')
         self.switch_to_mission()
+
 
     def switch_to_mission(self):
         mode_req = SetMode.Request()
@@ -157,21 +234,72 @@ class MissionRunner(Node):
         future = self.cli_mode.call_async(mode_req)
         future.add_done_callback(self.mode_cb)
 
+
     def mode_cb(self, future):
         resp = future.result()
         if not resp.mode_sent:
-            self.get_logger().error('Failed to set AUTO.MISSION')
+            self.get_logger().error('Failed to set mode')
         else:
-            self.get_logger().info('Mode set → PX4 will now fly the square smoothly.')
-        # Keep node alive to continue logging reached indices
+            self.get_logger().info(f'Mode set ✓ → {"RTL" if self.state=="return" else "flying"} …')
+            if self.state != 'return':
+                self.in_auto_mission = True
 
-    def reached_cb(self, msg: UInt16):
-        self.get_logger().info(f'Reached waypoint index: {msg.data}')
+
+    #
+    # Called every time PX4 publishes `/mavros/mission/reached`
+    #
+    def reached_cb(self, msg: WaypointReached):
+        idx = msg.wp_seq
+        last_idx = len(self.wp_list) - 1
+        self.get_logger().info(f'Reached waypoint index: {idx}')
+
+        if idx == last_idx:
+            if self.state == 'lap':
+                # if statement to check lap number
+                if self.lap_count == 1:
+                    pass
+                else:
+                    self.start_deliver()
+            elif self.state == 'scan':
+                self.start_deliver()
+            elif self.state == 'deliver':
+                self.deliver_index += 1
+                self.lap_count += 1
+                if self.deliver_index < len(self.deliver_points):
+                    self.start_lap()
+                else:
+                    self.return_to_rtl()
+            elif self.state == 'return':
+                self.get_logger().info('RTL in progress or landed.')
+
+
+    #
+    # End segment check
+    #
+    def state_cb(self, msg: MavState):
+        if self.in_auto_mission and msg.mode != 'AUTO.MISSION':
+            self.get_logger().info(f'Mission ended, detected PX4 mode={msg.mode}')
+            self.in_auto_mission = False
+
+            if self.state == 'lap' and self.lap_count == 1:
+                self.start_scan()
+
+
+    #
+    # Capture the first NavSatFix as “home”
+    #
+    def gps_cb(self, msg: NavSatFix):
+        if self.home_lat is None and self.home_lon is None:
+            self.home_lat = msg.latitude
+            self.home_lon = msg.longitude
+            self.home_alt = msg.altitude
+            self.get_logger().info(
+                f'GPS fixed: home_lat={self.home_lat:.6f}, '
+                f'home_lon={self.home_lon:.6f}, home_alt={self.home_alt:.2f}'
+            )
 
 
 def main(args=None):
-    # Before running, ensure PX4’s yaw mode is set:
-    # ros2 param set /px4 MPC_YAW_MODE 0
     rclpy.init(args=args)
     node = MissionRunner()
     rclpy.spin(node)
