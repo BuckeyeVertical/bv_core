@@ -1,29 +1,25 @@
-# mission_params.yaml
-
-# 1) Define an anchor called &TAKEOFF for the altitude value
 takeoff_alt: &TAKEOFF 10.0
 
-# 2) Main “lap” waypoints, each one uses *TAKEOFF as the altitude
+# Lap Waypoints
 points:
   - [47.39792614, 8.54609739, *TAKEOFF]
   - [47.39792614, 8.54623009, *TAKEOFF]
   - [47.39801597, 8.54623009, *TAKEOFF]
   - [47.39801597, 8.54609739, *TAKEOFF]
 
-# 3) Scan‐pattern waypoints
-scan_points:
+# Scan Waypoints
   - [47.397750, 8.545600, *TAKEOFF]
   - [47.397755, 8.545605, *TAKEOFF]
   - [47.397760, 8.545610, *TAKEOFF]
 
-# 4) Delivery waypoints
+# Payload waypoints
 deliver_points:
   - [47.397780, 8.545620, *TAKEOFF]
   - [47.397785, 8.545625, *TAKEOFF]
   - [47.397790, 8.545630, *TAKEOFF]
   - [47.397795, 8.545635, *TAKEOFF]
 
-# 5) Other scalar parameters (unchanged)
+# Other params
 max_velocity:       5.0
 time_to_max:        1.0
 waypoint_tolerance: 1.0
