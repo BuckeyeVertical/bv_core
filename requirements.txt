@@ -1,0 +1,2 @@
+supervision
+git+https://github.com/roboflow/rf-detr.git#egg=rf-detr
