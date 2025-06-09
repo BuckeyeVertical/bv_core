@@ -10,8 +10,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool
 from sensor_msgs.msg import NavSatFix
+from std_msgs.msg import String
 
 from ament_index_python.packages import get_package_share_directory
+
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
@@ -95,6 +98,18 @@ class MissionRunner(Node):
             qos_profile=state_qos
         )
 
+        mission_state_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,       # No lost updates
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # “Latch” the last message for late joiners
+            history=HistoryPolicy.KEEP_LAST,              # Only keep the most recent
+            depth=1                                        # …since you only need one message
+        )
+        self.mission_state_pub = self.create_publisher(
+            String,
+            '/mission_state',
+            qos_profile=mission_state_qos
+        )
+
         self.in_auto_mission = False
 
         # FSM state variables
@@ -105,7 +120,12 @@ class MissionRunner(Node):
         # Start the first lap
         self.start_lap()
 
+        self.timer = self.create_timer(0.5, self.timer_callback)
 
+    def timer_callback(self):
+        msg = String()
+        msg.data = self.state
+        self.mission_state_pub.publish(msg)
     
     # Convert a list of [lat, lon, alt] triplets into mavros_msgs/Waypoint messages
     
