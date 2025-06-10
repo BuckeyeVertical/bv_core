@@ -7,6 +7,11 @@ points:
   - [47.39801597, 8.54623009, *TAKEOFF]
   - [47.39801597, 8.54609739, *TAKEOFF]
 
+stitch_points:
+  - [47.397750, 8.545600, *TAKEOFF]
+  - [47.397755, 8.545605, *TAKEOFF]
+  - [47.397760, 8.545610, *TAKEOFF]
+
 # Scan Waypoints
 scan_points:
   - [47.397750, 8.545600, *TAKEOFF]

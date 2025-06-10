@@ -158,6 +158,12 @@ class MissionRunner(Node):
         self.push_mission()
 
 
+    # Stitching state
+    def start_stitching(self):
+        self.state = 'stitching'
+        self.get_logger().info(f'Starting stitching state …')
+        self.wp_list = self.build_waypoints(self.stitch_points)
+        self.push_mission()
     
     # Scan state
     
@@ -280,6 +286,8 @@ class MissionRunner(Node):
                     pass
                 else:
                     self.start_deliver()
+            elif self.state == 'stitching':
+                self.start_scan()
             elif self.state == 'scan':
                 self.start_deliver()
             elif self.state == 'deliver':
@@ -302,11 +310,11 @@ class MissionRunner(Node):
             self.in_auto_mission = False
 
             if self.state == 'lap' and self.lap_count == 1:
-                self.start_scan()
+                self.start_stitching()
 
 
     #
-    # Capture the first NavSatFix as “home”
+    # OLD LAUNCH CODE Capture the first NavSatFix as “home”
     #
     def gps_cb(self, msg: NavSatFix):
         if self.home_lat is None and self.home_lon is None:
