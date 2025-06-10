@@ -14,9 +14,10 @@ stitch_points:
 
 # Scan Waypoints
 scan_points:
-  - [47.397750, 8.545600, *TAKEOFF]
-  - [47.397755, 8.545605, *TAKEOFF]
   - [47.397760, 8.545610, *TAKEOFF]
+  - [47.397755, 8.545605, *TAKEOFF]
+  - [47.397750, 8.545600, *TAKEOFF]
+
 
 # Payload waypoints
 deliver_points:
@@ -26,6 +27,10 @@ deliver_points:
   - [47.397795, 8.545635, *TAKEOFF]
 
 # Other params
-max_velocity:       5.0
-time_to_max:        1.0
-waypoint_tolerance: 1.0
+Lap_velocity: 5.0
+Lap_tolerance: 10.0
+Scan_velocity: 3.0
+Scan_tolerance: 1.0
+Stitch_velocity: 5.0
+Stitch_tolerance: 1.0
+Deliver_tolerance: 1.0

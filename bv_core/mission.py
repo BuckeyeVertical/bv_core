@@ -7,8 +7,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
-from mavros_msgs.srv import WaypointPush, SetMode, CommandBool
+from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, ParamValue
+from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, ParamSet
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
 
@@ -24,6 +24,10 @@ class MissionRunner(Node):
     def __init__(self):
         super().__init__('mission_runner')
 
+        # FSM control variables
+        self.transition_in_progress = False
+        self.expected_final_wp = None
+
         # Load all parameters from mission_params.yaml
         mission_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -36,11 +40,16 @@ class MissionRunner(Node):
         self.points         = cfg.get('points', [])
         self.scan_points    = cfg.get('scan_points', [])
         self.deliver_points = cfg.get('deliver_points', [])
+        self.stitch_points  = cfg.get('stitch_points', [])
 
-        # Scalar parameters
-        self.max_vel       = cfg.get('max_velocity', 1.0)
-        self.time_to_max   = cfg.get('time_to_max', 1.0)
-        self.wp_tol        = cfg.get('waypoint_tolerance', 1.0)
+        # Velocity and tolerance parameters from yaml
+        self.lap_velocity      = cfg.get('Lap_velocity', 5.0)
+        self.lap_tolerance     = cfg.get('Lap_tolerance', 10.0)
+        self.scan_velocity     = cfg.get('Scan_velocity', 3.0)
+        self.scan_tolerance    = cfg.get('Scan_tolerance', 1.0)
+        self.stitch_velocity   = cfg.get('Stitch_velocity', 5.0)
+        self.stitch_tolerance  = cfg.get('Stitch_tolerance', 1.0)
+        self.deliver_tolerance = cfg.get('Deliver_tolerance', 1.0)
 
         # Old/Manual RTL code
         self.home_lat = None
@@ -100,7 +109,7 @@ class MissionRunner(Node):
 
         mission_state_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,       # No lost updates
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # “Latch” the last message for late joiners
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # "Latch" the last message for late joiners
             history=HistoryPolicy.KEEP_LAST,              # Only keep the most recent
             depth=1                                        # …since you only need one message
         )
@@ -127,9 +136,33 @@ class MissionRunner(Node):
         msg.data = self.state
         self.mission_state_pub.publish(msg)
     
-    # Convert a list of [lat, lon, alt] triplets into mavros_msgs/Waypoint messages
+    # Set cruise speed parameter
+    def set_cruise_speed(self, speed):
+        """Set MPC_XY_CRUISE parameter for cruise speed"""
+        try:
+            cli_param = self.create_client(ParamSet, '/mavros/param/set')
+            if not cli_param.wait_for_service(timeout_sec=2.0):
+                self.get_logger().warn('Param service not available, skipping speed setting')
+                return
+                
+            req = ParamSet.Request()
+            req.param_id = 'MPC_XY_CRUISE'
+            req.value = ParamValue()
+            req.value.integer = 0
+            req.value.real = float(speed)
+            
+            future = cli_param.call_async(req)
+            # Don't wait for response to avoid blocking
+            self.get_logger().info(f'Setting cruise speed to {speed} m/s')
+        except Exception as e:
+            self.get_logger().warn(f'Could not set speed parameter: {e}')
     
-    def build_waypoints(self, waypoint_list):
+    # Convert a list of [lat, lon, alt] triplets into mavros_msgs/Waypoint messages
+    def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
+        """
+        Build waypoints with specified tolerance and pass-through settings.
+        pass_through_ratio: 0.0 = stop at waypoint, 1.0 = pass through at same radius as tolerance
+        """
         wp_list = []
         for i, (lat, lon, alt) in enumerate(waypoint_list):
             wp = Waypoint()
@@ -137,10 +170,10 @@ class MissionRunner(Node):
             wp.command      = MAV_CMD_NAV_WAYPOINT
             wp.is_current   = (i == 0)
             wp.autocontinue = True
-            wp.param1       = 0.0
-            wp.param2       = 0.0
-            wp.param3       = 0.0
-            wp.param4       = float('nan')
+            wp.param1       = 0.0  # Hold time in seconds
+            wp.param2       = tolerance  # Acceptance radius in meters
+            wp.param3       = tolerance * pass_through_ratio  # Pass-through radius
+            wp.param4       = float('nan')  # Yaw angle
             wp.x_lat        = lat
             wp.y_long       = lon
             wp.z_alt        = alt
@@ -148,63 +181,73 @@ class MissionRunner(Node):
         return wp_list
 
 
-    
     # Lap state
-    
     def start_lap(self):
         self.state = 'lap'
+        self.transition_in_progress = True
         self.get_logger().info(f'Starting lap {self.lap_count} …')
-        self.wp_list = self.build_waypoints(self.points)
+        
+        # Try to set cruise speed
+        self.set_cruise_speed(self.lap_velocity)
+        
+        # Build waypoints
+        self.wp_list = self.build_waypoints(self.points, self.lap_tolerance, pass_through_ratio=1.0)
+        
+        # Expected final waypoint
+        self.expected_final_wp = len(self.wp_list) - 1
         self.push_mission()
-
 
     # Stitching state
     def start_stitching(self):
         self.state = 'stitching'
+        self.transition_in_progress = True
         self.get_logger().info(f'Starting stitching state …')
-        self.wp_list = self.build_waypoints(self.stitch_points)
+        
+        # Try to set cruise speed
+        self.set_cruise_speed(self.stitch_velocity)
+        
+        # Build waypoints
+        self.wp_list = self.build_waypoints(self.stitch_points, self.stitch_tolerance, pass_through_ratio=0.0)
+        
+        self.expected_final_wp = len(self.wp_list) - 1
         self.push_mission()
     
     # Scan state
-    
     def start_scan(self):
         self.state = 'scan'
+        self.transition_in_progress = True
         self.get_logger().info('Starting scan state …')
-        self.wp_list = self.build_waypoints(self.scan_points)
+        
+        # Try to set cruise speed
+        self.set_cruise_speed(self.scan_velocity)
+        
+        # Build waypoints
+        self.wp_list = self.build_waypoints(self.scan_points, self.scan_tolerance, pass_through_ratio=1.0)
+        
+        self.expected_final_wp = len(self.wp_list) - 1
         self.push_mission()
-
-
     
     # Deliver state
-    
     def start_deliver(self):
         self.state = 'deliver'
+        self.transition_in_progress = True
         idx = self.deliver_index
         lat, lon, alt = self.deliver_points[idx]
         self.get_logger().info(f'Delivering to point {idx + 1} …')
-
-        wp = Waypoint()
-        wp.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT
-        wp.command      = MAV_CMD_NAV_WAYPOINT
-        wp.is_current   = True
-        wp.autocontinue = True
-        wp.param1       = 0.0
-        wp.param2       = 0.0
-        wp.param3       = 0.0
-        wp.param4       = float('nan')
-        wp.x_lat        = lat
-        wp.y_long       = lon
-        wp.z_alt        = alt
-
-        self.wp_list = [wp]
+        
+        # Try to set cruise speed (using lap velocity)
+        self.set_cruise_speed(self.lap_velocity)
+        
+        # Build single delivery waypoint
+        self.wp_list = self.build_waypoints([(lat, lon, alt)], self.deliver_tolerance, pass_through_ratio=0.0)
+        
+        self.expected_final_wp = 0  # Only one waypoint
         self.push_mission()
-
-
     
     # RTL Code
-    
     def return_to_rtl(self):
         self.state = 'return'
+        self.transition_in_progress = True
         self.get_logger().info('Switching to AUTO.RTL …')
         mode_req = SetMode.Request()
         mode_req.base_mode   = 0
@@ -212,9 +255,37 @@ class MissionRunner(Node):
         future = self.cli_mode.call_async(mode_req)
         future.add_done_callback(self.mode_cb)
 
-
     
-    # Push the current self.wp_list to /mavros/mission/push, then arms and switches to AUTO.MISSION.
+    def handle_mission_completion(self):
+        """Central FSM transition logic - called when any state completes"""
+        self.get_logger().info(f'State "{self.state}" complete!')
+        
+        if self.state == 'lap':
+            if self.lap_count == 1:
+                self.start_stitching()
+            else:
+                self.start_deliver()
+                
+        elif self.state == 'stitching':
+            self.start_scan()
+            
+        elif self.state == 'scan':
+            self.start_deliver()
+            
+        elif self.state == 'deliver':
+            self.deliver_index += 1
+            self.lap_count += 1
+            self.get_logger().info(f"Completed delivery {self.deliver_index}/{len(self.deliver_points)}")
+            
+            if self.deliver_index < len(self.deliver_points):
+                self.get_logger().info("Going back to lap")
+                self.start_lap()
+            else:
+                self.return_to_rtl()
+                
+        elif self.state == 'return':
+            self.get_logger().info('Mission complete - landed!')
+
     
     def push_mission(self):
         req = WaypointPush.Request()
@@ -227,15 +298,19 @@ class MissionRunner(Node):
         future = self.cli_push.call_async(req)
         future.add_done_callback(self.push_cb)
 
-
     def push_cb(self, future):
         resp = future.result()
         if not resp.success:
-            self.get_logger().error(f'Mission push failed (result={resp.result})')
+            self.get_logger().error(
+                f"Mission push failed → success={resp.success}, "
+                f"wp_transferred={resp.wp_transfered}"
+            )
+            self.transition_in_progress = False
             return
-        self.get_logger().info('Mission pushed ✓ → Arming vehicle …')
+        self.get_logger().info(
+            f"Mission pushed ✓ → transferred {resp.wp_transfered} waypoint(s) → Arming vehicle …"
+        )
         self.arm_vehicle()
-
 
     def arm_vehicle(self):
         arm_req = CommandBool.Request()
@@ -243,15 +318,14 @@ class MissionRunner(Node):
         future = self.cli_arm.call_async(arm_req)
         future.add_done_callback(self.arm_cb)
 
-
     def arm_cb(self, future):
         resp = future.result()
         if not resp.success:
             self.get_logger().error('Arming FAILED')
+            self.transition_in_progress = False
             return
         self.get_logger().info('Armed ✓ → Setting mode to AUTO.MISSION …')
         self.switch_to_mission()
-
 
     def switch_to_mission(self):
         mode_req = SetMode.Request()
@@ -260,62 +334,37 @@ class MissionRunner(Node):
         future = self.cli_mode.call_async(mode_req)
         future.add_done_callback(self.mode_cb)
 
-
     def mode_cb(self, future):
         resp = future.result()
         if not resp.mode_sent:
             self.get_logger().error('Failed to set mode')
+            self.transition_in_progress = False
         else:
             self.get_logger().info(f'Mode set ✓ → {"RTL" if self.state=="return" else "flying"} …')
             if self.state != 'return':
                 self.in_auto_mission = True
+            # Mission is now active, allow waypoint processing
+            self.transition_in_progress = False
 
-
-    #
-    # Called every time PX4 publishes `/mavros/mission/reached`
-    #
+    
     def reached_cb(self, msg: WaypointReached):
+        # Ignore all waypoints during state transitions
+        if self.transition_in_progress:
+            return
+        
         idx = msg.wp_seq
-        last_idx = len(self.wp_list) - 1
-        self.get_logger().info(f'Reached waypoint index: {idx}')
+        self.get_logger().info(f'Reached waypoint {idx} (state={self.state})')
+        
+        # Check if this is the final waypoint we're expecting
+        if idx == self.expected_final_wp:
+            self.handle_mission_completion()
 
-        if idx == last_idx:
-            if self.state == 'lap':
-                # if statement to check lap number
-                if self.lap_count == 1:
-                    pass
-                else:
-                    self.start_deliver()
-            elif self.state == 'stitching':
-                self.start_scan()
-            elif self.state == 'scan':
-                self.start_deliver()
-            elif self.state == 'deliver':
-                self.deliver_index += 1
-                self.lap_count += 1
-                if self.deliver_index < len(self.deliver_points):
-                    self.start_lap()
-                else:
-                    self.return_to_rtl()
-            elif self.state == 'return':
-                self.get_logger().info('RTL in progress or landed.')
-
-
-    #
-    # End segment check
-    #
+    
     def state_cb(self, msg: MavState):
-        if self.in_auto_mission and msg.mode != 'AUTO.MISSION':
+        if self.in_auto_mission and msg.mode != 'AUTO.MISSION' and self.deliver_index == len(self.deliver_points):
             self.get_logger().info(f'Mission ended, detected PX4 mode={msg.mode}')
             self.in_auto_mission = False
 
-            if self.state == 'lap' and self.lap_count == 1:
-                self.start_stitching()
-
-
-    #
-    # OLD LAUNCH CODE Capture the first NavSatFix as “home”
-    #
     def gps_cb(self, msg: NavSatFix):
         if self.home_lat is None and self.home_lon is None:
             self.home_lat = msg.latitude

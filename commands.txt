@@ -16,5 +16,5 @@ ros2 launch mavros px4.launch \
   gcs_url:=udp://@0.0.0.0:14550
 
 
-
+To run mission:
 ros2 run bv_core mission
