@@ -7,14 +7,17 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, ParamValue
-from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, ParamSet
+from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
+from rcl_interfaces.msg import ParameterValue
+from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, ParamSetV2
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
 
 from ament_index_python.packages import get_package_share_directory
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+import time
 
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
@@ -140,18 +143,20 @@ class MissionRunner(Node):
     def set_cruise_speed(self, speed):
         """Set MPC_XY_CRUISE parameter for cruise speed"""
         try:
-            cli_param = self.create_client(ParamSet, '/mavros/param/set')
+            cli_param = self.create_client(ParamSetV2, '/mavros/param/set')
             if not cli_param.wait_for_service(timeout_sec=2.0):
                 self.get_logger().warn('Param service not available, skipping speed setting')
                 return
                 
-            req = ParamSet.Request()
+            req = ParamSetV2.Request()
             req.param_id = 'MPC_XY_CRUISE'
-            req.value = ParamValue()
-            req.value.integer = 0
-            req.value.real = float(speed)
+            req.force_set = True
+            req.value = ParameterValue()
+            req.value.integer_value = 0
+            req.value.double_value = float(speed)
             
             future = cli_param.call_async(req)
+            
             # Don't wait for response to avoid blocking
             self.get_logger().info(f'Setting cruise speed to {speed} m/s')
         except Exception as e:
@@ -188,7 +193,9 @@ class MissionRunner(Node):
         self.get_logger().info(f'Starting lap {self.lap_count} …')
         
         # Try to set cruise speed
-        self.set_cruise_speed(self.lap_velocity)
+        for i in range(10):
+            self.set_cruise_speed(self.lap_velocity)
+            time.sleep(1)
         
         # Build waypoints
         self.wp_list = self.build_waypoints(self.points, self.lap_tolerance, pass_through_ratio=1.0)
