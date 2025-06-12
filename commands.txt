@@ -6,8 +6,15 @@ source install/local_setup.bash
 make px4_sitl gz_x500
 
 
-
+In sim:
 ros2 launch mavros px4.launch fcu_url:=udp://:14540@localhost:14580 gcs_url:=udp://@localhost:14555
 
 
+On Vehicle:
+ros2 launch mavros px4.launch \
+  fcu_url:=serial:///dev/ttyUSB0:921600 \
+  gcs_url:=udp://@0.0.0.0:14550
+
+
+To run mission:
 ros2 run bv_core mission
