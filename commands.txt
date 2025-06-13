@@ -17,6 +17,10 @@ ros2 launch mavros px4.launch \
   gcs_url:=udp://@0.0.0.0:14550
 
 
+
+export PX4_HOME_LAT=40.0985384      # desired starting latitude
+export PX4_HOME_LON=-83.1932462
+
 To run mission:
 ros2 run bv_core mission
 
