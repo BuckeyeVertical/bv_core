@@ -28,9 +28,9 @@ deliver_points:
 
 # Other params
 Lap_velocity: 5.0
-Lap_tolerance: 10.0
+Lap_tolerance: 2.0
 Scan_velocity: 3.0
 Scan_tolerance: 1.0
-Stitch_velocity: 5.0
+Stitch_velocity: 4.0
 Stitch_tolerance: 1.0
 Deliver_tolerance: 1.0
