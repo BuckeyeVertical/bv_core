@@ -34,3 +34,4 @@ Scan_tolerance: 1.0
 Stitch_velocity: 5.0
 Stitch_tolerance: 1.0
 Deliver_tolerance: 1.0
+detection_threshold: 0.5

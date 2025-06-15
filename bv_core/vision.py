@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+
+import sys
+print(f"[DEBUG] Running with interpreter: {sys.executable}")
+
 import os
 import glob
 import supervision as sv
@@ -31,6 +36,7 @@ class Detector():
     def __init__(self, batch_size=16):
         self.batch_size = batch_size
         self.model = self.create_model()
+        self.frame_save_cnt = 0
 
     def create_tiles(self, image, tile_size=728, overlap=100):
         """
@@ -45,7 +51,7 @@ class Detector():
             List of (tile, (x_offset, y_offset)) where tile is a PIL Image and
             (x_offset, y_offset) is the position of the tile in the original image
         """
-        width, height = image.size
+        width, height = image.shape[1], image.shape[0]
         tiles = []
         
         # Calculate positions where tiles should start
@@ -71,7 +77,7 @@ class Detector():
                 y_start = max(0, y_end - tile_size)
                 
                 # Extract tile
-                tile = image.crop((x_start, y_start, x_end, y_end))
+                tile = image[y_start:y_end, x_start:x_end, :]
                 tiles.append((tile, (x_start, y_start)))
         
         return tiles
@@ -116,11 +122,24 @@ class Detector():
 
         merged = sv.Detections.merge(all_dets)
         return merged.with_nms(threshold=0.45)
+    
+    def annotate_frame(self, frame, detections, labels):
+        annotated_frame = frame.copy()
+        annotated_frame = sv.BoxAnnotator().annotate(annotated_frame, detections)
+        annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
+        return annotated_frame
+
+    def save_frame(self, frame, output_dir):
+        output_path = os.path.join(output_dir, f"{self.frame_save_cnt}_annotated.jpg")
+        Image.fromarray(frame).save(output_path)
+        self.frame_save_cnt += 1
 
     def create_model(self, batch_size=1, resolution=728, dtype=torch.float32):
         # Initialize the model
         torch.cuda.empty_cache()
         model = RFDETRLarge(resolution=resolution)
+
+        print("Model created")
 
         # model.optimize_for_inference(batch_size=batch_size, dtype=dtype)
         return model
