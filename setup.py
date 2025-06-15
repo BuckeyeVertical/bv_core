@@ -22,7 +22,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'mission = bv_core.mission:main'
+            'mission = bv_core.mission:main',
+            'stitching = bv_core.stitching:main'
         ],
     },
 )
