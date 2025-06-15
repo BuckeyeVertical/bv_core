@@ -1,0 +1,22 @@
+## Vision Node Test Plan:
+To run the vision node I ran:
+```
+ros2 run bv_core vision_node
+```
+
+Then to artificially send the state to scan I ran this:
+```
+ros2 topic pub /mission_state std_msgs/String 'data: scan' -1
+```
+
+Then to feed the images I played the rosbag:
+```
+ros2 bag play bag_recording_1_0.db3
+```
+
+Then to see the detections outputted:
+```
+ros2 topic echo /obj_dets
+```
+
+Then to visualize the detections, I opened the annotations folder and checked out the annotated frames
