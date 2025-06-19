@@ -14,8 +14,9 @@ def generate_launch_description():
             output='screen',
             arguments=[
                 '-o', bag_name,
-                '/camera/image_raw',
+                #'/camera/image_raw',
                 '/mission_state',
+                '/obj_dets',
                 '/mavros/local_position/pose',
                 '/mavros/global_position/global',
                 '/mavros/global_position/rel_alt',

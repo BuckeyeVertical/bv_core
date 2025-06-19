@@ -1,37 +1,51 @@
 takeoff_alt: &TAKEOFF 10.0
 
 # Lap Waypoints
+# points:
+#   - [47.39792614, 8.54609739, *TAKEOFF]
+#   - [47.39792614, 8.54623009, *TAKEOFF]
+#   - [47.39801597, 8.54623009, *TAKEOFF]
+#   - [47.39801597, 8.54609739, *TAKEOFF]
+
+
 points:
-  - [47.39792614, 8.54609739, *TAKEOFF]
-  - [47.39792614, 8.54623009, *TAKEOFF]
-  - [47.39801597, 8.54623009, *TAKEOFF]
-  - [47.39801597, 8.54609739, *TAKEOFF]
+  - [40.0977892, -83.1916196, *TAKEOFF]
+  - [40.0983373, -83.1916646, *TAKEOFF]
+
+# stitch_points:
+#   - [47.397750, 8.545600, *TAKEOFF]
+#   - [47.397755, 8.545605, *TAKEOFF]
+#   - [47.397760, 8.545610, *TAKEOFF]
 
 stitch_points:
-  - [47.397750, 8.545600, *TAKEOFF]
-  - [47.397755, 8.545605, *TAKEOFF]
-  - [47.397760, 8.545610, *TAKEOFF]
+  - [40.0983512, -83.1913596, *TAKEOFF]
+  - [40.0981673, -83.1913522, *TAKEOFF]
 
 # Scan Waypoints
-scan_points:
-  - [47.397760, 8.545610, *TAKEOFF]
-  - [47.397755, 8.545605, *TAKEOFF]
-  - [47.397750, 8.545600, *TAKEOFF]
+# scan_points:
+#   - [47.397760, 8.545610, *TAKEOFF]
+#   - [47.397755, 8.545605, *TAKEOFF]
+#   - [47.397750, 8.545600, *TAKEOFF]
 
+
+scan_points:
+  - [40.0978124, -83.1913261, *TAKEOFF]
 
 # Payload waypoints
+# deliver_points:
+#   - [47.397780, 8.545620, *TAKEOFF]
+#   - [47.397785, 8.545625, *TAKEOFF]
+#   - [47.397790, 8.545630, *TAKEOFF]
+#   - [47.397795, 8.545635, *TAKEOFF]
+
 deliver_points:
-  - [47.397780, 8.545620, *TAKEOFF]
-  - [47.397785, 8.545625, *TAKEOFF]
-  - [47.397790, 8.545630, *TAKEOFF]
-  - [47.397795, 8.545635, *TAKEOFF]
+  - [40.0977896, -83.1916149, *TAKEOFF]
 
 # Other params
 Lap_velocity: 5.0
-Lap_tolerance: 10.0
-Scan_velocity: 3.0
+Lap_tolerance: 2.0
+Scan_velocity: 5.0
 Scan_tolerance: 1.0
 Stitch_velocity: 5.0
 Stitch_tolerance: 1.0
 Deliver_tolerance: 1.0
-detection_threshold: 0.5
