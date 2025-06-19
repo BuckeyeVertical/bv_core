@@ -13,16 +13,44 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from std_msgs.msg import String
 import cv2
 import numpy as np
 import os
+# for stitching
+from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, CommandCode
+
 from datetime import datetime
+
+MAX_PICS = 4
 
 class ImageStitcherNode(Node):
     def __init__(self):
         super().__init__('image_stitcher_node')
 
         # Parameters
+
+        #default to not transitioning
+        self.transition_in_progress = False
+
+        #default to 0th waypoint
+        self.waypoint_current = 0
+
+        #default to no previous waypoint
+        self.waypoint_prev = -1
+
+        #default say no frame stored
+        self.latest_frame = None
+
+        #default to lap state at the beginning
+        self.state = "stitching"
+
+        #default reached mode
+        self.reached = False
+
+        #counter for how many total pictures to take
+        self.pic_counter = 0
+
         self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('output_path', '/tmp/stitched.jpg')
         self.declare_parameter('crop', True)
@@ -36,19 +64,41 @@ class ImageStitcherNode(Node):
         self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
         self.stitch_interval_sec = self.get_parameter('stitch_interval_sec').get_parameter_value().double_value
 
+        
+
         # Subscription & Timer
         self.image_sub = self.create_subscription(
             Image,
             image_topic,
             self.image_callback,
+            10 #what is this 10
+        )
+
+        # Subscribe to the state the drone is in
+        self.mission_state_sub = self.create_subscription(
+            String,
+            '/mission_state',
+            self.state_callback,
             10
         )
+
+        # Subscribe to when drone reaches position
+        self.reached_sub = self.create_subscription(
+            WaypointReached,
+            '/mavros/mission/reached',
+            self.reached_callback,
+            10
+        )
+
         self.stitch_timer = self.create_timer(self.stitch_interval_sec, self.timer_callback)
+
+        
+       
 
         # Helpers & buffer
         self.bridge = CvBridge()
         self.received_images = []
-        self.get_logger().info(f"Subscribed to `{image_topic}`; stitch every {self.stitch_interval_sec}s")
+        self.get_logger().info(f"Subscribed to {image_topic}`; stitch every {self.stitch_interval_sec}s")
 
     def rosimg_to_ndarray(self, msg: Image) -> np.ndarray:
         """Convert any sensor_msgs/Image to an H×W×C uint8 NumPy array."""
@@ -91,40 +141,107 @@ class ImageStitcherNode(Node):
         return mat
 
     def image_callback(self, msg: Image):
+        self.get_logger().warn(f"Image_callback is running")
         try:
             frame = self.rosimg_to_ndarray(msg)
-            self.received_images.append(frame)
-            self.get_logger().info(f"Received frame: shape={frame.shape} dtype={frame.dtype} (buffer={len(self.received_images)})")
+            self.latest_frame = frame
+            self.get_logger().info(f"got pic")
         except Exception as e:
             self.get_logger().error(f"Failed to convert raw image: {e}")
 
-    def timer_callback(self):
-        if len(self.received_images) < 2:
-            self.get_logger().warn("Not enough images to stitch yet.")
+    def state_callback(self, msg: String):
+        try:
+            self.get_logger().info(f"Received State: state={msg.data}")
+            self.state = msg.data
+        except Exception as e:
+            self.get_logger().error(f"Failed to determine state")
+
+    def reached_callback(self, msg: WaypointReached):
+        if self.transition_in_progress:
             return
+        idx = msg.wp_seq
+        self.get_logger().info(f'Reached waypoint {idx} (state={self.state})')
 
-        imgs = list(self.received_images)
-        self.received_images.clear()
-        self.get_logger().info(f"Stitching {len(imgs)} frames…")
+        #setting waypoint number
+        self.waypoint_current = idx
 
-        status, pano = self.stitch_images(imgs)
-        if status == cv2.Stitcher_OK:
-            self.get_logger().info("Stitch successful")
-            if self.crop:
-                pano = self.crop_image(pano)
 
-            # save with timestamp
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
-            cv2.imwrite(out_file, pano)
-            self.get_logger().info(f"Saved: {out_file}")
+        # if idx == self.expected_final_wp:
+        #     self.handle_mission_completion()
 
-            # display
-            cv2.imshow("Stitched", pano)
-            cv2.waitKey(1)
+        # store an image if mission state is 
+        #ask shankar if self.state can equal WaypointReached
+        if (self.state == "stitching"): #or self.state == "lap" or self.state == "scan"):
+            self.reached = True
+            self.get_logger().info(f'Reached waypoint in {self.state}')
+        else: 
+            self.reached = False
+            self.get_logger().info(f'Reached waypoint, NOT in stitching')
+
+
+
+    def timer_callback(self):
+        
+        if (self.latest_frame is not None and self.reached == True and self.pic_counter < MAX_PICS and self.waypoint_current != self.waypoint_prev):
+
+                self.get_logger().info(f"Took picture number: {self.pic_counter}")
+                self.waypoint_prev = self.waypoint_current
+                self.received_images.append(self.latest_frame)
+                self.get_logger().info(f"Received frame: shape={self.latest_frame.shape} dtype={self.latest_frame.dtype} (buffer={len(self.received_images)})")
+                self.pic_counter = self.pic_counter + 1
+
+        elif self.pic_counter > MAX_PICS:
+                    self.get_logger().info(f"Got all pictures: {self.pic_counter}, starting stitching")
+                    imgs = list(self.received_images)
+                    self.received_images.clear()
+                    self.get_logger().info(f"Stitching {len(imgs)} frames…")
+
+                    status, pano = self.stitch_images(imgs)
+                    if status == cv2.Stitcher_OK:
+                        self.get_logger().info("Stitch successful")
+                        if self.crop:
+                            pano = self.crop_image(pano)
+
+                        # save with timestamp
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
+                        cv2.imwrite(out_file, pano)
+                        self.get_logger().info(f"Saved: {out_file}")
+
+                        # display
+                        cv2.imshow("Stitched", pano)
+                        cv2.waitKey(1)
+                    else:
+                        self.get_logger().error(f"Stitch failed (code={status})")
+                        # optional: handle specific errors here…
         else:
-            self.get_logger().error(f"Stitch failed (code={status})")
-            # optional: handle specific errors here…
+                return
+        # if len(self.received_images) < 2:
+        #     self.get_logger().warn("Not enough images to stitch yet.")
+        #     return
+
+        # imgs = list(self.received_images)
+        # self.received_images.clear()
+        # self.get_logger().info(f"Stitching {len(imgs)} frames…")
+
+        # status, pano = self.stitch_images(imgs)
+        # if status == cv2.Stitcher_OK:
+        #     self.get_logger().info("Stitch successful")
+        #     if self.crop:
+        #         pano = self.crop_image(pano)
+
+        #     # save with timestamp
+        #     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        #     out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
+        #     cv2.imwrite(out_file, pano)
+        #     self.get_logger().info(f"Saved: {out_file}")
+
+        #     # display
+        #     cv2.imshow("Stitched", pano)
+        #     cv2.waitKey(1)
+        # else:
+        #     self.get_logger().error(f"Stitch failed (code={status})")
+        #     # optional: handle specific errors here…
 
     def resize_images(self, images, widthThreshold=1500):
         resized = []

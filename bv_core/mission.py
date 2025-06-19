@@ -15,6 +15,9 @@ from std_msgs.msg import String
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
+#for testing stitching only
+import time
+
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
 MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
@@ -203,6 +206,15 @@ class MissionRunner(Node):
 
     def handle_mission_completion(self):
         self.get_logger().info(f'State "{self.state}" complete!')
+
+        # if self.state == 'lap':
+        #     time.sleep(2)
+        #     self.start_stitching()
+        # elif self.state == "stitching":
+        #     time.sleep(2)
+        #     self.start_deliver()
+        
+        
         if self.state == 'lap':
             if self.lap_count == 1:
                 self.start_stitching()

@@ -31,3 +31,8 @@ source /opt/ros/humble/setup.bash
 source install/local_setup.bash
 
 ros2 bag record -o bag_recording_1 /image_raw /camera_info /mavros/local_position/pose /mavros/state /mavros/global_position/global /mavros/global_position/rel_alt
+
+
+For Play video on laptop:
+
+ros2 bag play ~/BV_workspace/ROS-Bags/ROS-Bags/bag_recording_1
