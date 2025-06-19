@@ -47,7 +47,7 @@ class VisionNode(Node):
             qos_profile=objs_pub_qos
         )
 
-        self.declare_parameter("batch_size", 8)
+        self.declare_parameter("batch_size", 4)
         self.batch_size = self.get_parameter("batch_size").value
 
         self.declare_parameter("detection_threshold", 0.5)

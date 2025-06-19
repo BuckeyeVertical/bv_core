@@ -8,7 +8,7 @@ import glob
 import supervision as sv
 import numpy as np
 from PIL import Image
-from rfdetr import RFDETRLarge
+from rfdetr import RFDETRBase
 from rfdetr.util.coco_classes import COCO_CLASSES
 import torch
 import cv2
@@ -33,12 +33,13 @@ class Localizer():
         pass
 
 class Detector():
-    def __init__(self, batch_size=16):
+    def __init__(self, batch_size=16, resolution=728):
         self.batch_size = batch_size
+        self.resolution = resolution
         self.model = self.create_model()
         self.frame_save_cnt = 0
 
-    def create_tiles(self, image, tile_size=728, overlap=100):
+    def create_tiles(self, image, overlap=100):
         """
         Split an image into tiles with overlap.
         
@@ -51,6 +52,7 @@ class Detector():
             List of (tile, (x_offset, y_offset)) where tile is a PIL Image and
             (x_offset, y_offset) is the position of the tile in the original image
         """
+        tile_size = self.resolution
         width, height = image.shape[1], image.shape[0]
         tiles = []
         
@@ -82,13 +84,37 @@ class Detector():
         
         return tiles
 
-    def process_frame(self, frame, tile_size: int = 728, overlap: int = 100, threshold: float = 0.5):
+    def pad_and_predict(self, tiles, threshold):
+        # tiles: list of H×W×C numpy arrays (or torch tensors)
+        # model.predict wants exactly `batch_size` inputs.
+
+        # 1) prepare batch
+        B = len(tiles)
+        if B < self.batch_size:
+            # assume tiles[0] exists; make dummy using its shape
+            dummy = np.zeros_like(tiles[0])
+            tiles = tiles + [dummy] * (self.batch_size - B)
+            trim_to = B
+        else:
+            trim_to = None
+
+        # 2) run inference
+        outputs = self.model.predict(tiles, threshold=threshold)
+
+        # 3) if we padded, slice off the extra outputs
+        if trim_to is not None:
+            # assume outputs is a list of detections per‐tile
+            outputs = outputs[:trim_to]
+
+        return outputs
+
+    def process_frame(self, frame, overlap: int = 100, threshold: float = 0.5):
         """
         Process an image by tiling, using RF-DETR's batch API for inference,
         then combine results and apply global NMS.
         """
         # 1) Tile the image and unzip into lists of tiles + offsets
-        tiles_with_positions = self.create_tiles(frame, tile_size, overlap)
+        tiles_with_positions = self.create_tiles(frame, overlap)
         tiles, offsets = zip(*tiles_with_positions)
 
         if self.model == None:
@@ -98,7 +124,9 @@ class Detector():
         detections_list = []
 
         for i in range(0, len(tiles), self.batch_size):
-            detections_list.extend(self.model.predict(list(tiles[i:i + self.batch_size]), threshold=threshold))
+            batch = list(tiles[i:i + self.batch_size])
+            dets = self.pad_and_predict(batch, threshold)
+            detections_list.extend(dets)
 
         # 3) Adjust boxes back to full-image coords
         all_dets = []
@@ -134,12 +162,13 @@ class Detector():
         Image.fromarray(frame).save(output_path)
         self.frame_save_cnt += 1
 
-    def create_model(self, batch_size=1, resolution=728, dtype=torch.float32):
+    def create_model(self, dtype=torch.float16):
         # Initialize the model
         torch.cuda.empty_cache()
-        model = RFDETRLarge(resolution=resolution)
+        model = RFDETRBase(resolution=self.resolution)
 
-        print("Model created")
+        model.optimize_for_inference(batch_size=self.batch_size, dtype=dtype)
 
-        # model.optimize_for_inference(batch_size=batch_size, dtype=dtype)
+        print(f"Model created with batch size: {self.batch_size}")
+
         return model
