@@ -22,7 +22,7 @@ from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, Comman
 
 from datetime import datetime
 
-MAX_PICS = 4
+MAX_PICS = 3
 
 class ImageStitcherNode(Node):
     def __init__(self):
@@ -43,7 +43,7 @@ class ImageStitcherNode(Node):
         self.latest_frame = None
 
         #default to lap state at the beginning
-        self.state = "stitching"
+        self.state = "lap"
 
         #default reached mode
         self.reached = False
@@ -141,11 +141,11 @@ class ImageStitcherNode(Node):
         return mat
 
     def image_callback(self, msg: Image):
-        self.get_logger().warn(f"Image_callback is running")
+        #self.get_logger().warn(f"Image_callback is running")
         try:
             frame = self.rosimg_to_ndarray(msg)
             self.latest_frame = frame
-            self.get_logger().info(f"got pic")
+            #self.get_logger().info(f"got pic")
         except Exception as e:
             self.get_logger().error(f"Failed to convert raw image: {e}")
 
@@ -188,9 +188,14 @@ class ImageStitcherNode(Node):
                 self.waypoint_prev = self.waypoint_current
                 self.received_images.append(self.latest_frame)
                 self.get_logger().info(f"Received frame: shape={self.latest_frame.shape} dtype={self.latest_frame.dtype} (buffer={len(self.received_images)})")
+                
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_file = os.path.join(os.path.dirname(self.output_path), f"pic_{self.waypoint_current}.jpg")
+                cv2.imwrite(out_file, self.latest_frame)
+                self.get_logger().info(f"Saved: {out_file}")
                 self.pic_counter = self.pic_counter + 1
 
-        elif self.pic_counter > MAX_PICS:
+        elif self.pic_counter >= MAX_PICS:
                     self.get_logger().info(f"Got all pictures: {self.pic_counter}, starting stitching")
                     imgs = list(self.received_images)
                     self.received_images.clear()
