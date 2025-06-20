@@ -1,5 +1,5 @@
 supervision
-git+https://github.com/roboflow/rf-detr.git#egg=rfdetr
+git+https://github.com/BuckeyeVertical/rf-detr.git#egg=rfdetr
 empy==3.3.4 
 pyros-genmsg 
 setuptools==65.5.1
