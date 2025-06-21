@@ -1,0 +1,57 @@
+ALL TERMINALS: cd bv_ws
+
+Terminal 1
+__________
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+colcon build
+
+ros2 launch mavros px4.launch \
+	fcu_url:=serial:///dev/ttyUSB0:921600 \
+	gcs_url:=udp://@0.0.0.0:14550
+
+
+Terminal 2
+__________
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
+
+ros2 run gscam2 gscam_main -p use_gst_timestamps=true
+
+
+Terminal 3
+__________
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+ros2 run bv_core mission
+
+
+Terminal 4
+__________
+source ~/torch-env/bin/activate
+
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+ros2 run bv_core vision_node
+
+
+Terminal 5
+__________
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+To record the actual stream:
+ros2 bag record -o bag_recording_1 /image_raw /camera_info /mavros/local_position/pose /mavros/state /mavros/global_position/global /mavros/global_position/rel_alt
+
+To record just detections:
+ros2 bag record -o bag_recording_1 /obj_dets /mission_state /camera_info /mavros/local_position/pose /mavros/state /mavros/global_position/global /mavros/global_position/rel_alt
