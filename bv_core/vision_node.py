@@ -91,7 +91,7 @@ class VisionNode(Node):
 
     def camera_callback(self, msg):
         now = self.get_clock().now()
-        if (now - self.last_enqueue).nanoseconds < 0.5e9:
+        if self.state != 'scan' and (now - self.last_enqueue).nanoseconds < 0.5e9:
             return
         self.queue.put(msg)
         self.last_enqueue = now
