@@ -1,1 +1,4 @@
 batch_size: 2
+detection_threshold: 0.5
+resolution: 560
+overlap: 100

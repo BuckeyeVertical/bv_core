@@ -10,6 +10,8 @@ setup(
         # ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/mission_params.yaml']),
+        ('share/' + package_name + '/config', ['config/vision_params.yaml']),
+        ('share/' + package_name + '/config', ['config/filtering_params.yaml']),
         ('share/' + package_name + '/launch', ['launch/mission.launch.py']),
     ],
     install_requires=['setuptools'],

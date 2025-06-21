@@ -15,6 +15,9 @@ from rfdetr.util.coco_classes import COCO_CLASSES
 
 from bv_msgs.srv import GetObjectLocations     # your custom srv
 from bv_msgs.msg import ObjectLocation         # your custom msg
+import yaml
+from ament_index_python.packages import get_package_share_directory
+import os
 
 class FilteringNode(Node):
     def __init__(self):
@@ -38,15 +41,6 @@ class FilteringNode(Node):
             qos
         )
 
-        # === parameters ===
-        # camera_matrix as flat list of 9 doubles; dist_coeffs as list of 5 doubles
-        self.declare_parameter('c_matrix', [1.0]*9)
-        self.declare_parameter('dist_coefficients', [0.0]*5)
-        # optional: current drone pose so we can project into world
-        self.declare_parameter('drone_latitude', 0.0)
-        self.declare_parameter('drone_longitude', 0.0)
-        self.declare_parameter('drone_altitude', 100.0)
-
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
         self.obj_locs = []      # list of clustered (lat, lon, class_id)
@@ -60,9 +54,17 @@ class FilteringNode(Node):
             self.handle_get_object_locations
         )
 
-        # === instantiate Localizer with parameters ===
-        c_mat_list = self.get_parameter('c_matrix').value
-        dist_coeff_list = self.get_parameter('dist_coefficients').value
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+
+        with open(filtering_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+
+        c_mat_list = cfg.get('c_matrix', [1.0]*9)
+        dist_coeff_list = cfg.get('dist_coefficients', [0.0]*5)
 
         camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
         dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)

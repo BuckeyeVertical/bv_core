@@ -15,6 +15,9 @@ from geometry_msgs.msg import Vector3
 import numpy as np
 import traceback
 from rfdetr.util.coco_classes import COCO_CLASSES
+import yaml
+from ament_index_python.packages import get_package_share_directory
+import os
 
 class VisionNode(Node):
     def __init__(self):
@@ -47,15 +50,23 @@ class VisionNode(Node):
             qos_profile=objs_pub_qos
         )
 
-        self.declare_parameter("batch_size", 4)
-        self.batch_size = self.get_parameter("batch_size").value
+        vision_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'vision_params.yaml'
+        )
 
-        self.declare_parameter("detection_threshold", 0.5)
-        self.det_thresh = self.get_parameter("detection_threshold").value
+        with open(vision_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+
+        self.batch_size = cfg.get('batch_size', 4)
+        self.det_thresh = cfg.get('detection_threshold', 0.5)
+        self.resolution = cfg.get('resolution', 560)
+        self.overlap = cfg.get('overlap', 100)
 
         self.obj_dets = []
 
-        self.detector = Detector(batch_size=self.batch_size)
+        self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
 
         self.queue = queue.Queue()
 
@@ -91,7 +102,7 @@ class VisionNode(Node):
             try:
                 flat = np.frombuffer(msg.data, dtype=np.uint8)
                 frame = flat.reshape((msg.height, msg.width, 3))
-                detections = self.detector.process_frame(frame)
+                detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
 
                 labels = [
                     f"{COCO_CLASSES[class_id]} {confidence:.2f}"
