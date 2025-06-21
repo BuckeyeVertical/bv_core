@@ -14,7 +14,7 @@ import numpy as np
 from rfdetr.util.coco_classes import COCO_CLASSES
 
 from bv_msgs.srv import GetObjectLocations     # your custom srv
-from bv_msgs.msg import ObjectLocation         # your custom msg
+from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -99,18 +99,23 @@ class FilteringNode(Node):
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
-            self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
+            self.get_logger().info(f"Filtering node acknowledging state change: {self.state}")
 
             # once we leave the 'scan' state, cluster what we've seen
             if self.prev_state == 'scan':
                 self.obj_locs = self.localizer.estimate_locations(self.global_dets)
+
+                with open('/tmp/finalized_object_locations.txt', 'a') as f:
+                        print("Writing lat lon")
+                        for lat, lon, cls in self.obj_locs:
+                            f.write(f"{lat:.6f},{lon:.6f},{cls}\n")
 
         self.prev_state = msg.data
 
     def handle_get_object_locations(self, request, response):
         # populate service response with our clustered locations
         for lat, lon, cls_id in self.obj_locs:
-            loc = ObjectLocation()
+            loc = ObjectLocations()
             loc.latitude = float(lat)
             loc.longitude = float(lon)
             loc.class_id = int(cls_id)
