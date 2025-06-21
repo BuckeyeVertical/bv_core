@@ -23,6 +23,8 @@ devel_isolated/
 /cfg/cpp/
 /cfg/*.py
 
+*.pyc
+
 venv/
 .venv/
 
