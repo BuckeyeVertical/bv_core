@@ -7,59 +7,113 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from .vision import Localizer
-import queue
-import threading
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import Vector3
 import numpy as np
-import traceback
 from rfdetr.util.coco_classes import COCO_CLASSES
+
+from bv_msgs.srv import GetObjectLocations     # your custom srv
+from bv_msgs.msg import ObjectLocation         # your custom msg
 
 class FilteringNode(Node):
     def __init__(self):
         super().__init__('filtering_node')
 
+        # === subscriptions ===
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         self.object_det_sub = self.create_subscription(
-            msg_type=ObjectDetections,
-            topic='/obj_dets',
-            callback=self.handle_detections,
-            qos_profile=qos,
+            ObjectDetections,
+            '/obj_dets',
+            self.handle_detections,
+            qos
         )
 
         self.mission_state_sub = self.create_subscription(
-            msg_type=String,
-            topic='/mission_state',
-            callback=self.mission_state_callback,
-            qos_profile=qos,
+            String,
+            '/mission_state',
+            self.mission_state_callback,
+            qos
         )
 
-        # Declare a c_matrix, dist_coefficients parameters in the config file
+        # === parameters ===
+        # camera_matrix as flat list of 9 doubles; dist_coeffs as list of 5 doubles
+        self.declare_parameter('c_matrix', [1.0]*9)
+        self.declare_parameter('dist_coefficients', [0.0]*5)
+        # optional: current drone pose so we can project into world
+        self.declare_parameter('drone_latitude', 0.0)
+        self.declare_parameter('drone_longitude', 0.0)
+        self.declare_parameter('drone_altitude', 100.0)
 
-        # Define a list to keep all the global_dets list of tuples lat, lon, class
-        # Define a list to keep all object locations (obj_locs) of tuples lat, lon, class
+        # === internal state ===
+        self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
+        self.obj_locs = []      # list of clustered (lat, lon, class_id)
+        self.prev_state = None
+        self.state = None
 
-        # Set up a ros service to get the obj_locs
+        # === service to expose the object locations ===
+        self.get_obj_locs_srv = self.create_service(
+            GetObjectLocations,
+            'get_object_locations',
+            self.handle_get_object_locations
+        )
 
-        # Pass in the c_matrix and dist_coefficients from the config file into the Localizer constructor
-        self.localizer = Localizer()
-        
-    def handle_detections(self, msg):
-        # Take in the detections (msg.dets) which is a list of Vectors (x, y, class) from the current processed frame
-        # Use localization's get_lat_lon to convert this to lat lon list and store that into the detections_lobal list
+        # === instantiate Localizer with parameters ===
+        c_mat_list = self.get_parameter('c_matrix').value
+        dist_coeff_list = self.get_parameter('dist_coefficients').value
+
+        camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
+        dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
+
+        self.localizer = Localizer(
+            camera_matrix=camera_matrix,
+            dist_coeffs=dist_coeffs
+        )
+
+    def handle_detections(self, msg: ObjectDetections):
+        # msg.dets is a sequence of Vectors: x, y, class_id
+        pixel_centers = [
+            (det.x, det.y, int(det.z))
+            for det in msg.dets
+        ]
+
+        # grab current drone pose from parameters
+        lat = self.get_parameter('drone_latitude').value
+        lon = self.get_parameter('drone_longitude').value
+        alt = self.get_parameter('drone_altitude').value
+
+        # convert to global lat/lon
+        detections_global = self.localizer.get_lat_lon(
+            pixel_centers,
+            drone_global_pos=(lat, lon),
+            drone_altitude=alt
+        )
+
+        # store for later clustering once mission state changes
+        self.global_dets = detections_global
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
             self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
 
+            # once we leave the 'scan' state, cluster what we've seen
             if self.prev_state == 'scan':
-                obj_locs = self.localizer.estimate_locations(self.global_dets)
-                
+                self.obj_locs = self.localizer.estimate_locations(self.global_dets)
+
         self.prev_state = msg.data
+
+    def handle_get_object_locations(self, request, response):
+        # populate service response with our clustered locations
+        for lat, lon, cls_id in self.obj_locs:
+            loc = ObjectLocation()
+            loc.latitude = float(lat)
+            loc.longitude = float(lon)
+            loc.class_id = int(cls_id)
+            response.locations.append(loc)
+        return response
 
 def main(args=None):
     # Before running, ensure PX4’s yaw mode is set:

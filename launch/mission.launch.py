@@ -11,6 +11,18 @@ def generate_launch_description():
         'config',
         'mission_params.yaml'
     )
+
+    vision_cfg = os.path.join(
+        get_package_share_directory(pkg),
+        'config',
+        'vision_params.yaml'
+    )
+
+    filtering_cfg = os.path.join(
+        get_package_share_directory(pkg),
+        'config',
+        'filtering_params.yaml'
+    )
         
     # Get the path to the RViz configuration file
     rviz_config_file = os.path.join(
@@ -22,54 +34,33 @@ def generate_launch_description():
     # Mission node
     mission_node = Node(
         package='bv_core',
-        name='bv_mission',
+        name='mission_node',
         executable='mission',
         parameters=[mission_cfg],
         output='screen',
         shell=True,
     )
 
-    # RViz node
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        arguments=['-d', rviz_config_file],
-        output='screen'
-    )
-
-    #Uncomment later
-
-    """
-    gz_bridge = Node(
-        package="ros_gz_bridge",
-        executable="parameter_bridge",
+    vision_node = Node(
+        package='bv_core',
+        executable='vision',
+        name='vision_node',
+        parameters=[vision_cfg],
         output='screen',
-        arguments=[
-            '/world/default/model/x500_mono_cam_down_0/'
-            'link/camera_link/sensor/imager/image'
-            '@sensor_msgs/msg/Image@gz.msgs.Image'
-        ],
-        shell=True
+        shell=True,
     )
 
-    image_stitching_node = Node(
+    filter_node = Node(
         package='bv_core',
-        executable='image_stitching_node.py',
-        output='screen'
+        executable='filtering',
+        name='filtering_node',
+        parameters=[filter_node],
+        output='screen',
+        shell=True,
     )
-    
-    detection = Node(
-        package='bv_core',
-        executable='detection.py',
-        output='screen'
-    )
-    """
 
     return LaunchDescription([
         mission_node,
-        rviz_node,
-        # gz_bridge,
-        # image_stitching_node,
-        # detection
+        vision_node,
+        filter_node
     ])

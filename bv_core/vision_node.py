@@ -6,7 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from .vision import Detector, Localizer
+from .vision import Detector
 import queue
 import threading
 from rclpy.executors import MultiThreadedExecutor
@@ -53,14 +53,9 @@ class VisionNode(Node):
         self.declare_parameter("detection_threshold", 0.5)
         self.det_thresh = self.get_parameter("detection_threshold").value
 
-        # TODO: add a parameter for the k matrix and make a parser to parse the matrix
-        k = None
-
         self.obj_dets = []
 
         self.detector = Detector(batch_size=self.batch_size)
-
-        self.localizer = Localizer(k)
 
         self.queue = queue.Queue()
 
