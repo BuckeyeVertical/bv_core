@@ -25,7 +25,8 @@ setup(
         'console_scripts': [
             'mission = bv_core.mission:main',
             'vision_node = bv_core.vision_node:main',
-            'filtering_node = bv_core.filtering_node:main'
+            'filtering_node = bv_core.filtering_node:main',
+            'stitching = bv_core.stitching:main'
         ],
     },
 )

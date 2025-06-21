@@ -15,8 +15,6 @@ from std_msgs.msg import String
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
-from bv_msgs.srv import GetObjectLocations
-
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
 MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
@@ -45,7 +43,7 @@ class MissionRunner(Node):
 
         # Velocity and tolerance parameters
         self.lap_velocity      = cfg.get('Lap_velocity', 5.0)
-        self.lap_tolerance     = cfg.get('Lap_tolerance', 10.0)
+        self.lap_tolerance     = cfg.get('Lap_tolerance', 3.0)
         self.scan_velocity     = cfg.get('Scan_velocity', 3.0)
         self.scan_tolerance    = cfg.get('Scan_tolerance', 1.0)
         self.stitch_velocity   = cfg.get('Stitch_velocity', 5.0)
@@ -122,15 +120,6 @@ class MissionRunner(Node):
             qos_profile=mission_state_qos
         )
 
-        self.awaiting_object_locs = False
-
-        self.cli_get_locs = self.create_client(
-            GetObjectLocations,
-            'get_object_locations'
-        )
-        while not self.cli_get_locs.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for get_object_locations service…')
-
         # FSM variables
         self.state = 'lap'
         self.lap_count = 1
@@ -196,53 +185,10 @@ class MissionRunner(Node):
         self.state = 'deliver'
         self.transition_in_progress = True
         self.desired_speed = self.lap_velocity
-        self.get_logger().info('Entering deliver state → requesting drop points…')
-
-        # clear any old points and mark that we're waiting
-        self.deliver_points = []
-        self.awaiting_object_locs = True
-
-        # send the request; callback will push mission only once we have >=1 point
-        self.request_object_locations()
-
-    def request_object_locations(self):
-        req = GetObjectLocations.Request()
-        self.cli_get_locs.call_async(req).add_done_callback(self.object_locs_cb)
-
-    def object_locs_cb(self, future):
-        resp = future.result()
-        locs = resp.locations
-        if self.state != 'deliver':
-            # outside deliver state we just stash them for later
-            self.deliver_points = [
-                (loc.latitude, loc.longitude, self.home_alt or 0.0)
-                for loc in locs
-            ]
-            return
-
-        # still in deliver, waiting for non-empty
-        if not locs:
-            self.get_logger().warn('No drop points yet; retrying in 1s…')
-            # try again in one second
-            self.create_timer(1.0, lambda: self.request_object_locations())
-            return
-
-        # we finally have at least one drop point
-        self.awaiting_object_locs = False
-        self.deliver_points = [
-            (loc.latitude, loc.longitude, self.home_alt or 0.0)
-            for loc in locs
-        ]
-        self.deliver_index = 0
-
-        self.get_logger().info(
-            f'Received {len(self.deliver_points)} drop point(s) → pushing deliver mission'
-        )
-        # build a single-waypoint mission
-        self.wp_list = self.build_waypoints(
-            [ self.deliver_points[0] ],
-            self.deliver_tolerance
-        )
+        idx = self.deliver_index
+        lat, lon, alt = self.deliver_points[idx]
+        self.get_logger().info(f'Delivering to point {idx+1}…')
+        self.wp_list = self.build_waypoints([(lat, lon, alt)], self.deliver_tolerance)
         self.expected_final_wp = 0
         self.push_mission()
 
