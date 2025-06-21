@@ -91,13 +91,15 @@ class VisionNode(Node):
 
     def camera_callback(self, msg):
         now = self.get_clock().now()
-        if (now - self.last_enqueue).nanoseconds < 0.5e9:
+        if self.state != 'scan' or (now - self.last_enqueue).nanoseconds < 1.5e9:
             return
+        self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
         self.queue.put(msg)
         self.last_enqueue = now
 
     def worker_loop(self):
         while rclpy.ok() and self.state == 'scan':
+            self.get_logger().info(f"Processsing frame from que")
             msg = self.queue.get()
             try:
                 flat = np.frombuffer(msg.data, dtype=np.uint8)
@@ -112,6 +114,8 @@ class VisionNode(Node):
 
                 annotated_frame = self.detector.annotate_frame(frame, detections, labels)
                 self.detector.save_frame(annotated_frame, "annotated_frames")
+
+                self.get_logger().info(f"Saved Frame")
 
                 detections_msg = ObjectDetections()
                 detections_msg.dets = []

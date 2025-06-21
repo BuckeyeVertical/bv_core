@@ -1,4 +1,4 @@
-takeoff_alt: &TAKEOFF 10.0
+takeoff_alt: &TAKEOFF 16.2
 
 # Lap Waypoints
 # points:

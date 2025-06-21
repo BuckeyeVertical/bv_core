@@ -1,4 +1,4 @@
-batch_size: 2
+batch_size: 4
 detection_threshold: 0.5
 resolution: 560
 overlap: 100

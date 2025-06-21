@@ -2,6 +2,8 @@ ALL TERMINALS: cd bv_ws
 
 Terminal 1
 __________
+source ~/bv_ws/.venv/bin/activate
+
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
@@ -15,6 +17,8 @@ ros2 launch mavros px4.launch \
 
 Terminal 2
 __________
+source ~/bv_ws/.venv/bin/activate
+
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
@@ -26,6 +30,8 @@ ros2 run gscam2 gscam_main -p use_gst_timestamps=true
 
 Terminal 3
 __________
+source ~/bv_ws/.venv/bin/activate
+
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
@@ -35,7 +41,18 @@ ros2 run bv_core mission
 
 Terminal 4
 __________
-source ~/torch-env/bin/activate
+source ~/bv_ws/.venv/bin/activate
+
+source /opt/ros/humble/setup.bash
+
+source install/local_setup.bash
+
+ros2 run bv_core stitching
+
+
+Terminal 5
+__________
+source ~/bv_ws/.venv/bin/activate
 
 source /opt/ros/humble/setup.bash
 
@@ -44,7 +61,7 @@ source install/local_setup.bash
 ros2 run bv_core vision_node
 
 
-Terminal 5
+Terminal 6
 __________
 source /opt/ros/humble/setup.bash
 
