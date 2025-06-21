@@ -25,6 +25,8 @@ devel_isolated/
 
 *.pyc
 
+bv_core/__pycache__/*.pyc
+
 venv/
 .venv/
 
