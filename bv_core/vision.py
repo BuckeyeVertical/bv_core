@@ -16,6 +16,8 @@ from sklearn.cluster import DBSCAN
 from geographiclib.geodesic import Geodesic
 import math
 from scipy.spatial.transform import Rotation as R
+import rclpy
+import rclpy.logging
 
 class Localizer:
     def __init__(self,
@@ -97,13 +99,13 @@ class Localizer:
             results.append((geo['lat2'], geo['lon2'], class_id))
 
         i = 0  # or any index
-        print("pixel", pixel_centers[i])
-        print("norm", norm[i])
-        print("dir_cam", dirs_cam[i])
-        print("dir_enu", dir_enu)
-        print("t", t, "→ E,N", east_offset, north_offset)
+        rclpy.logging.get_logger("filtering_node").info(f"pixel: {pixel_centers[i]}")
+        rclpy.logging.get_logger("filtering_node").info(f"norm: {norm[i]}")
+        rclpy.logging.get_logger("filtering_node").info(f"dir_cam: {dirs_cam[i]}")
+        rclpy.logging.get_logger("filtering_node").info(f"dir_enu: {dir_enu}")
+        rclpy.logging.get_logger("filtering_node").info(f"t: {t}, → E,N: {east_offset}, {north_offset}")
 
-        print(f"Results: {results}")
+        rclpy.logging.get_logger("filtering_node").info(f"Results: {results}")
 
         return results
 
@@ -224,7 +226,7 @@ class Detector():
         tiles, offsets = zip(*tiles_with_positions)
 
         if self.model == None:
-            print("Creating model")
+            rclpy.logging.get_logger("filtering_node").info("Creating model")
             self.model = self.create_model()
 
         detections_list = []
@@ -275,6 +277,6 @@ class Detector():
 
         model.optimize_for_inference(batch_size=self.batch_size, dtype=dtype)
 
-        print(f"Model created with batch size: {self.batch_size}")
+        rclpy.logging.get_logger("filtering_node").info(f"Model created with batch size: {self.batch_size}")
 
         return model

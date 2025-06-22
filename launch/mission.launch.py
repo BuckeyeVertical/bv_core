@@ -3,64 +3,43 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 # from launch.actions import ExecuteProcess, TimerAction
 from ament_index_python.packages import get_package_share_directory
+from launch.actions import SetEnvironmentVariable
 
 def generate_launch_description():
     pkg = 'bv_core'
-    mission_cfg = os.path.join(
-        get_package_share_directory(pkg),
-        'config',
-        'mission_params.yaml'
-    )
-
-    vision_cfg = os.path.join(
-        get_package_share_directory(pkg),
-        'config',
-        'vision_params.yaml'
-    )
-
-    filtering_cfg = os.path.join(
-        get_package_share_directory(pkg),
-        'config',
-        'filtering_params.yaml'
-    )
-        
-    # Get the path to the RViz configuration file
-    rviz_config_file = os.path.join(
-        get_package_share_directory('bv_core'),
-        'rviz',
-        'mission.rviz'
-    )
 
     # Mission node
     mission_node = Node(
         package='bv_core',
         name='mission_node',
-        executable='mission',
-        parameters=[mission_cfg],
-        output='screen',
-        shell=True,
+        executable='mission_node',
+        output='both',
     )
 
     vision_node = Node(
         package='bv_core',
-        executable='vision',
+        executable='vision_node',
         name='vision_node',
-        parameters=[vision_cfg],
-        output='screen',
-        shell=True,
+        output='both',
+    )
+
+    stitching_node = Node(
+        package='bv_core',
+        executable='stitching_node',
+        name='stitching_node',
+        output='both',
     )
 
     filter_node = Node(
         package='bv_core',
-        executable='filtering',
+        executable='filtering_node',
         name='filtering_node',
-        parameters=[filter_node],
-        output='screen',
-        shell=True,
+        output='both',
     )
 
     return LaunchDescription([
         mission_node,
         vision_node,
-        filter_node
+        filter_node,
+        stitching_node
     ])
