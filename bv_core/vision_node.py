@@ -63,6 +63,7 @@ class VisionNode(Node):
         self.det_thresh = cfg.get('detection_threshold', 0.5)
         self.resolution = cfg.get('resolution', 560)
         self.overlap = cfg.get('overlap', 100)
+        self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
         self.obj_dets = []
 
@@ -91,7 +92,7 @@ class VisionNode(Node):
 
     def camera_callback(self, msg):
         now = self.get_clock().now()
-        if self.state != 'scan' or (now - self.last_enqueue).nanoseconds < 1.5e9:
+        if self.state != 'scan' or (now - self.last_enqueue).nanoseconds < self.capture_interval:
             return
         self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
         self.queue.put(msg)

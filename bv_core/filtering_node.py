@@ -149,8 +149,8 @@ class FilteringNode(Node):
         detections_global = self.localizer.get_lat_lon(
             pixel_centers,
             drone_global_pos=self.global_pos,
-            # drone_orientation=self.drone_orientation
-            drone_orientation=(1.0, 0.0, 0.0, 0.0)
+            drone_orientation=self.drone_orientation
+            # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
         # store for later clustering once mission state changes

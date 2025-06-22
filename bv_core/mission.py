@@ -114,6 +114,7 @@ class MissionRunner(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
+        
         self.mission_state_pub = self.create_publisher(
             String,
             '/mission_state',

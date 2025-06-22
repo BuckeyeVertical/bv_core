@@ -18,6 +18,8 @@ import math
 from scipy.spatial.transform import Rotation as R
 import rclpy
 import rclpy.logging
+import yaml
+from ament_index_python.packages import get_package_share_directory
 
 class Localizer:
     def __init__(self,
@@ -37,6 +39,17 @@ class Localizer:
         self.eps = eps
         self.min_samples = min_samples
         self.geod = Geodesic.WGS84
+
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+
+        with open(filtering_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+
+        self.q_mount = cfg.get('camera_orientation', [0.0]*4)
 
     def get_lat_lon(self,
                 pixel_centers: list,
@@ -75,9 +88,13 @@ class Localizer:
         # (optionally normalize to unit length):
         dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
 
+        r_mount = R.from_quat(self.q_mount)
+        r_drone = R.from_quat(drone_orientation, scalar_first=False)
+        r_total = r_drone * r_mount
+
         # 3) Get rotation from camera → ENU
         #    Assumes quaternion is [qx, qy, qz, qw] in scipy convention
-        R_cam2enu = R.from_quat(drone_orientation).as_matrix()
+        R_cam2enu = r_total.as_matrix()
 
         # 4) For each ray, find intersection with ground plane z=0
         lat0, lon0, alt = drone_global_pos

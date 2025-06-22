@@ -41,3 +41,11 @@ Optional: Echo the mission state topic:
 ```
 ros2 topic echo /mission_state
 ```
+
+# Cleaning the old ros logs:
+
+You should clean the ros logs on your system frequently (especially on the jetson) since they stay indefinietly in the ros home directory and can eat up space on the system.
+
+```
+sudo rm -rf ~/.ros/log
+```
