@@ -20,3 +20,24 @@ ros2 topic echo /obj_dets
 ```
 
 Then to visualize the detections, I opened the annotations folder and checked out the annotated frames
+
+# Filtering Node Test Plan:
+Run the filtering node:
+```
+ros2 run bv_core filtering_node
+```
+
+Playing the bag file at 10x speed:
+```
+ros2 bag play -r 10.0 full_mission_test_4_0.db3
+```
+
+Echo the obj_dets topic:
+```
+ros2 topic echo /obj_dets
+```
+
+Optional: Echo the mission state topic:
+```
+ros2 topic echo /mission_state
+```

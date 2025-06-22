@@ -15,6 +15,7 @@ import cv2
 from sklearn.cluster import DBSCAN
 from geographiclib.geodesic import Geodesic
 import math
+from scipy.spatial.transform import Rotation as R
 
 class Localizer:
     def __init__(self,
@@ -36,48 +37,73 @@ class Localizer:
         self.geod = Geodesic.WGS84
 
     def get_lat_lon(self,
-                    pixel_centers: list,
-                    drone_global_pos: tuple,
-                    drone_altitude: float) -> list:
+                pixel_centers: list,
+                drone_global_pos: tuple,
+                drone_orientation: tuple  # (qx, qy, qz, qw)
+               ) -> list:
         """
-        Convert pixel detections to global lat/lon using simple pinhole geometry
-        and GeographicLib for accurate geodesic projection.
+        Convert pixel detections to global lat/lon using pinhole geometry,
+        GeographicLib for geodesic projection, and the drone's orientation.
 
         Args:
             pixel_centers: list of (u, v, class_id)
-            drone_global_pos: (lat, lon) in degrees
-            drone_altitude: altitude above ground plane in meters
+            drone_global_pos: (lat, lon, alt) in degrees and meters
+            drone_orientation: (qx, qy, qz, qw) quaternion giving rotation
+                            from CAMERA (or body) frame into ENU frame
 
         Returns:
-            List of (lat, lon, class_id) detections
+            List of (lat, lon, class_id) detections.
         """
+
         if not pixel_centers:
             return []
 
-        # Prepare image points
+        # 1) Undistort to normalized image plane
         pts = np.array([(u, v) for u, v, _ in pixel_centers], dtype=np.float32)
         pts = pts.reshape(-1, 1, 2)
-
-        # Undistort to normalized coords
         norm = cv2.undistortPoints(
             pts,
             self.camera_matrix,
             self.dist_coeffs,
-            P=self.camera_matrix
+            # P=self.camera_matrix
         ).reshape(-1, 2)
 
-        # Build direction vectors in camera frame
-        dirs = np.hstack([norm, np.ones((len(norm), 1), dtype=np.float32)])
+        # 2) Build camera‐frame rays (assuming z forward = optical axis)
+        dirs_cam = np.hstack([norm, np.ones((len(norm), 1), dtype=np.float32)])
+        # (optionally normalize to unit length):
+        dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
 
+        # 3) Get rotation from camera → ENU
+        #    Assumes quaternion is [qx, qy, qz, qw] in scipy convention
+        R_cam2enu = R.from_quat(drone_orientation).as_matrix()
+
+        # 4) For each ray, find intersection with ground plane z=0
+        lat0, lon0, alt = drone_global_pos
         results = []
-        lat0, lon0 = drone_global_pos
-        # For each detection compute ENU offset and project
-        for (east, north, _), (_, _, class_id) in zip(dirs * drone_altitude, pixel_centers):
-            # geographiclib expects azimuth from north (clockwise)
-            az = math.degrees(math.atan2(east, north))
-            dist = math.hypot(east, north)
-            geo = self.geod.Direct(lat0, lon0, az, dist)
+        for dir_cam, (_, _, class_id) in zip(dirs_cam, pixel_centers):
+            # rotate into ENU
+            dir_enu = R_cam2enu.dot(dir_cam)          # [east, north, up]
+            # compute scale t such that drone_pos + t·dir_enu lies on z = 0
+            # (drone at altitude `alt` above ground)
+            t = alt / -dir_enu[2]
+            east_offset  = dir_enu[0] * t
+            north_offset = dir_enu[1] * t
+
+            # 5) project via GeographicLib
+            az   = math.degrees(math.atan2(east_offset, north_offset))
+            dist = math.hypot(east_offset, north_offset)
+            geo  = self.geod.Direct(lat0, lon0, az, dist)
+
             results.append((geo['lat2'], geo['lon2'], class_id))
+
+        i = 0  # or any index
+        print("pixel", pixel_centers[i])
+        print("norm", norm[i])
+        print("dir_cam", dirs_cam[i])
+        print("dir_enu", dir_enu)
+        print("t", t, "→ E,N", east_offset, north_offset)
+
+        print(f"Results: {results}")
 
         return results
 
