@@ -120,6 +120,7 @@ class VisionNode(Node):
 
                 detections_msg = ObjectDetections()
                 detections_msg.dets = []
+                detections_msg.header = msg.header
 
                 for (x1, y1, x2, y2), score, cls in zip(
                                                             detections.xyxy,
