@@ -100,8 +100,8 @@ class VisionNode(Node):
 
     def worker_loop(self):
         while rclpy.ok() and self.state == 'scan':
-            self.get_logger().info(f"Processsing frame from que")
             msg = self.queue.get()
+            self.get_logger().info(f"Processsing frame from queue")
             try:
                 flat = np.frombuffer(msg.data, dtype=np.uint8)
                 frame = flat.reshape((msg.height, msg.width, 3))
