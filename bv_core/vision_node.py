@@ -66,10 +66,13 @@ class VisionNode(Node):
             qos_profile=objs_pub_qos
         )
 
+        qos_queue = QoSProfile(depth=10)
+        qos_queue.reliability = ReliabilityPolicy.RELIABLE
+
         self.queue_state_pub = self.create_publisher(
             msg_type=Int8,
             topic="/queue_state",
-            qos_profile=qos,
+            qos_profile=qos_queue,
         )
 
         self.timer = self.create_timer(
@@ -117,12 +120,13 @@ class VisionNode(Node):
                 
         self.prev_state = msg.data
 
-    def camera_callback(self, msg):
+    def camera_callback(self, msg_image, msg_reached):
         now = self.get_clock().now()
-        if self.state != 'scan' or (now - self.last_enqueue).nanoseconds < self.capture_interval:
+        self.get_logger().info("in camera_callback")
+        if self.state != 'scan':
             return
         self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
-        self.queue.put(msg)
+        self.queue.put(msg_image)
         self.last_enqueue = now
 
     def timer_cb(self):

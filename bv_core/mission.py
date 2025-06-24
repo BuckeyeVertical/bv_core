@@ -155,7 +155,7 @@ class MissionRunner(Node):
             wp.command      = MAV_CMD_NAV_WAYPOINT
             wp.is_current   = (i == 0)
             wp.autocontinue = True
-            wp.param1       = 0.0
+            wp.param1       = 1.0
             wp.param2       = tolerance
             wp.param3       = tolerance * pass_through_ratio
             wp.param4       = float('nan')
@@ -225,7 +225,7 @@ class MissionRunner(Node):
         elif self.state == 'scan':
             while self.queue_state == 0:
                 self.get_logger().info("Waiting for processing to complete")
-                self.get_clock().sleep_for(0.5)
+                time.sleep(0.5)
             self.start_deliver()
         elif self.state == 'deliver':
             self.deliver_index += 1

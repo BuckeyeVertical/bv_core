@@ -9,8 +9,7 @@ takeoff_alt: &TAKEOFF 16.2
 
 
 points:
-  - [40.0977892, -83.1916196, *TAKEOFF]
-  - [40.0983373, -83.1916646, *TAKEOFF]
+  - [38.3876701, -76.4241065, *TAKEOFF]
 
 # stitch_points:
 #   - [47.397750, 8.545600, *TAKEOFF]
@@ -18,8 +17,8 @@ points:
 #   - [47.397760, 8.545610, *TAKEOFF]
 
 stitch_points:
-  - [40.0983512, -83.1913596, *TAKEOFF]
-  - [40.0981673, -83.1913522, *TAKEOFF]
+  - [38.3876436, -76.4241946, *TAKEOFF]
+  - [38.3876096, -76.4242990, *TAKEOFF]
 
 # Scan Waypoints
 # scan_points:
@@ -29,7 +28,9 @@ stitch_points:
 
 
 scan_points:
-  - [40.0978124, -83.1913261, *TAKEOFF]
+  - [38.3875745, -76.4244075, *TAKEOFF]
+  - [38.3875415, -76.4245132, *TAKEOFF]
+  - [38.3875065, -76.4246203, *TAKEOFF]
 
 # Payload waypoints
 # deliver_points:
@@ -39,7 +40,7 @@ scan_points:
 #   - [47.397795, 8.545635, *TAKEOFF]
 
 deliver_points:
-  - [40.0977896, -83.1916149, *TAKEOFF]
+  - [38.3876701, -76.4241065, *TAKEOFF]
 
 # Other params
 Lap_velocity: 5.0

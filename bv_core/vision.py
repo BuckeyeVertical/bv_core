@@ -122,7 +122,8 @@ class Localizer:
         rclpy.logging.get_logger("filtering_node").info(f"dir_enu: {dir_enu}")
         rclpy.logging.get_logger("filtering_node").info(f"t: {t}, → E,N: {east_offset}, {north_offset}")
 
-        rclpy.logging.get_logger("filtering_node").info(f"Results: {results}")
+        for res in results:
+            rclpy.logging.get_logger("filtering_node").info(f"Result: {res[0]}, {res[1]}, {COCO_CLASSES[int(res[2])]}")
 
         return results
 
