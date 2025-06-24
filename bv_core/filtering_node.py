@@ -19,6 +19,7 @@ from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 
 class FilteringNode(Node):
     def __init__(self):
@@ -32,31 +33,40 @@ class FilteringNode(Node):
             depth=5
         )
 
-        self.object_det_sub = self.create_subscription(
-            ObjectDetections,
-            '/obj_dets',
-            self.handle_detections,
-            qos
+        self.det_sub  = Subscriber(
+            self, 
+            ObjectDetections,    
+            '/obj_dets',                   
+            qos_profile=qos
         )
-        
-        self.gps_sub = self.create_subscription(
-            NavSatFix,
-            '/mavros/global_position/global',
-            self.handle_gps,
-            qos
-        )
-        
+
+        # Since rel_alt is headerless it is going to be ahead of the rest
+        # We are assuming that drone doesn't change altitude much in 0.5 seconds
         self.rel_alt_sub = self.create_subscription(
             Float64,
             '/mavros/global_position/rel_alt',
             self.handle_rel_alt,
             qos
         )
-        
-        self.pose_sub = self.create_subscription(
-            PoseStamped,
-            '/mavros/local_position/pose',
-            self.handle_local_pose,
+
+        self.gps_sub  = Subscriber(
+            self, 
+            NavSatFix,           
+            '/mavros/global_position/global', 
+            qos_profile=qos
+        )
+
+        self.pose_sub = Subscriber(
+            self, 
+            PoseStamped,         
+            '/mavros/local_position/pose',    
+            qos_profile=qos
+        )
+
+        self.object_det_sub = Subscriber(
+            ObjectDetections,
+            '/obj_dets',
+            self.handle_detections,
             qos
         )
 
@@ -66,6 +76,14 @@ class FilteringNode(Node):
             self.mission_state_callback,
             qos
         )
+
+        self.time_sync = ApproximateTimeSynchronizer(
+            [self.gps_sub, self.pose_sub, self.object_det_sub],
+            queue_size=10,
+            slop=0.05
+        )
+
+        self.time_sync.registerCallbacks(self.handle_detections)
 
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
@@ -107,42 +125,33 @@ class FilteringNode(Node):
         self.last_rel_alt = None
         self.drone_orientation = None
 
-    def test_callback(self, msg):
-        self.get_logger().info("Got test message")
-
     def handle_gps(self, msg: NavSatFix):
         self.last_gps = msg
         self.maybe_global_pos()
 
     def handle_rel_alt(self, msg: Float64):
         self.last_rel_alt = msg
-        self.maybe_global_pos()
 
-    def handle_local_pose(self, msg: PoseStamped):
-        self.drone_orientation = (msg.pose.orientation.x, 
-                                  msg.pose.orientation.y,
-                                  msg.pose.orientation.z,
-                                  msg.pose.orientation.w)
-
-    def maybe_global_pos(self):
-        if self.last_gps != None and self.last_rel_alt != None:
-            self.global_pos = (
-                self.last_gps.latitude, 
-                self.last_gps.longitude, 
-                self.last_rel_alt.data
-                )
-            self.last_gps = None
-            self.last_rel_alt = None
-
-    def handle_detections(self, msg: ObjectDetections):
-        if self.global_pos == None or self.drone_orientation == None:
-            self.get_logger().info("global pos or orientation is None")
+    def handle_detections(self, obj_det_msg: ObjectDetections, gps_msg: NavSatFix, pos_msg: PoseStamped):
+        if self.last_rel_alt == None:
+            self.get_logger().info("Relative Altitude is None")
             return
         
+        self.global_pos = (
+                gps_msg.latitude, 
+                gps_msg.longitude, 
+                self.last_rel_alt.data
+                )
+        
+        self.drone_orientation = (pos_msg.pose.orientation.x, 
+                            pos_msg.pose.orientation.y,
+                            pos_msg.pose.orientation.z,
+                            pos_msg.pose.orientation.w)
+
         # msg.dets is a sequence of Vectors: x, y, class_id
         pixel_centers = [
             (det.x, det.y, int(det.z))
-            for det in msg.dets
+            for det in obj_det_msg.dets
         ]
 
         # convert to global lat/lon

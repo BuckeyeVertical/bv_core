@@ -64,8 +64,6 @@ class ImageStitcherNode(Node):
         self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
         self.stitch_interval_sec = self.get_parameter('stitch_interval_sec').get_parameter_value().double_value
 
-        
-
         # Subscription & Timer
         self.image_sub = self.create_subscription(
             Image,
@@ -91,9 +89,6 @@ class ImageStitcherNode(Node):
         )
 
         self.stitch_timer = self.create_timer(self.stitch_interval_sec, self.timer_callback)
-
-        
-       
 
         # Helpers & buffer
         self.bridge = CvBridge()
@@ -177,8 +172,6 @@ class ImageStitcherNode(Node):
         else: 
             self.reached = False
             self.get_logger().info(f'Reached waypoint, NOT in stitching')
-
-
 
     def timer_callback(self):
         

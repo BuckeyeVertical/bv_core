@@ -10,7 +10,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, CommandCode
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
-from std_msgs.msg import String
+from std_msgs.msg import String, Int8
 
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
@@ -121,15 +121,26 @@ class MissionRunner(Node):
             qos_profile=mission_state_qos
         )
 
+        self.queue_state_sub = self.create_subscription(
+            Int8,
+            '/queue_state',
+            self.handle_queue_state,
+            qos_profile=mission_state_qos
+        )
+
         # FSM variables
         self.state = 'lap'
         self.lap_count = 1
         self.deliver_index = 0
         self.in_auto_mission = False
+        self.queue_state = 0
 
         # Kick off
         self.start_lap()
         self.timer = self.create_timer(0.5, self.timer_callback)
+
+    def handle_queue_state(self, msg: Int8):
+        self.queue_state = msg.data
 
     def timer_callback(self):
         msg = String()
@@ -212,6 +223,9 @@ class MissionRunner(Node):
         elif self.state == 'stitching':
             self.start_scan()
         elif self.state == 'scan':
+            while self.queue_state == 0:
+                self.get_logger().info("Waiting for processing to complete")
+                self.get_clock().sleep_for(0.5)
             self.start_deliver()
         elif self.state == 'deliver':
             self.deliver_index += 1

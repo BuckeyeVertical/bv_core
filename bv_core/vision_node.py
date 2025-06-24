@@ -5,12 +5,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Int8
 from .vision import Detector
 import queue
 import threading
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
+from mavros_msgs import WaypointReached
 from geometry_msgs.msg import Vector3
 import numpy as np
 import traceback
@@ -18,6 +19,7 @@ from rfdetr.util.coco_classes import COCO_CLASSES
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 
 class VisionNode(Node):
     def __init__(self):
@@ -26,12 +28,27 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.image_sub = self.create_subscription(
+        self.image_sub = Subscriber(
             msg_type=Image, 
             topic='/image_raw',
             callback=self.camera_callback,
             qos_profile=qos,
         )
+
+        self.reached_sub = Subscriber(
+            self,
+            WaypointReached,
+            '/mavros/mission/reached',
+            QoSProfile=qos
+        )
+
+        self.time_sync = ApproximateTimeSynchronizer(
+            [self.image_sub, self.reached_sub],
+            10,
+            0.05
+        )
+
+        self.time_sync.registerCallback(self.camera_callback)
 
         self.mission_state_sub = self.create_subscription(
             msg_type=String,
@@ -43,11 +60,21 @@ class VisionNode(Node):
         objs_pub_qos = QoSProfile(depth=10)
         objs_pub_qos.reliability = ReliabilityPolicy.RELIABLE
 
-        # TODO: fix the message
         self.obj_dets_pub = self.create_publisher(
             msg_type=ObjectDetections,
             topic='/obj_dets',
             qos_profile=objs_pub_qos
+        )
+
+        self.queue_state_pub = self.create_publisher(
+            msg_type=Int8,
+            topic="/queue_state",
+            qos_profile=qos,
+        )
+
+        self.timer = self.create_timer(
+            0.1,
+            self.timer_cb
         )
 
         vision_yaml = os.path.join(
@@ -97,6 +124,16 @@ class VisionNode(Node):
         self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
         self.queue.put(msg)
         self.last_enqueue = now
+
+    def timer_cb(self):
+        # queue.unfinished_tasks is incremented on put(), 
+        # and decremented in task_done() (in your worker’s finally block).
+        # When it hits zero, you know there are no pending or in‐flight tasks.
+        empty_flag = 1 if self.queue.unfinished_tasks == 0 else 0
+
+        msg = Int8()
+        msg.data = empty_flag
+        self.queue_state_pub.publish(msg)
 
     def worker_loop(self):
         while rclpy.ok() and self.state == 'scan':
