@@ -31,6 +31,9 @@ ros2 run bv_core record
 to run Camera:
 export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! queue max-size-buffers=2 leaky=downstream ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
 
+ros2 launch bv_core mission.launch.py
+
+
 
 \
 ros2 bag record -o recording /image_raw /camera_info /mavros/local_position/pose /mavros/state /mavros/global_position/global /mavros/global_position/rel_alt

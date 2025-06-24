@@ -92,6 +92,7 @@ class VisionNode(Node):
 
     def camera_callback(self, msg):
         now = self.get_clock().now()
+        self.get_logger().info(f"Checking loop")
         if self.state != 'scan' or (now - self.last_enqueue).nanoseconds < self.capture_interval:
             return
         self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
