@@ -19,7 +19,8 @@ from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
-from message_filters import Subscriber, ApproximateTimeSynchronizer
+from collections import deque
+from rclpy.time import Time
 
 class FilteringNode(Node):
     def __init__(self):
@@ -33,40 +34,31 @@ class FilteringNode(Node):
             depth=5
         )
 
-        self.det_sub  = Subscriber(
-            self, 
-            ObjectDetections,    
-            '/obj_dets',                   
-            qos_profile=qos
+        self.object_det_sub = self.create_subscription(
+            ObjectDetections,
+            '/obj_dets',
+            self.handle_detections,
+            qos
         )
-
-        # Since rel_alt is headerless it is going to be ahead of the rest
-        # We are assuming that drone doesn't change altitude much in 0.5 seconds
+        
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            '/mavros/global_position/global',
+            self.handle_gps,
+            qos
+        )
+        
         self.rel_alt_sub = self.create_subscription(
             Float64,
             '/mavros/global_position/rel_alt',
             self.handle_rel_alt,
             qos
         )
-
-        self.gps_sub  = Subscriber(
-            self, 
-            NavSatFix,           
-            '/mavros/global_position/global', 
-            qos_profile=qos
-        )
-
-        self.pose_sub = Subscriber(
-            self, 
-            PoseStamped,         
-            '/mavros/local_position/pose',    
-            qos_profile=qos
-        )
-
-        self.object_det_sub = Subscriber(
-            ObjectDetections,
-            '/obj_dets',
-            self.handle_detections,
+        
+        self.pose_sub = self.create_subscription(
+            PoseStamped,
+            '/mavros/local_position/pose',
+            self.handle_local_pose,
             qos
         )
 
@@ -77,13 +69,8 @@ class FilteringNode(Node):
             qos
         )
 
-        self.time_sync = ApproximateTimeSynchronizer(
-            [self.gps_sub, self.pose_sub, self.object_det_sub],
-            queue_size=10,
-            slop=0.05
-        )
-
-        self.time_sync.registerCallbacks(self.handle_detections)
+        self.gps_buffer  = deque(maxlen=200)
+        self.pose_buffer = deque(maxlen=200)
 
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
@@ -120,45 +107,67 @@ class FilteringNode(Node):
             dist_coeffs=dist_coeffs
         )
 
-        self.global_pos = None
         self.last_gps = None
         self.last_rel_alt = None
-        self.drone_orientation = None
 
     def handle_gps(self, msg: NavSatFix):
-        self.last_gps = msg
-        self.maybe_global_pos()
+        self.gps_buffer.append(msg)
 
     def handle_rel_alt(self, msg: Float64):
         self.last_rel_alt = msg
 
-    def handle_detections(self, obj_det_msg: ObjectDetections, gps_msg: NavSatFix, pos_msg: PoseStamped):
-        if self.last_rel_alt == None:
-            self.get_logger().info("Relative Altitude is None")
+    def handle_local_pose(self, msg: PoseStamped):
+        self.pose_buffer.append(msg)
+
+    def handle_detections(self, msg: ObjectDetections):
+        if len(self.pose_buffer) == 0 or len(self.gps_buffer) == 0 or self.last_rel_alt == None:
+            self.get_logger().info("Waiting for sensor data")
             return
         
-        self.global_pos = (
-                gps_msg.latitude, 
-                gps_msg.longitude, 
-                self.last_rel_alt.data
-                )
-        
-        self.drone_orientation = (pos_msg.pose.orientation.x, 
-                            pos_msg.pose.orientation.y,
-                            pos_msg.pose.orientation.z,
-                            pos_msg.pose.orientation.w)
+        # convert detection stamp into a float or ns
+        t_det = Time.from_msg(msg.header.stamp).nanoseconds
 
+        # find the GPS msg whose stamp is closest
+        best_gps = min(
+            self.gps_buffer,
+            key=lambda m: abs(Time.from_msg(m.header.stamp).nanoseconds - t_det),
+            default=None
+        )
+        # same for pose
+        best_pose = min(
+            self.pose_buffer,
+            key=lambda m: abs(Time.from_msg(m.header.stamp).nanoseconds - t_det),
+            default=None
+        )
+
+        if not best_gps or not best_pose:
+            self.get_logger().warn("No matching GPS or Pose yet.")
+            return
+        
+        drone_pose = (
+            best_gps.latitude,
+            best_gps.longitude,
+            self.last_rel_alt.data
+        )
+
+        drone_orientation = (
+            best_pose.pose.orientation.x,
+            best_pose.pose.orientation.y,
+            best_pose.pose.orientation.z,
+            best_pose.pose.orientation.w
+        )
+        
         # msg.dets is a sequence of Vectors: x, y, class_id
         pixel_centers = [
             (det.x, det.y, int(det.z))
-            for det in obj_det_msg.dets
+            for det in msg.dets
         ]
 
         # convert to global lat/lon
         detections_global = self.localizer.get_lat_lon(
             pixel_centers,
-            drone_global_pos=self.global_pos,
-            drone_orientation=self.drone_orientation
+            drone_global_pos=drone_pose,
+            drone_orientation=drone_orientation
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 

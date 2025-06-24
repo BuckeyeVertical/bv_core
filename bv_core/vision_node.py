@@ -11,7 +11,7 @@ import queue
 import threading
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
-from mavros_msgs import WaypointReached
+from mavros_msgs.msg import WaypointReached
 from geometry_msgs.msg import Vector3
 import numpy as np
 import traceback
@@ -29,23 +29,23 @@ class VisionNode(Node):
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         self.image_sub = Subscriber(
-            msg_type=Image, 
-            topic='/image_raw',
-            callback=self.camera_callback,
-            qos_profile=qos,
+            self,
+            Image, 
+            '/image_raw',
+            qos_profile=qos
         )
 
         self.reached_sub = Subscriber(
             self,
             WaypointReached,
             '/mavros/mission/reached',
-            QoSProfile=qos
+            qos_profile=qos
         )
 
         self.time_sync = ApproximateTimeSynchronizer(
             [self.image_sub, self.reached_sub],
-            10,
-            0.05
+            2,
+            0.5
         )
 
         self.time_sync.registerCallback(self.camera_callback)
