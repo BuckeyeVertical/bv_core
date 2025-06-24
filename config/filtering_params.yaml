@@ -9,4 +9,4 @@ c_matrix: [3.59974687e+03, 0.0, 2.27926351e+03,
 # distortion coefficients [k1, k2, p1, p2, k3]
 dist_coefficients: [0.08818061, -0.20127641, -0.00475798, -0.00295535,  0.01559265]
 
-camera_orientation: [-0.70710678, 0.0, 0.0, 0.70710678]
+camera_orientation: [0.0, 0.0, 0.0]

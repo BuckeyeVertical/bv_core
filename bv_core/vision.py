@@ -49,7 +49,7 @@ class Localizer:
         with open(filtering_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
 
-        self.q_mount = cfg.get('camera_orientation', [0.0]*4)
+        self.camera_orientation = cfg.get('camera_orientation', [0.0]*4)
 
     def get_lat_lon(self,
                 pixel_centers: list,
@@ -88,7 +88,7 @@ class Localizer:
         # (optionally normalize to unit length):
         dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
 
-        r_mount = R.from_quat(self.q_mount)
+        r_mount = R.from_euler('xyz', self.camera_orientation)
         r_drone = R.from_quat(drone_orientation, scalar_first=False)
         r_total = r_drone * r_mount
 
