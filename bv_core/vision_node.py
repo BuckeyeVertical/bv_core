@@ -128,11 +128,11 @@ class VisionNode(Node):
 
     def camera_callback(self, msg_image, msg_reached):
         now = self.get_clock().now()
-        self.get_logger().info("in camera_callback")
         idx = msg_reached.wp_seq
+        self.get_logger().info(f"in camera_callback: {idx}")
         if self.state != 'scan' or idx == self.num_scan_wp-1:
             return
-        self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
+        self.get_logger().info(f"Adding to queue {(now - self.last_enqueue).nanoseconds}")
         self.queue.put(msg_image)
         self.last_enqueue = now
 

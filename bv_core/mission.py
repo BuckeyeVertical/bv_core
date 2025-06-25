@@ -151,9 +151,10 @@ class MissionRunner(Node):
         msg.data = self.state
         self.mission_state_pub.publish(msg)
 
-        if self.queue_state == 0 and self.maybe_deliver:
+        if self.queue_state == 1 and self.maybe_deliver:
             self.get_logger().info("Starting deliver")
             self.start_deliver()
+            self.maybe_deliver = False
 
     def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
         wp_list = []
@@ -172,6 +173,15 @@ class MissionRunner(Node):
             wp.z_alt        = alt
             wp_list.append(wp)
         return wp_list
+
+    def set_servo(self, servo_id, value):
+        """Set a servo to a specific value."""
+        req = CommandLong.Request()
+        req.command = CommandCode.CMD_DO_SET_SERVO
+        req.confirmation = 0
+        req.param1 = servo_id
+        req.param2 = value
+        self.cli_cmd.call_async(req).add_done_callback(self.cmd_cb)
 
     # State starters (no speed items)
     def start_lap(self):
