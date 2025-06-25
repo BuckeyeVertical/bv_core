@@ -21,6 +21,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
 from message_filters import Subscriber, ApproximateTimeSynchronizer
+import time
 
 class VisionNode(Node):
     def __init__(self):
@@ -29,27 +30,19 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.image_sub = Subscriber(
-            self,
-            Image, 
-            '/image_raw',
+        self.image_sub = self.create_subscription(
+            type=Image, 
+            topic='/image_raw',
+            callback=self.camera_callback
             qos_profile=qos
         )
 
-        self.reached_sub = Subscriber(
-            self,
+        self.reached_sub = self.create_subscription(
             WaypointReached,
-            '/mavros/mission/reached',
+            topic='/mavros/mission/reached',
+            callback=self.handle_reached
             qos_profile=qos
         )
-
-        self.time_sync = ApproximateTimeSynchronizer(
-            [self.image_sub, self.reached_sub],
-            2,
-            0.5
-        )
-
-        self.time_sync.registerCallback(self.camera_callback)
 
         self.mission_state_sub = self.create_subscription(
             msg_type=String,
@@ -113,6 +106,8 @@ class VisionNode(Node):
         self.state = ""
         self.last_enqueue = self.get_clock().now()
 
+        self.latest_wp = None
+
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
@@ -126,15 +121,22 @@ class VisionNode(Node):
                 
         self.prev_state = msg.data
 
-    def camera_callback(self, msg_image, msg_reached):
-        now = self.get_clock().now()
-        idx = msg_reached.wp_seq
-        self.get_logger().info(f"in camera_callback: {idx}")
-        if self.state != 'scan' or idx == self.num_scan_wp-1:
+    def handle_reached(self, msg):
+        self.latest_wp = msg.wp_seq
+
+    def camera_callback(self, msg):
+        # now = self.get_clock().now()
+
+        if self.state != 'scan' or self.latest_wq == None:
             return
-        self.get_logger().info(f"Adding to queue {(now - self.last_enqueue).nanoseconds}")
-        self.queue.put(msg_image)
-        self.last_enqueue = now
+    
+        self.get_logger().info("Waiting 1.0 seconds before adding to queue")
+        time.sleep(1.0)
+        self.get_logger().info("Adding to queue")
+        self.queue.put(msg)
+        self.latest_wp = None
+        # self.get_logger().info(f"Adding to queue {(now - self.last_enqueue).nanoseconds}")
+        # self.last_enqueue = now
 
     def timer_cb(self):
         # queue.unfinished_tasks is incremented on put(), 
