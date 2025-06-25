@@ -31,16 +31,16 @@ class VisionNode(Node):
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         self.image_sub = self.create_subscription(
-            type=Image, 
+            msg_type=Image, 
             topic='/image_raw',
-            callback=self.camera_callback
+            callback=self.camera_callback,
             qos_profile=qos
         )
 
         self.reached_sub = self.create_subscription(
             WaypointReached,
             topic='/mavros/mission/reached',
-            callback=self.handle_reached
+            callback=self.handle_reached,
             qos_profile=qos
         )
 
@@ -127,7 +127,7 @@ class VisionNode(Node):
     def camera_callback(self, msg):
         # now = self.get_clock().now()
 
-        if self.state != 'scan' or self.latest_wq == None:
+        if self.state != 'scan' or self.latest_wp == None:
             return
     
         self.get_logger().info("Waiting 1.0 seconds before adding to queue")
