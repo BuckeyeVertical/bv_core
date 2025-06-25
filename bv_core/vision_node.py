@@ -122,6 +122,9 @@ class VisionNode(Node):
         self.prev_state = msg.data
 
     def handle_reached(self, msg):
+        if msg.wp_seq == self.latest_wp.wp_seq:
+            return
+        self.get_logger().info("Made it to new waypoint")
         self.latest_wp = msg.wp_seq
 
     def camera_callback(self, msg):
@@ -130,8 +133,8 @@ class VisionNode(Node):
         if self.state != 'scan' or self.latest_wp == None:
             return
     
-        self.get_logger().info("Waiting 1.0 seconds before adding to queue")
-        time.sleep(1.0)
+        # self.get_logger().info("Waiting 1.0 seconds before adding to queue")
+        # time.sleep(1.0)
         self.get_logger().info("Adding to queue")
         self.queue.put(msg)
         self.latest_wp = None
