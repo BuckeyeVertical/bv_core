@@ -39,7 +39,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         mission_node,
-        vision_node,
+        # vision_node,
         filter_node,
         stitching_node
     ])

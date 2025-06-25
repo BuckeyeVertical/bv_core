@@ -52,7 +52,7 @@ class ImageStitcherNode(Node):
         self.pic_counter = 0
 
         self.declare_parameter('image_topic', '/image_raw')
-        self.declare_parameter('output_path', '/tmp/stitched.jpg')
+        self.declare_parameter('output_path', '/home/bvorinnano/bv_ws/stitched_image')
         self.declare_parameter('crop', True)
         self.declare_parameter('preprocessing', False)
         self.declare_parameter('stitch_interval_sec', 5.0)

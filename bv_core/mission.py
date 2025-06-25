@@ -14,6 +14,7 @@ from std_msgs.msg import String, Int8
 
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
+import time
 
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
@@ -141,6 +142,7 @@ class MissionRunner(Node):
 
     def handle_queue_state(self, msg: Int8):
         self.queue_state = msg.data
+        self.get_logger().info(f"in callback for {self.queue_state}")
 
     def timer_callback(self):
         msg = String()

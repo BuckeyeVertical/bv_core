@@ -2,7 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Int8
@@ -66,8 +67,12 @@ class VisionNode(Node):
             qos_profile=objs_pub_qos
         )
 
-        qos_queue = QoSProfile(depth=10)
-        qos_queue.reliability = ReliabilityPolicy.RELIABLE
+        qos_queue = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
 
         self.queue_state_pub = self.create_publisher(
             msg_type=Int8,
@@ -92,6 +97,7 @@ class VisionNode(Node):
         self.batch_size = cfg.get('batch_size', 4)
         self.det_thresh = cfg.get('detection_threshold', 0.5)
         self.resolution = cfg.get('resolution', 560)
+        self.num_scan_wp = cfg.get('num_scan_wp', 3)
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
@@ -123,7 +129,8 @@ class VisionNode(Node):
     def camera_callback(self, msg_image, msg_reached):
         now = self.get_clock().now()
         self.get_logger().info("in camera_callback")
-        if self.state != 'scan':
+        idx = msg_reached.wp_seq
+        if self.state != 'scan' or idx == self.num_scan_wp-1:
             return
         self.get_logger().info(f"Adding to que {(now - self.last_enqueue).nanoseconds}")
         self.queue.put(msg_image)
