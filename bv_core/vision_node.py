@@ -194,13 +194,9 @@ class VisionNode(Node):
 def main(args=None):
     # Before running, ensure PX4’s yaw mode is set:
     # ros2 param set /px4 MPC_YAW_MODE 0
-    rclpy.init(args=args)
+    rclpy.init()
     node = VisionNode()
-
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(node)
-    executor.spin()
-    
+    rclpy.spin(node)
     rclpy.shutdown()
 
 

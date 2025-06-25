@@ -113,7 +113,7 @@ class MissionRunner(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=5
         )
         
         self.mission_state_pub = self.create_publisher(
@@ -135,19 +135,25 @@ class MissionRunner(Node):
         self.deliver_index = 0
         self.in_auto_mission = False
         self.queue_state = 0
+        self.maybe_deliver = False
 
         # Kick off
         self.start_lap()
         self.timer = self.create_timer(0.5, self.timer_callback)
 
     def handle_queue_state(self, msg: Int8):
+        if msg.data == 0:
+            self.get_logger().info("Waiting for processing to complete")
         self.queue_state = msg.data
-        self.get_logger().info(f"in callback for {self.queue_state}")
 
     def timer_callback(self):
         msg = String()
         msg.data = self.state
         self.mission_state_pub.publish(msg)
+
+        if self.queue_state == 0 and self.maybe_deliver:
+            self.get_logger().info("Starting deliver")
+            self.start_deliver()
 
     def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
         wp_list = []
@@ -225,10 +231,7 @@ class MissionRunner(Node):
         elif self.state == 'stitching':
             self.start_scan()
         elif self.state == 'scan':
-            while self.queue_state == 0:
-                self.get_logger().info("Waiting for processing to complete")
-                time.sleep(0.5)
-            self.start_deliver()
+            self.maybe_deliver = True
         elif self.state == 'deliver':
             self.deliver_index += 1
             self.lap_count += 1
