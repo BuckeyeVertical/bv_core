@@ -22,7 +22,7 @@ export PX4_HOME_LAT=40.0985384      # desired starting latitude
 export PX4_HOME_LON=-83.1932462
 
 To run mission:
-ros2 run bv_core mission
+ros2 run bv_core mission_node
 
 ros2 run gscam2 gscam_main
 
