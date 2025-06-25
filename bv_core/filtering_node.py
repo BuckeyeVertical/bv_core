@@ -172,7 +172,7 @@ class FilteringNode(Node):
         )
 
         # store for later clustering once mission state changes
-        self.global_dets = detections_global
+        self.global_dets.extend(detections_global)
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
@@ -181,7 +181,7 @@ class FilteringNode(Node):
 
             # once we leave the 'scan' state, cluster what we've seen
             if self.prev_state == 'scan':
-                self.obj_locs = self.localizer.estimate_locations(self.global_dets)
+                self.obj_locs = self.localizer.estimate_locations_v2(self.global_dets)
 
                 with open('finalized_object_locations.txt', 'w') as f:
                         print("Writing lat lon")

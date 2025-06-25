@@ -15,6 +15,7 @@ from std_msgs.msg import String, Int8
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 import time
+from bv_msgs.srv import GetObjectLocations
 
 # MAVLink constants
 MAV_CMD_NAV_WAYPOINT          = 16
@@ -71,6 +72,14 @@ class MissionRunner(Node):
         self.get_logger().info(
             f'Home set → lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}'
         )
+
+        self.cli_get_locs = self.create_client(
+            GetObjectLocations,
+            'get_object_locations'
+        )
+
+        while not self.cli_get_locs.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for get_object_locations service…')
 
         # MAVROS service clients
         self.cli_push  = self.create_client(WaypointPush, '/mavros/mission/push')
@@ -140,6 +149,7 @@ class MissionRunner(Node):
         # Kick off
         self.start_lap()
         self.timer = self.create_timer(0.5, self.timer_callback)
+        self.awaiting_object_locs = True
 
     def handle_queue_state(self, msg: Int8):
         if msg.data == 0:
@@ -154,7 +164,8 @@ class MissionRunner(Node):
         if self.queue_state == 1 and self.maybe_deliver:
             self.get_logger().info("Starting deliver")
             self.start_deliver()
-            self.maybe_deliver = False
+            if self.state == 'deliver':
+                self.maybe_deliver = False
 
     def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
         wp_list = []
@@ -212,15 +223,22 @@ class MissionRunner(Node):
         self.push_mission()
 
     def start_deliver(self):
-        self.state = 'deliver'
         self.transition_in_progress = True
         self.desired_speed = self.lap_velocity
-        idx = self.deliver_index
-        lat, lon, alt = self.deliver_points[idx]
-        self.get_logger().info(f'Delivering to point {idx+1}…')
-        self.wp_list = self.build_waypoints([(lat, lon, alt)], self.deliver_tolerance)
-        self.expected_final_wp = 0
-        self.push_mission()
+
+        if self.awaiting_object_locs:
+            self.get_logger().info("Waiting for object locations")
+            self.deliver_points = []
+
+            self.request_object_locations()
+        else:
+            idx = self.deliver_index
+            lat, lon, alt = self.deliver_points[idx]
+            self.get_logger().info(f'Delivering to point {idx+1}…')
+            self.wp_list = self.build_waypoints([(lat, lon, alt)], self.deliver_tolerance)
+            self.expected_final_wp = 0
+            self.push_mission()
+            self.state = 'deliver'
 
     def return_to_rtl(self):
         self.state = 'return'
@@ -230,6 +248,40 @@ class MissionRunner(Node):
         req.base_mode = 0
         req.custom_mode = 'AUTO.RTL'
         self.cli_mode.call_async(req).add_done_callback(self.mode_cb)
+
+    def request_object_locations(self):
+        req = GetObjectLocations.Request()
+        self.cli_get_locs.call_async(req).add_done_callback(self.object_locs_cb)
+
+    def object_locs_cb(self, future):
+        resp = future.result()
+        locs = resp.locations
+        if self.state != 'deliver':
+            # outside deliver state we just stash them for later
+            self.deliver_points = [
+                (loc.latitude, loc.longitude, self.home_alt or 0.0)
+                for loc in locs
+            ]
+            return
+
+        # still in deliver, waiting for non-empty
+        if not locs:
+            self.get_logger().warn('No drop points yet; retrying in 1s…')
+            # try again in one second
+            self.create_timer(1.0, lambda: self.request_object_locations())
+            return
+
+        # we finally have at least one drop point
+        self.awaiting_object_locs = False
+        self.deliver_points = [
+            (loc.latitude, loc.longitude, self.home_alt or 0.0)
+            for loc in locs
+        ]
+        self.deliver_index = 0
+
+        self.get_logger().info(
+            f'Received {len(self.deliver_points)} drop point(s) → pushing deliver mission'
+        )
 
     def handle_mission_completion(self):
         self.get_logger().info(f'State "{self.state}" complete!')
