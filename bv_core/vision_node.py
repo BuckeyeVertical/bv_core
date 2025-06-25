@@ -107,6 +107,7 @@ class VisionNode(Node):
         self.last_enqueue = self.get_clock().now()
 
         self.latest_wp = None
+        self.last_wp = None
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
@@ -122,14 +123,14 @@ class VisionNode(Node):
         self.prev_state = msg.data
 
     def handle_reached(self, msg):
-        if msg.wp_seq == self.latest_wp.wp_seq:
-            return
-        self.get_logger().info("Made it to new waypoint")
-        self.latest_wp = msg.wp_seq
+        if self.last_wp != None and msg.wp_seq != self.last_wp:
+            self.get_logger().info("Made it to new waypoint")
+            self.latest_wp = msg.wp_seq
+        
+        self.last_wp = msg.wp_seq
 
     def camera_callback(self, msg):
         # now = self.get_clock().now()
-
         if self.state != 'scan' or self.latest_wp == None:
             return
     
@@ -203,6 +204,18 @@ def main(args=None):
     node = VisionNode()
     rclpy.spin(node)
     rclpy.shutdown()
+
+# def main(args=None):
+#     # Before running, ensure PX4’s yaw mode is set:
+#     # ros2 param set /px4 MPC_YAW_MODE 0
+#     rclpy.init(args=args)
+#     node = VisionNode()
+
+#     executor = MultiThreadedExecutor(num_threads=4)
+#     executor.add_node(node)
+#     executor.spin()
+    
+#     rclpy.shutdown()
 
 
 if __name__ == '__main__':

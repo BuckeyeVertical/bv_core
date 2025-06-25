@@ -22,7 +22,7 @@ from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, Comman
 
 from datetime import datetime
 
-MAX_PICS = 3
+MAX_PICS = 2
 
 class ImageStitcherNode(Node):
     def __init__(self):
