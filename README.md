@@ -34,6 +34,59 @@ flowchart LR
 	MTR <--> PX4[(PX4 Autopilot)]
 ```
 
+	Operating modes: SITL vs. HITL vs. ROS bag
+
+	```mermaid
+	flowchart LR
+		subgraph FlightStack
+			GZ[Gazebo (gz sim)]
+			SITL[PX4 SITL]
+			HW[PX4 Hardware]
+			MAV[MAVROS]
+		end
+
+		subgraph ROS2Nodes[ROS 2 Nodes]
+			Mis[mission_node]
+			Vis[vision_node]
+			Fil[filtering_node]
+			Sti[stitching_node]
+		end
+
+		subgraph Inputs
+			Cam[gscam2 (USB camera)]
+			Bag[ROS 2 bag (play)]
+		end
+
+		%% Primary SITL simulation path (solid)
+		GZ <--> SITL
+		SITL <--> MAV
+
+		%% MAVROS provides topics to ROS 2 nodes
+		MAV --> Mis
+		MAV --> Vis
+		MAV --> Fil
+		MAV --> Sti
+
+		%% Camera/image sources
+		Cam --> Vis
+		GZ -.-> Vis
+		Bag -.-> Vis
+
+		%% Alternative flight data sources
+		HW -.-> MAV
+		Bag -.-> MAV
+
+		%% Mission state & detections flow within ROS
+		Mis --> Vis
+		Mis --> Fil
+		Mis --> Sti
+		Vis --> Fil
+	```
+
+	Legend
+	- Solid lines: typical SITL pipeline (Gazebo + PX4 SITL + MAVROS feeding ROS 2 nodes).
+	- Dotted lines: swappable alternatives (PX4 Hardware instead of SITL; ROS bag replay for /mavros/* and/or /image_raw; Gazebo camera plugin as an image source).
+
 Mission start sequence with PX4:
 
 ```mermaid
@@ -95,6 +148,9 @@ Prerequisites (typical dev machine or Jetson):
 - PX4 (SITL or hardware) connected to MAVROS.
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
+PX4 developer environment setup (Ubuntu):
+- https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html
+
 Python deps (see `requirements.txt`): supervision, rf-detr (from BV fork), colcon extensions, etc.
 
 Build and install:
@@ -142,6 +198,53 @@ Recommended PX4 yaw setting before vision/filtering tests:
 ros2 param set /px4 MPC_YAW_MODE 0
 ```
 
+## Simulation (SITL) and vehicle setup
+
+Environment and build (all terminals):
+```bash
+cd ~/bv_ws
+source /opt/ros/humble/setup.bash
+source install/local_setup.bash
+colcon build --packages-select bv_core
+```
+
+PX4 SITL (from PX4-Autopilot repo root):
+```bash
+make px4_sitl gz_x500
+```
+
+More on Gazebo (gz) simulation configuration and usage:
+- https://docs.px4.io/main/en/sim_gazebo_gz/
+
+MAVROS launch for simulation (SITL):
+```bash
+ros2 launch mavros px4.launch \
+	fcu_url:=udp://:14540@localhost:14580 \
+	gcs_url:=udp://@localhost:14555
+```
+
+MAVROS launch on vehicle (serial FCU):
+```bash
+ros2 launch mavros px4.launch \
+	fcu_url:=serial:///dev/ttyUSB0:921600 \
+	gcs_url:=udp://@0.0.0.0:14550
+```
+
+Optional: set PX4 home coordinates for SITL before launch:
+```bash
+export PX4_HOME_LAT=40.0985384
+export PX4_HOME_LON=-83.1932462
+```
+
+Start the mission stack:
+```bash
+# single launch
+ros2 launch bv_core mission.launch.py
+
+# or run only the mission node
+ros2 run bv_core mission_node
+```
+
 ## Topics, services, and states (quick reference)
 
 - Mission publishes state machine updates on `/mission_state` with values:
@@ -184,6 +287,98 @@ ros2 run bv_core test_servo
 Recording helper launch (edit topics/args as needed):
 ```bash
 ros2 launch bv_core record.launch.py
+```
+
+## Camera and gscam2 setup
+
+Disable autofocus and set focus (example for /dev/video0):
+```bash
+sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_automatic_continuous=0
+sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=0
+```
+
+Preview the camera with GStreamer (choose one):
+```bash
+gst-launch-1.0 v4l2src device=/dev/video0 io-mode=2 do-timestamp=true \
+	! image/jpeg,width=3840,height=2160,framerate=24/1 \
+	! jpegdec ! videoconvert ! autovideosink
+
+# With exposure controls
+gst-launch-1.0 \
+	v4l2src device=/dev/video0 io-mode=2 do-timestamp=true \
+		extra-controls="c,auto_exposure=2,exposure_time_absolute=250" \
+	! image/jpeg,width=3840,height=2160,framerate=24/1 \
+	! jpegdec ! videoconvert ! autovideosink
+
+v4l2-ctl -d /dev/video0 --set-ctrl=auto_exposure=2
+
+gst-launch-1.0 \
+	v4l2src device=/dev/video0 io-mode=2 do-timestamp=true \
+		extra-controls="c,auto_exposure=1,exposure_time_absolute=1250" \
+	! image/jpeg,width=3840,height=2160,framerate=24/1 \
+	! jpegdec ! videoconvert ! autovideosink
+```
+
+Run gscam2 bridge (pick a config):
+```bash
+export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
+export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert"
+ros2 run gscam2 gscam_main -p use_gst_timestamps=true
+```
+
+## Recording
+
+Record the camera and flight topics:
+```bash
+ros2 bag record -o recording \
+	/image_raw /camera_info \
+	/mavros/local_position/pose /mavros/state \
+	/mavros/global_position/global /mavros/global_position/rel_alt
+```
+
+Record detections-focused set:
+```bash
+ros2 bag record -o bag_recording_1 \
+	/obj_dets /mission_state /camera_info \
+	/mavros/local_position/pose /mavros/state \
+	/mavros/global_position/global /mavros/global_position/rel_alt
+```
+
+## Multi-terminal quickstart (example)
+
+All terminals:
+```bash
+cd ~/bv_ws
+source /opt/ros/humble/setup.bash
+source install/local_setup.bash
+```
+
+Terminal 1 — MAVROS to vehicle:
+```bash
+ros2 launch mavros px4.launch \
+	fcu_url:=serial:///dev/ttyUSB0:921600 \
+	gcs_url:=udp://@0.0.0.0:14550
+```
+
+Terminal 2 — Camera and gscam2:
+```bash
+sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_automatic_continuous=0
+sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=0
+export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert"
+ros2 run gscam2 gscam_main -p use_gst_timestamps=true
+```
+
+Terminal 3 — BV mission stack:
+```bash
+ros2 launch bv_core mission.launch.py
+```
+
+Terminal 4 — Recording:
+```bash
+ros2 bag record -o bag_recording_1 \
+	/image_raw /camera_info \
+	/mavros/local_position/pose /mavros/state \
+	/mavros/global_position/global /mavros/global_position/rel_alt
 ```
 
 ## Troubleshooting
