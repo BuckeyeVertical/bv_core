@@ -12,6 +12,8 @@ This package orchestrates an autonomous mission with PX4:
 
 ## Architecture
 
+### Nodes and interfaces
+
 High-level services (“microservices”) and data flow:
 
 - mission_node (bv_core.mission.MissionRunner)
@@ -40,84 +42,45 @@ High-level services (“microservices”) and data flow:
 
 Launch file: `launch/mission.launch.py` starts mission, vision, filtering, and stitching together.
 
-PX4 communication overview (via MAVROS):
+### Operating modes overview
 
-```mermaid
-flowchart LR
-	subgraph ROS2
-		A[mission_node]
-		V[vision_node]
-		F[filtering_node]
-		S[stitching_node]
-		MTR[MAVROS]
-	end
-	A -- WaypointPush/SetMode/Arm<br/>ParamSetV2 --> MTR
-	MTR -- /mavros/mission/reached --> A
-	MTR -- /mavros/mission/reached --> V
-	MTR -- /mavros/mission/reached --> S
-	MTR -- /mavros/global_position/*<br/>/mavros/local_position/pose<br/>/mavros/global_position/rel_alt --> F
-	A -- /mission_state --> V
-	A -- /mission_state --> F
-	A -- /mission_state --> S
-	V -- /obj_dets --> F
-	F -- get_object_locations (srv) --> A
-	MTR <--> PX4[(PX4 Autopilot)]
-```
+Two inputs feed the ROS 2 nodes: flight data (/mavros/*) and images (/image_raw). The mode you choose controls where those inputs come from.
 
-Operating modes: SITL vs. HITL vs. ROS bag
-
+SITL (simulation) — Gazebo + PX4 SITL + MAVROS
 ```mermaid
 graph LR
-	subgraph FlightStack
-		GZ[Gazebo gz_sim]
-		SITL[PX4_SITL]
-		HW[PX4_Hardware]
-		MAV[MAVROS]
-	end
-
-	subgraph ROS2Nodes
-		Mis[mission_node]
-		Vis[vision_node]
-		Fil[filtering_node]
-		Sti[stitching_node]
-	end
-
-	subgraph Inputs
-		Cam[gscam2 USB_camera]
-		Bag[ROS2_bag_play]
-	end
-
-	%% Primary SITL simulation path (solid)
-	GZ <--> SITL
-	SITL <--> MAV
-
-	%% MAVROS provides topics to ROS 2 nodes
-	MAV --> Mis
-	MAV --> Vis
-	MAV --> Fil
-	MAV --> Sti
-
-	%% Camera/image sources
-	Cam --> Vis
-	GZ -.-> Vis
-	Bag -.-> Vis
-
-	%% Alternative flight data sources
-	HW -.-> MAV
-	Bag -.-> MAV
-
-	%% Mission state & detections flow within ROS
-	Mis --> Vis
-	Mis --> Fil
-	Mis --> Sti
-	Vis --> Fil
+	GZ[Gazebo gz_sim] --> PX4[PX4_SITL]
+	PX4 --> MAV[MAVROS]
+	MAV --> Mission[mission_node]
+	MAV --> Vision[vision_node]
+	MAV --> Filtering[filtering_node]
+	MAV --> Stitching[stitching_node]
 ```
 
-Legend
-- Solid lines: typical SITL pipeline (Gazebo + PX4 SITL + MAVROS feeding ROS 2 nodes).
-- Dotted lines: swappable alternatives (PX4 Hardware instead of SITL; ROS bag replay for /mavros/* and/or /image_raw; Gazebo camera plugin as an image source).
+HITL/On-vehicle — PX4 hardware + MAVROS
+```mermaid
+graph LR
+	HW[PX4_Hardware] --> MAV[MAVROS]
+	MAV --> Mission[mission_node]
+	MAV --> Vision[vision_node]
+	MAV --> Filtering[filtering_node]
+	MAV --> Stitching[stitching_node]
+```
 
-Mission start sequence with PX4:
+ROS bag playback — offline analysis/replay
+```mermaid
+graph LR
+	Bag[ROS2_bag_play] --> Mission[mission_node]
+	Bag --> Vision[vision_node]
+	Bag --> Filtering[filtering_node]
+	Bag --> Stitching[stitching_node]
+```
+
+Notes
+- In SITL/HITL, images can come from a real camera via gscam2, or from a simulator camera plugin.
+- In ROS bag mode, you can replay either full flight+image topics or just images while running MAVROS live.
+
+### Mission flow (PX4 + MAVROS + ROS 2)
 
 ```mermaid
 sequenceDiagram
@@ -127,7 +90,7 @@ sequenceDiagram
 	participant Vision
 	participant Filtering
 	participant Stitching
-		Note over Mission,MAVROS: Mission start
+	Note over Mission,MAVROS: Mission start
 	Mission->>MAVROS: /mavros/mission/push (WaypointPush)
 	MAVROS->>PX4: MAVLink MISSION_SET
 	Mission->>MAVROS: /mavros/cmd/arming (CommandBool)
@@ -139,12 +102,14 @@ sequenceDiagram
 	Mission-->>Vision: /mission_state (lap/stitching/scan/...)
 	Mission-->>Filtering: /mission_state
 	Mission-->>Stitching: /mission_state
+		Note over MAVROS,Filtering: Proprioception (global/local position, altitude)
+	Filtering-->>Mission: get_object_locations (service)
 ```
 
 ## Setup
 
-Prerequisites (typical dev machine or Jetson):
-- ROS 2 (e.g., Humble) with MAVROS installed and GeographicLib datasets.
+Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
+- ROS 2 (e.g., Humble on 22.04) with MAVROS installed and GeographicLib datasets.
 - PX4 (SITL or hardware) connected to MAVROS.
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
