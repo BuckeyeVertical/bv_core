@@ -15,15 +15,22 @@ PX4 communication overview (via MAVROS):
 ```mermaid
 flowchart LR
 	subgraph ROS2
-		A[mission_node] -- WaypointPush/SetMode/Arm \n ParamSetV2 --> MTR[MAVROS]
-		MTR -. topics .- A
-		V[vision_node] -- /mavros/mission/reached --> V
-		F[filtering_node] -- /mavros/global_position/* \n /mavros/local_position/pose --> F
-		S[stitching_node] -- /mavros/mission/reached --> S
-		A -- /mission_state --> V
-		V -- /obj_dets --> F
-		F -- get_object_locations (srv) --> A
+		A[mission_node]
+		V[vision_node]
+		F[filtering_node]
+		S[stitching_node]
+		MTR[MAVROS]
 	end
+	A -- WaypointPush/SetMode/Arm<br/>ParamSetV2 --> MTR
+	MTR -- /mavros/mission/reached --> A
+	MTR -- /mavros/mission/reached --> V
+	MTR -- /mavros/mission/reached --> S
+	MTR -- /mavros/global_position/*<br/>/mavros/local_position/pose<br/>/mavros/global_position/rel_alt --> F
+	A -- /mission_state --> V
+	A -- /mission_state --> F
+	A -- /mission_state --> S
+	V -- /obj_dets --> F
+	F -- get_object_locations (srv) --> A
 	MTR <--> PX4[(PX4 Autopilot)]
 ```
 
@@ -31,7 +38,13 @@ Mission start sequence with PX4:
 
 ```mermaid
 sequenceDiagram
-	autonote over Mission,MAVROS,PX4: Mission start
+	participant Mission
+	participant MAVROS
+	participant PX4
+	participant Vision
+	participant Filtering
+	participant Stitching
+	Note over Mission,MAVROS,PX4: Mission start
 	Mission->>MAVROS: /mavros/mission/push (WaypointPush)
 	MAVROS->>PX4: MAVLink MISSION_SET
 	Mission->>MAVROS: /mavros/cmd/arming (CommandBool)
@@ -40,7 +53,9 @@ sequenceDiagram
 	MAVROS->>PX4: MAVLink SET_MODE
 	PX4-->>MAVROS: MISSION_ITEM_REACHED (N)
 	MAVROS-->>Mission: /mavros/mission/reached (N)
-	Mission-->>Vision/Filtering/Stitching: /mission_state (lap/scan/deliver/...)
+	Mission-->>Vision: /mission_state (lap/stitching/scan/...)
+	Mission-->>Filtering: /mission_state
+	Mission-->>Stitching: /mission_state
 ```
 
 ## Architecture
