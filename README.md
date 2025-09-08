@@ -44,7 +44,7 @@ sequenceDiagram
 	participant Vision
 	participant Filtering
 	participant Stitching
-	Note over Mission,MAVROS,PX4: Mission start
+		Note over Mission,MAVROS: Mission start
 	Mission->>MAVROS: /mavros/mission/push (WaypointPush)
 	MAVROS->>PX4: MAVLink MISSION_SET
 	Mission->>MAVROS: /mavros/cmd/arming (CommandBool)
