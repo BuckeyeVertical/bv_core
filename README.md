@@ -109,7 +109,7 @@ sequenceDiagram
 ## Setup
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
-- ROS 2 Humble
+- [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
 - [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
 - [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
@@ -123,6 +123,7 @@ Install mavros:
 ```bash
 sudo apt install ros-humble-mavros
 ```
+*Note: If MAVROS installation doesn't work, you can build it from source by cloning the MAVROS package into your ros workspace.*
 
 Build and install:
 1) Source your ROS 2 and MAVROS environment.
@@ -163,11 +164,13 @@ ros2 run bv_core vision_node
 ros2 run bv_core filtering_node
 ros2 run bv_core stitching_node
 ```
+Download a rosbag from the [onedrive folder](https://buckeyemailosu.sharepoint.com/:f:/s/BuckeyeVerticaltheOhioStateUniversity/EjHddej_GGVGv54oig7Kb9QBrhaEMFVCkAXSl5aEFiD1Lw?e=GxnkYa)
 
-Recommended PX4 yaw setting before vision/filtering tests:
 ```bash
-ros2 param set /px4 MPC_YAW_MODE 0
+ros2 bag play <bag_path>
 ```
+
+[*Learn more about ros bags.*](https://docs.ros.org/en/foxy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html)
 
 ## Simulation (SITL) and vehicle setup
 
