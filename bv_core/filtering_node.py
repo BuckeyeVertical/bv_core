@@ -19,6 +19,8 @@ from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
+from collections import deque
+from rclpy.time import Time
 
 class FilteringNode(Node):
     def __init__(self):
@@ -67,6 +69,9 @@ class FilteringNode(Node):
             qos
         )
 
+        self.gps_buffer  = deque(maxlen=200)
+        self.pose_buffer = deque(maxlen=200)
+
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
         self.obj_locs = []      # list of clustered (lat, lon, class_id)
@@ -102,42 +107,55 @@ class FilteringNode(Node):
             dist_coeffs=dist_coeffs
         )
 
-        self.global_pos = None
         self.last_gps = None
         self.last_rel_alt = None
-        self.drone_orientation = None
-
-    def test_callback(self, msg):
-        self.get_logger().info("Got test message")
 
     def handle_gps(self, msg: NavSatFix):
-        self.last_gps = msg
-        self.maybe_global_pos()
+        self.gps_buffer.append(msg)
 
     def handle_rel_alt(self, msg: Float64):
         self.last_rel_alt = msg
-        self.maybe_global_pos()
 
     def handle_local_pose(self, msg: PoseStamped):
-        self.drone_orientation = (msg.pose.orientation.x, 
-                                  msg.pose.orientation.y,
-                                  msg.pose.orientation.z,
-                                  msg.pose.orientation.w)
-
-    def maybe_global_pos(self):
-        if self.last_gps != None and self.last_rel_alt != None:
-            self.global_pos = (
-                self.last_gps.latitude, 
-                self.last_gps.longitude, 
-                self.last_rel_alt.data
-                )
-            self.last_gps = None
-            self.last_rel_alt = None
+        self.pose_buffer.append(msg)
 
     def handle_detections(self, msg: ObjectDetections):
-        if self.global_pos == None or self.drone_orientation == None:
-            self.get_logger().info("global pos or orientation is None")
+        if len(self.pose_buffer) == 0 or len(self.gps_buffer) == 0 or self.last_rel_alt == None:
+            self.get_logger().info("Waiting for sensor data")
             return
+        
+        # convert detection stamp into a float or ns
+        t_det = Time.from_msg(msg.header.stamp).nanoseconds
+
+        # find the GPS msg whose stamp is closest
+        best_gps = min(
+            self.gps_buffer,
+            key=lambda m: abs(Time.from_msg(m.header.stamp).nanoseconds - t_det),
+            default=None
+        )
+        # same for pose
+        best_pose = min(
+            self.pose_buffer,
+            key=lambda m: abs(Time.from_msg(m.header.stamp).nanoseconds - t_det),
+            default=None
+        )
+
+        if not best_gps or not best_pose:
+            self.get_logger().warn("No matching GPS or Pose yet.")
+            return
+        
+        drone_pose = (
+            best_gps.latitude,
+            best_gps.longitude,
+            self.last_rel_alt.data
+        )
+
+        drone_orientation = (
+            best_pose.pose.orientation.x,
+            best_pose.pose.orientation.y,
+            best_pose.pose.orientation.z,
+            best_pose.pose.orientation.w
+        )
         
         # msg.dets is a sequence of Vectors: x, y, class_id
         pixel_centers = [
@@ -148,13 +166,13 @@ class FilteringNode(Node):
         # convert to global lat/lon
         detections_global = self.localizer.get_lat_lon(
             pixel_centers,
-            drone_global_pos=self.global_pos,
-            drone_orientation=self.drone_orientation
+            drone_global_pos=drone_pose,
+            drone_orientation=drone_orientation
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
         # store for later clustering once mission state changes
-        self.global_dets = detections_global
+        self.global_dets.extend(detections_global)
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
@@ -163,7 +181,7 @@ class FilteringNode(Node):
 
             # once we leave the 'scan' state, cluster what we've seen
             if self.prev_state == 'scan':
-                self.obj_locs = self.localizer.estimate_locations(self.global_dets)
+                self.obj_locs = self.localizer.estimate_locations_v2(self.global_dets)
 
                 with open('finalized_object_locations.txt', 'w') as f:
                         print("Writing lat lon")

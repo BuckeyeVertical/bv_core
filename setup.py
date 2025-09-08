@@ -26,7 +26,8 @@ setup(
             'mission_node = bv_core.mission:main',
             'vision_node = bv_core.vision_node:main',
             'filtering_node = bv_core.filtering_node:main',
-            'stitching_node = bv_core.stitching:main'
+            'stitching_node = bv_core.stitching:main',
+            'test_servo = bv_core.test_servo:main'
         ],
     },
 )

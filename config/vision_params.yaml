@@ -3,3 +3,5 @@ detection_threshold: 0.5
 resolution: 560
 overlap: 100
 capture_interval: 1.5e9
+estimated_camera_latency: 0.5 # Determines how long you need to pause after stopping before capturing frame
+num_scan_wp: 3

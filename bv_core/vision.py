@@ -20,6 +20,11 @@ import rclpy
 import rclpy.logging
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from collections import defaultdict, Counter
+
+# import matplotlib
+# matplotlib.use('Agg')
+# import matplotlib.pyplot as plt
 
 class Localizer:
     def __init__(self,
@@ -49,7 +54,18 @@ class Localizer:
         with open(filtering_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
 
-        self.q_mount = cfg.get('camera_orientation', [0.0]*4)
+        self.camera_orientation = cfg.get('camera_orientation', [0.0]*4)
+
+        # self.debug = False
+
+        # if self.debug:
+        #     # 1) set up interactive figure + timer
+        #     plt.ion()
+        #     self.fig, self.ax = plt.subplots()
+            
+        #     # placeholders for latest DBSCAN debug
+        #     self._debug_coords = None
+        #     self._debug_labels = None
 
     def get_lat_lon(self,
                 pixel_centers: list,
@@ -88,7 +104,7 @@ class Localizer:
         # (optionally normalize to unit length):
         dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
 
-        r_mount = R.from_quat(self.q_mount)
+        r_mount = R.from_euler('xyz', self.camera_orientation)
         r_drone = R.from_quat(drone_orientation, scalar_first=False)
         r_total = r_drone * r_mount
 
@@ -122,7 +138,43 @@ class Localizer:
         rclpy.logging.get_logger("filtering_node").info(f"dir_enu: {dir_enu}")
         rclpy.logging.get_logger("filtering_node").info(f"t: {t}, → E,N: {east_offset}, {north_offset}")
 
-        rclpy.logging.get_logger("filtering_node").info(f"Results: {results}")
+        for res in results:
+            rclpy.logging.get_logger("filtering_node").info(f"Result: {res[0]}, {res[1]}, {COCO_CLASSES[int(res[2])]}")
+
+        return results
+    
+    def estimate_locations_v2(self,
+                              detections: list,
+                              max_objects: int = 4) -> list:
+        """
+        Simple per-class averaging of raw detections.
+
+        Args:
+            detections: list of (lat, lon, class_id)
+            max_objects: maximum number of classes to keep,
+                         chosen by descending detection count.
+        Returns:
+            List of (avg_lat, avg_lon, class_id), sorted by count desc.
+        """
+        if not detections:
+            return []
+
+        # 1) Group coords by class
+        coords_by_cls = defaultdict(list)
+        for lat, lon, cls in detections:
+            coords_by_cls[cls].append((lat, lon))
+
+        # 2) Count detections per class and pick top max_objects
+        cls_counts = Counter(cls for _, _, cls in detections)
+        top_classes = [cls for cls, _ in cls_counts.most_common(max_objects)]
+
+        # 3) Average coords for each selected class
+        results = []
+        for cls in top_classes:
+            pts = coords_by_cls[cls]
+            avg_lat = sum(lat for lat, _ in pts) / len(pts)
+            avg_lon = sum(lon for _, lon in pts) / len(pts)
+            results.append((avg_lat, avg_lon, cls))
 
         return results
 
@@ -136,14 +188,24 @@ class Localizer:
         Returns:
             List of (lat, lon, class_id) cluster centers
         """
+        print(f"detections: {detections}")
         if not detections:
             return []
 
         coords = np.array([[lat, lon] for lat, lon, _ in detections])
         classes = [cls for _, _, cls in detections]
 
-        clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit(coords)
+        earth_radius = 6371000.0                          # meters
+        desired_radius_m = 10.0                           # e.g. 10 m clustering
+        eps = desired_radius_m / earth_radius             # in radians
+
+        clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric='haversine').fit(coords)
         labels = clustering.labels_
+
+        print(f"Labels: {labels}")
+
+        self._debug_coords = coords
+        self._debug_labels = labels
 
         cluster_centers = []
         for lbl in set(labels) - {-1}:
@@ -155,7 +217,56 @@ class Localizer:
             center_lat, center_lon = pts.mean(axis=0)
             cluster_centers.append((center_lat, center_lon, class_id))
 
+        # if self.debug:
+        #     self.plot_clusters()
+
         return cluster_centers
+    
+    def plot_clusters(self):
+        if self._debug_coords is None:
+            return
+
+        self.ax.clear()
+        lats = self._debug_coords[:,0]
+        lons = self._debug_coords[:,1]
+
+        # scatter noise in gray
+        noise = (self._debug_labels == -1)
+        if noise.any():
+            self.ax.scatter(lons[noise], lats[noise],
+                            c='lightgray', label='noise')
+
+        # scatter clusters with distinct colors
+        for lbl in set(self._debug_labels):
+            if lbl == -1: continue
+            mask = self._debug_labels == lbl
+            self.ax.scatter(lons[mask], lats[mask],
+                            label=f'cluster {lbl}')
+
+        # plot cluster centers as red X’s
+        for lbl in set(self._debug_labels) - {-1}:
+            mask = self._debug_labels == lbl
+            center = self._debug_coords[mask].mean(axis=0)
+            self.ax.scatter(center[1], center[0],
+                            marker='x', s=100, c='red')
+
+        # ----- ZOOM AXES TO DATA RANGE -----
+        lat_min, lat_max = lats.min(), lats.max()
+        lon_min, lon_max = lons.min(), lons.max()
+        # Add 10% padding on each side
+        lat_pad = (lat_max - lat_min) * 0.1 or 0.0001
+        lon_pad = (lon_max - lon_min) * 0.1 or 0.0001
+        self.ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
+        self.ax.set_ylim(lat_min - lat_pad, lat_max + lat_pad)
+        self.ax.set_aspect('equal', adjustable='box')
+        # -----------------------------------
+
+        self.ax.set_xlabel('Longitude')
+        self.ax.set_ylabel('Latitude')
+        self.ax.set_title('DBSCAN Clusters (latest)')
+        self.ax.legend(loc='upper right', fontsize='small')
+        self.fig.canvas.draw()
+        self.fig.savefig('debug.png')
 
 class Detector():
     def __init__(self, batch_size=16, resolution=728):

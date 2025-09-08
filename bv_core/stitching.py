@@ -22,7 +22,7 @@ from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, Comman
 
 from datetime import datetime
 
-MAX_PICS = 3
+MAX_PICS = 2
 
 class ImageStitcherNode(Node):
     def __init__(self):
@@ -52,7 +52,7 @@ class ImageStitcherNode(Node):
         self.pic_counter = 0
 
         self.declare_parameter('image_topic', '/image_raw')
-        self.declare_parameter('output_path', '/tmp/stitched.jpg')
+        self.declare_parameter('output_path', '/home/bvorinnano/bv_ws/stitched_image')
         self.declare_parameter('crop', True)
         self.declare_parameter('preprocessing', False)
         self.declare_parameter('stitch_interval_sec', 5.0)
@@ -63,8 +63,6 @@ class ImageStitcherNode(Node):
         self.crop = self.get_parameter('crop').get_parameter_value().bool_value
         self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
         self.stitch_interval_sec = self.get_parameter('stitch_interval_sec').get_parameter_value().double_value
-
-        
 
         # Subscription & Timer
         self.image_sub = self.create_subscription(
@@ -91,9 +89,6 @@ class ImageStitcherNode(Node):
         )
 
         self.stitch_timer = self.create_timer(self.stitch_interval_sec, self.timer_callback)
-
-        
-       
 
         # Helpers & buffer
         self.bridge = CvBridge()
@@ -177,8 +172,6 @@ class ImageStitcherNode(Node):
         else: 
             self.reached = False
             self.get_logger().info(f'Reached waypoint, NOT in stitching')
-
-
 
     def timer_callback(self):
         
