@@ -34,58 +34,58 @@ flowchart LR
 	MTR <--> PX4[(PX4 Autopilot)]
 ```
 
-	Operating modes: SITL vs. HITL vs. ROS bag
+Operating modes: SITL vs. HITL vs. ROS bag
 
-	```mermaid
-	flowchart LR
-		subgraph FlightStack
-			GZ[Gazebo (gz sim)]
-			SITL[PX4 SITL]
-			HW[PX4 Hardware]
-			MAV[MAVROS]
-		end
+```mermaid
+flowchart LR
+	subgraph FlightStack
+		GZ[Gazebo (gz sim)]
+		SITL[PX4 SITL]
+		HW[PX4 Hardware]
+		MAV[MAVROS]
+	end
 
-		subgraph ROS2Nodes[ROS 2 Nodes]
-			Mis[mission_node]
-			Vis[vision_node]
-			Fil[filtering_node]
-			Sti[stitching_node]
-		end
+	subgraph ROS2Nodes[ROS 2 Nodes]
+		Mis[mission_node]
+		Vis[vision_node]
+		Fil[filtering_node]
+		Sti[stitching_node]
+	end
 
-		subgraph Inputs
-			Cam[gscam2 (USB camera)]
-			Bag[ROS 2 bag (play)]
-		end
+	subgraph Inputs
+		Cam[gscam2 (USB camera)]
+		Bag[ROS 2 bag (play)]
+	end
 
-		%% Primary SITL simulation path (solid)
-		GZ <--> SITL
-		SITL <--> MAV
+	%% Primary SITL simulation path (solid)
+	GZ <--> SITL
+	SITL <--> MAV
 
-		%% MAVROS provides topics to ROS 2 nodes
-		MAV --> Mis
-		MAV --> Vis
-		MAV --> Fil
-		MAV --> Sti
+	%% MAVROS provides topics to ROS 2 nodes
+	MAV --> Mis
+	MAV --> Vis
+	MAV --> Fil
+	MAV --> Sti
 
-		%% Camera/image sources
-		Cam --> Vis
-		GZ -.-> Vis
-		Bag -.-> Vis
+	%% Camera/image sources
+	Cam --> Vis
+	GZ -.-> Vis
+	Bag -.-> Vis
 
-		%% Alternative flight data sources
-		HW -.-> MAV
-		Bag -.-> MAV
+	%% Alternative flight data sources
+	HW -.-> MAV
+	Bag -.-> MAV
 
-		%% Mission state & detections flow within ROS
-		Mis --> Vis
-		Mis --> Fil
-		Mis --> Sti
-		Vis --> Fil
-	```
+	%% Mission state & detections flow within ROS
+	Mis --> Vis
+	Mis --> Fil
+	Mis --> Sti
+	Vis --> Fil
+```
 
-	Legend
-	- Solid lines: typical SITL pipeline (Gazebo + PX4 SITL + MAVROS feeding ROS 2 nodes).
-	- Dotted lines: swappable alternatives (PX4 Hardware instead of SITL; ROS bag replay for /mavros/* and/or /image_raw; Gazebo camera plugin as an image source).
+Legend
+- Solid lines: typical SITL pipeline (Gazebo + PX4 SITL + MAVROS feeding ROS 2 nodes).
+- Dotted lines: swappable alternatives (PX4 Hardware instead of SITL; ROS bag replay for /mavros/* and/or /image_raw; Gazebo camera plugin as an image source).
 
 Mission start sequence with PX4:
 
