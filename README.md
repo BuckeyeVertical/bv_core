@@ -37,15 +37,15 @@ flowchart LR
 Operating modes: SITL vs. HITL vs. ROS bag
 
 ```mermaid
-flowchart LR
+graph LR
 	subgraph FlightStack
-		GZ[Gazebo (gz sim)]
-		SITL[PX4 SITL]
-		HW[PX4 Hardware]
+		GZ[Gazebo gz_sim]
+		SITL[PX4_SITL]
+		HW[PX4_Hardware]
 		MAV[MAVROS]
 	end
 
-	subgraph ROS2Nodes[ROS 2 Nodes]
+	subgraph ROS2Nodes
 		Mis[mission_node]
 		Vis[vision_node]
 		Fil[filtering_node]
@@ -53,8 +53,8 @@ flowchart LR
 	end
 
 	subgraph Inputs
-		Cam[gscam2 (USB camera)]
-		Bag[ROS 2 bag (play)]
+		Cam[gscam2 USB_camera]
+		Bag[ROS2_bag_play]
 	end
 
 	%% Primary SITL simulation path (solid)
