@@ -58,10 +58,11 @@ scan_points:
 deliver_points:
   - [38.3876112, -76.4190542, *TAKEOFF]
 
+
 # Other params
 Lap_velocity: 5.0
 Lap_tolerance: 2.0
-Scan_velocity: 5.0
+Scan_velocity: 2.5
 Scan_tolerance: 1.0
 Stitch_velocity: 5.0
 Stitch_tolerance: 1.0

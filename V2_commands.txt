@@ -4,6 +4,8 @@ Terminal 1
 __________
 source ~/bv_ws/.venv/bin/activate
 
+cd bv_ws
+
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
@@ -29,6 +31,21 @@ sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=0
 
 gst-launch-1.0 v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert ! autovideosink
 
+##New ones
+gst-launch-1.0 \
+  v4l2src device=/dev/video0 io-mode=2 do-timestamp=true \
+    extra-controls="c,auto_exposure=2,exposure_time_absolute=250" \
+  ! image/jpeg,width=3840,height=2160,framerate=24/1 \
+  ! jpegdec \
+  ! videoconvert \
+  ! autovideosink
+
+
+v4l2-ctl -d /dev/video0 --set-ctrl=auto_exposure=2
+
+gst-launch-1.0   v4l2src device=/dev/video0 io-mode=2 do-timestamp=true     extra-controls="c,auto_exposure=1,exposure_time_absolute=1250"   ! image/jpeg,width=3840,height=2160,framerate=24/1   ! jpegdec   ! videoconvert   ! autovideosink
+
+
 export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
 
 export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert"
@@ -40,37 +57,21 @@ Terminal 3
 __________
 source ~/bv_ws/.venv/bin/activate
 
+cd bv_ws
+
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
 
-ros2 run bv_core mission
+ros2 launch bv_core mission.launch.py
 
 
 Terminal 4
 __________
-source ~/bv_ws/.venv/bin/activate
+ssource ~/bv_ws/.venv/bin/activate
 
-source /opt/ros/humble/setup.bash
+cd bv_ws
 
-source install/local_setup.bash
-
-ros2 run bv_core stitching
-
-
-Terminal 5
-__________
-source ~/bv_ws/.venv/bin/activate
-
-source /opt/ros/humble/setup.bash
-
-source install/local_setup.bash
-
-ros2 run bv_core vision_node
-
-
-Terminal 6
-__________
 source /opt/ros/humble/setup.bash
 
 source install/local_setup.bash
