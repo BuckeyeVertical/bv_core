@@ -8,7 +8,37 @@ This package orchestrates an autonomous mission with PX4:
 - Mission node pushes waypoints, arms, and switches to AUTO.MISSION.
 - Vision node captures frames during scan legs, runs RF-DETR, and publishes detections.
 - Filtering node fuses detections with pose/GPS to estimate object lat/lon and serves them to Mission.
-- Stitching node captures images at waypoints to build panoramas.
+- Stitching node captures images at waypoints to build an aerial map.
+
+## Architecture
+
+High-level services (“microservices”) and data flow:
+
+- mission_node (bv_core.mission.MissionRunner)
+	- Publishes: `/mission_state` (std_msgs/String)
+	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/queue_state` (std_msgs/Int8)
+	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `get_object_locations` (bv_msgs/srv/GetObjectLocations)
+	- Role: Mission FSM (lap → stitching → scan → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params.
+
+- vision_node (bv_core.vision_node.VisionNode)
+	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
+	- Subscribes: `/image_raw` (sensor_msgs/Image), `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
+	- Role: On scan state, enqueue frames at each reach event, infer with RF-DETR in batches, annotate/save frames, publish detections.
+
+- filtering_node (bv_core.filtering_node.FilteringNode)
+	- Provides: `get_object_locations` (bv_msgs/srv/GetObjectLocations)
+	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String)
+	- Role: Time-align detections with pose/GPS, project detections to lat/lon using camera intrinsics/orientation, and estimate object locations.
+
+- stitching_node (bv_core.stitching.ImageStitcherNode)
+	- Subscribes: `/image_raw`, `/mission_state`, `/mavros/mission/reached`
+	- Role: Capture at waypoints (e.g., during stitching state), run OpenCV stitcher, save output panoramas.
+
+- test_servo (bv_core.test_servo.ServoTester)
+	- Calls: `/mavros/cmd/command` (CommandLong CMD_DO_SET_SERVO)
+	- Role: Quick servo PWM test.
+
+Launch file: `launch/mission.launch.py` starts mission, vision, filtering, and stitching together.
 
 PX4 communication overview (via MAVROS):
 
@@ -110,36 +140,6 @@ sequenceDiagram
 	Mission-->>Filtering: /mission_state
 	Mission-->>Stitching: /mission_state
 ```
-
-## Architecture
-
-High-level services (“microservices”) and data flow:
-
-- mission_node (bv_core.mission.MissionRunner)
-	- Publishes: `/mission_state` (std_msgs/String)
-	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/queue_state` (std_msgs/Int8)
-	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `get_object_locations` (bv_msgs/srv/GetObjectLocations)
-	- Role: Mission FSM (lap → stitching → scan → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params.
-
-- vision_node (bv_core.vision_node.VisionNode)
-	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
-	- Subscribes: `/image_raw` (sensor_msgs/Image), `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
-	- Role: On scan state, enqueue frames at each reach event, infer with RF-DETR in batches, annotate/save frames, publish detections.
-
-- filtering_node (bv_core.filtering_node.FilteringNode)
-	- Provides: `get_object_locations` (bv_msgs/srv/GetObjectLocations)
-	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String)
-	- Role: Time-align detections with pose/GPS, project detections to lat/lon using camera intrinsics/orientation, and estimate object locations.
-
-- stitching_node (bv_core.stitching.ImageStitcherNode)
-	- Subscribes: `/image_raw`, `/mission_state`, `/mavros/mission/reached`
-	- Role: Capture at waypoints (e.g., during stitching state), run OpenCV stitcher, save output panoramas.
-
-- test_servo (bv_core.test_servo.ServoTester)
-	- Calls: `/mavros/cmd/command` (CommandLong CMD_DO_SET_SERVO)
-	- Role: Quick servo PWM test.
-
-Launch file: `launch/mission.launch.py` starts mission, vision, filtering, and stitching together.
 
 ## Setup
 
