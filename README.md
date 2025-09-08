@@ -109,14 +109,20 @@ sequenceDiagram
 ## Setup
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
-- ROS 2 (e.g., Humble on 22.04) with MAVROS installed and GeographicLib datasets.
-- PX4 (SITL or hardware) connected to MAVROS.
+- ROS 2 Humble
+- [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
+- [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
-PX4 developer environment setup (Ubuntu):
-- https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html
+Install python deps (setup a venv... I recommend uv):
+```bash
+pip install -r requirements.txt
+```
 
-Python deps (see `requirements.txt`): supervision, rf-detr (from BV fork), colcon extensions, etc.
+Install mavros:
+```bash
+sudo apt install ros-humble-mavros
+```
 
 Build and install:
 1) Source your ROS 2 and MAVROS environment.
