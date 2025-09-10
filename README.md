@@ -12,8 +12,9 @@ This package orchestrates an autonomous mission with PX4:
 
 ## Project Structure
 
+Below is the project structure. Here we have everything in the ROS workspace directory which we named bv_ws. In ROS this is the common paradigm. The ROS packages should be housed in the src directory. You can name this directory whatever you want.
 ```
-.
+bv_ws
 ├── annotated_frames
 ├── build
 ├── install
@@ -27,7 +28,7 @@ This package orchestrates an autonomous mission with PX4:
 If you need to build packages from source (if sudo apt install if failing), then you should clone their repos in the src directory. Below is an example of building mavros from source.
 
 ```
-.
+bv_ws
 ├── annotated_frames
 ├── build
 ├── install
