@@ -13,6 +13,8 @@ This package orchestrates an autonomous mission with PX4:
 ## Project Structure
 
 Below is the project structure. Here we have everything in the ROS workspace directory which we named bv_ws. In ROS this is the common paradigm. The ROS packages should be housed in the src directory. You can name this directory whatever you want.
+
+Note that bv_core (this repo), and [bv_msgs](https://github.com/BuckeyeVertical/bv_msgs) are cloned in the source directory!
 ```
 bv_ws
 ├── annotated_frames
