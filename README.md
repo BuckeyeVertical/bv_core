@@ -10,6 +10,39 @@ This package orchestrates an autonomous mission with PX4:
 - Filtering node fuses detections with pose/GPS to estimate object lat/lon and serves them to Mission.
 - Stitching node captures images at waypoints to build an aerial map.
 
+## Project Structure
+
+```
+.
+├── annotated_frames
+├── build
+├── install
+├── log
+├── rf-detr-base.pth
+└── src
+    ├── bv_core
+    └── bv_msgs
+```
+
+If you need to build packages from source (if sudo apt install if failing), then you should clone their repos in the src directory. Below is an example of building mavros from source.
+
+```
+.
+├── annotated_frames
+├── build
+├── install
+├── log
+├── rf-detr-base.pth
+└── src
+    ├── bv_core
+    ├── bv_msgs
+	├── mavros
+    ├── mavros_extras
+    ├── mavros_msgs
+    └── test_mavros
+```
+
+
 ## Architecture
 
 ### Nodes and interfaces
