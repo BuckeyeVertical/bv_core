@@ -1,4 +1,4 @@
-# container/Dockerfile
+# containers/raspi/Dockerfile
 FROM arm64v8/ros:humble-ros-base-jammy
 SHELL ["/bin/bash", "-lc"]
 
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m pip install --upgrade pip && \
     pip install --no-cache-dir -U empy==3.3.4 pyros-genmsg setuptools==65.5.1
 
-# requirements.txt lives under container/
+# requirements.txt lives under containers/raspi/
 COPY container/requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
@@ -31,7 +31,7 @@ RUN mkdir -p /ros2_ws/src
 # Build context must include ./src at repo root
 COPY src/ /ros2_ws/src/
 
-
+# -------- GeographicLib from source (guarantees CMake config) --------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git cmake build-essential \
  && rm -rf /var/lib/apt/lists/* && \
