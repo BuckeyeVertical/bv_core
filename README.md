@@ -143,7 +143,7 @@ sequenceDiagram
 ```
 
 ## Setup
-### linux method
+### Linux Method
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
@@ -195,24 +195,22 @@ Follow these steps from the workspace root (`bv_ws`) to build and run the Docker
 
 ```bash
 cd ~/bv_ws
-mkdir -p container src
+mkdir src
 cd src
 # clone the two repos into src
 git clone https://github.com/BuckeyeVertical/bv_core.git
 git clone https://github.com/BuckeyeVertical/bv_msgs.git
 ```
 
-2. Place the Dockerfile in the `container/` directory.
 
+2. Copy the entire `bv_core/container/` directory into the workspace root.
 
 
 ```bash
+cp -r src/bv_core/container ~/bv_ws/container
 
-mv src/bv_core/Dockerfile container/Dockerfile
-
-
+```
 3. Build the image from the workspace root:
-
 ```bash
 cd ~/bv_ws
 docker build -f container/Dockerfile -t bv-raspi:dev .
