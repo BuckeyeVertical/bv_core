@@ -6,3 +6,5 @@ setuptools==65.5.1
 catkin_pkg
 lark
 colcon-common-extensions
+geographiclib
+numpy<2,>=1.23
