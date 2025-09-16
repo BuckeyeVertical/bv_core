@@ -187,7 +187,7 @@ PX4 parameters touched by Mission:
 - MPC_XY_VEL_ALL (set via `/mavros/param/set`)
 - PWM_MAIN_MIN{n} / PWM_MAIN_MAX{n} (used to drive servos to specific PWMs during deploy)
 
-### Docker version
+### Docker Method
 
 Follow these steps from the workspace root (`bv_ws`) to build and run the Docker development image:
 
