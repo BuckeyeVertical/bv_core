@@ -143,6 +143,7 @@ sequenceDiagram
 ```
 
 ## Setup
+### linux method
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
@@ -185,6 +186,45 @@ Configuration files:
 PX4 parameters touched by Mission:
 - MPC_XY_VEL_ALL (set via `/mavros/param/set`)
 - PWM_MAIN_MIN{n} / PWM_MAIN_MAX{n} (used to drive servos to specific PWMs during deploy)
+
+### Docker version
+
+Follow these steps from the workspace root (`bv_ws`) to build and run the Docker development image:
+
+1. Create the directories and clone the packages into `src`:
+
+```bash
+cd ~/bv_ws
+mkdir -p container src
+cd src
+# clone the two repos into src
+git clone https://github.com/BuckeyeVertical/bv_core.git
+git clone https://github.com/BuckeyeVertical/bv_msgs.git
+```
+
+2. Place the Dockerfile in the `container/` directory.
+
+
+
+```bash
+
+mv src/bv_core/Dockerfile container/Dockerfile
+
+
+3. Build the image from the workspace root:
+
+```bash
+cd ~/bv_ws
+docker build -f container/Dockerfile -t bv-raspi:dev .
+```
+
+4. Run the container interactively:
+
+```bash
+docker run --rm -it --name bvdev bv-raspi:dev
+```
+
+
 
 ## How to run
 
