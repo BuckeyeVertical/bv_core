@@ -201,8 +201,39 @@ cd src
 git clone https://github.com/BuckeyeVertical/bv_core.git
 git clone https://github.com/BuckeyeVertical/bv_msgs.git
 ```
+```bash
+.
+├── container
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   ├── launch.sh
+│   ├── requirements.txt
+│   ├── run_docker.sh
+│   └── run_docker_bash.sh
+└── src
+    ├── bv_core
+    │   ├── README.md
+    │   ├── bv_core
+    │   ├── config
+    │   ├── container
+    │   ├── herelink_connection.md
+    │   ├── launch
+    │   ├── package.xml
+    │   ├── requirements.txt
+    │   ├── resource
+    │   ├── ros2_bag_commands.txt
+    │   ├── setup.cfg
+    │   ├── setup.py
+    │   ├── src
+    │   └── test
+    └── bv_msgs
+        ├── CMakeLists.txt
+        ├── README.md
+        ├── msg
+        ├── package.xml
+        └── srv
 
-
+```
 2. Copy the entire `bv_core/container/` directory into the workspace root.
 
 
@@ -210,6 +241,7 @@ git clone https://github.com/BuckeyeVertical/bv_msgs.git
 cp -r src/bv_core/container ~/bv_ws/container
 
 ```
+
 3. Build the image from the workspace root:
 ```bash
 cd ~/bv_ws
