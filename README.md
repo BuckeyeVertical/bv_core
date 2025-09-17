@@ -190,6 +190,7 @@ PX4 parameters touched by Mission:
 ### Docker Method
 
 Follow these steps from the workspace root (`bv_ws`) to build and run the Docker development image:
+Prereq: Install and set up Docker Desktop and leave the application open
 
 1. Create the directories and clone the packages into `src`:
 
@@ -249,10 +250,11 @@ docker build -f container/Dockerfile -t bv-raspi:dev .
 ```
 
 4. Run the container interactively:
-
+Make sure to edit run_docker.sh to match your system
 ```bash
-docker run --rm -it --name bvdev bv-raspi:dev
+./container/run_docker.sh
 ```
+If you want to run the mission directly edit the run_docker.sh script
 
 
 

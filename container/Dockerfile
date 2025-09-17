@@ -26,10 +26,13 @@ COPY container/requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
 # -------------------- ROS 2 workspace --------------------
-WORKDIR /ros2_ws
-RUN mkdir -p /ros2_ws/src
+RUN mkdir -p /bv_ws/src
+WORKDIR /bv_ws
+RUN cd /root && \
+    git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git && \
+    yes | bash /root/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 # Build context must include ./src at repo root
-COPY src/ /ros2_ws/src/
+#COPY src/ /ros2_ws/src/
 
 # -------- GeographicLib from source (guarantees CMake config) --------
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,19 +49,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV GeographicLib_DIR=/usr/local/lib/cmake/GeographicLib
 ENV CMAKE_PREFIX_PATH=/usr/local:/usr:/usr/lib/aarch64-linux-gnu
 
-RUN cd /root && \
-    git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git && \
-    yes | bash /root/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
     
-
-
 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-mavros-msgs ros-humble-cv-bridge \
     python3-opencv python3-pil \
  && rm -rf /var/lib/apt/lists/*
-
+ 
 
 RUN source /opt/ros/humble/setup.bash && \
     rosdep install --from-paths src --ignore-src -r -y && \
@@ -68,11 +66,17 @@ RUN source /opt/ros/humble/setup.bash && \
         -DBUILD_TESTING=OFF \
         -DGeographicLib_DIR=${GeographicLib_DIR}
 
+ARG ROS_DISTRO=humble
+RUN apt-get update && \
+    apt-get install -y ros-${ROS_DISTRO}-foxglove-bridge && \
+    rm -rf /var/lib/apt/lists/*
+
+
 # Entrypoint & env
 COPY container/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && \
     echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
-    echo "source /ros2_ws/install/setup.bash" >> /root/.bashrc
+    echo "source /bv_ws/install/setup.bash" >> /root/.bashrc
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]
