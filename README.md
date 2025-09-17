@@ -206,19 +206,19 @@ git clone https://github.com/BuckeyeVertical/bv_msgs.git
 
 3. Build the image from the workspace root:
 ```bash
-cd ~/bv_ws
-docker build -f container/Dockerfile.<ARCH> -t <IMAGE_NAME>:<TAG> .
+cd ~/bv_ws/src/bv_core/container
+docker build -f Dockerfile.<ARCH> -t <IMAGE_NAME>:<TAG> .
 ```
 
 For arm:
 ```bash
-docker build -f container/Dockerfile.arm -t bv_img:arm
+docker build -f Dockerfile.arm -t bv_img:arm .
 ```
 
 For x86:
 For arm:
 ```bash
-docker build -f container/Dockerfile.x86 -t bv_img:x86
+docker build -f Dockerfile.x86 -t bv_img:x86 .
 ```
 
 4. Run the container interactively:
