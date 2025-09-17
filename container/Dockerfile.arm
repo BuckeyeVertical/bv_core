@@ -22,7 +22,7 @@ RUN python3 -m pip install --upgrade pip && \
     pip install --no-cache-dir -U empy==3.3.4 pyros-genmsg setuptools==65.5.1
 
 # requirements.txt lives under containers/raspi/
-COPY container/requirements.txt /requirements.txt
+COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
 # -------------------- ROS 2 workspace --------------------
@@ -73,7 +73,7 @@ RUN apt-get update && \
 
 
 # Entrypoint & env
-COPY container/entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && \
     echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
     echo "source /bv_ws/install/setup.bash" >> /root/.bashrc
