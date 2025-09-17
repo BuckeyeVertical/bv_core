@@ -143,7 +143,8 @@ sequenceDiagram
 ```
 
 ## Setup
-### Linux Method
+
+### Option 1: Linux Method
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
@@ -187,7 +188,7 @@ PX4 parameters touched by Mission:
 - MPC_XY_VEL_ALL (set via `/mavros/param/set`)
 - PWM_MAIN_MIN{n} / PWM_MAIN_MAX{n} (used to drive servos to specific PWMs during deploy)
 
-### Docker Method
+### Option 2: Docker Method
 
 Follow these steps from the workspace root (`bv_ws`) to build and run the Docker development image:
 Prereq: Install and set up Docker Desktop and leave the application open
@@ -202,61 +203,28 @@ cd src
 git clone https://github.com/BuckeyeVertical/bv_core.git
 git clone https://github.com/BuckeyeVertical/bv_msgs.git
 ```
-```bash
-.
-├── container
-│   ├── Dockerfile
-│   ├── entrypoint.sh
-│   ├── launch.sh
-│   ├── requirements.txt
-│   ├── run_docker.sh
-│   └── run_docker_bash.sh
-└── src
-    ├── bv_core
-    │   ├── README.md
-    │   ├── bv_core
-    │   ├── config
-    │   ├── container
-    │   ├── herelink_connection.md
-    │   ├── launch
-    │   ├── package.xml
-    │   ├── requirements.txt
-    │   ├── resource
-    │   ├── ros2_bag_commands.txt
-    │   ├── setup.cfg
-    │   ├── setup.py
-    │   ├── src
-    │   └── test
-    └── bv_msgs
-        ├── CMakeLists.txt
-        ├── README.md
-        ├── msg
-        ├── package.xml
-        └── srv
-
-```
-2. Copy the entire `bv_core/container/` directory into the workspace root.
-
-
-```bash
-cp -r src/bv_core/container ~/bv_ws/container
-
-```
 
 3. Build the image from the workspace root:
 ```bash
 cd ~/bv_ws
-docker build -f container/Dockerfile -t bv-raspi:dev .
+docker build -f container/Dockerfile.<ARCH> -t <IMAGE_NAME>:<TAG> .
+```
+
+For arm:
+```bash
+docker build -f container/Dockerfile.arm -t bv_img:arm
+```
+
+For x86:
+For arm:
+```bash
+docker build -f container/Dockerfile.x86 -t bv_img:x86
 ```
 
 4. Run the container interactively:
-Make sure to edit run_docker.sh to match your system
 ```bash
-./container/run_docker.sh
+./run_docker.sh <IMAGE_NAME>
 ```
-If you want to run the mission directly edit the run_docker.sh script
-
-
 
 ## How to run
 

@@ -1,7 +1,9 @@
 #!/bin/bash
-IMAGE_NAME="bv-raspi:dev"
+# Usage: ./run_docker.sh [IMAGE_NAME]
+# If no IMAGE_NAME is provided, defaults to "bv-raspi:dev"
+IMAGE_NAME="${1:-bv-raspi:dev}"
 CONTAINER_NAME="bvdev"
-HOST_DIR="/Users/allenthomas/Code/bv_ws" #edit this line to match your system
+HOST_DIR="$(cd ../../.. && pwd)"
 CONTAINER_SRC_DIR="/bv_ws"
 
 docker rm $CONTAINER_NAME
