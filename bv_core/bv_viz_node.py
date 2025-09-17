@@ -30,20 +30,13 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from rclpy.duration import Duration
 
 from std_msgs.msg import String, Int8
 from geometry_msgs.msg import PoseStamped, Point, Vector3
 from visualization_msgs.msg import Marker, MarkerArray
 from mavros_msgs.msg import WaypointReached
-
-# bv_msgs for detections (Vector3[] dets where z=int class id)
-try:
-    from bv_msgs.msg import ObjectDetections
-    HAS_BV = True
-except Exception:
-    HAS_BV = False
 
 
 def yaw_from_quaternion(x, y, z, w) -> float:
@@ -72,6 +65,8 @@ class DroneVizNode(Node):
         self.declare_parameter('dets_z', 0.0)  # z-height for 2D det labels (pixels -> world placeholder)
         self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  # where to place mission/queue HUD text
 
+        self.frame_id = self.get_parameter('fixed_frame').value
+        
         pose_topic = self.get_parameter('pose_topic').value
         dets_topic = self.get_parameter('dets_topic').value
         mission_state_topic = self.get_parameter('mission_state_topic').value
@@ -80,10 +75,10 @@ class DroneVizNode(Node):
 
         # ---------- Publishers ----------
         marker_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # RViz/Foxglove-friendly persistence
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,  # RViz/Foxglove-friendly persistence
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
         )
         self.marker_pub = self.create_publisher(MarkerArray, '/viz/markers', marker_qos)
 
@@ -102,12 +97,13 @@ class DroneVizNode(Node):
         self._accum_wp_markers: List[Marker] = []
 
         # ---------- Subscriptions ----------
-        self.create_subscription(PoseStamped, pose_topic, self.on_pose, 10)
-
-        if HAS_BV:
-            self.create_subscription(ObjectDetections, dets_topic, self.on_obj_dets, 10)
-        else:
-            self.get_logger().warn('bv_msgs not available; skipping /obj_dets subscription.')
+        pose_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
+        self.create_subscription(PoseStamped, pose_topic, self.on_pose, qos_profile=pose_qos)
 
         self.create_subscription(String, mission_state_topic, self.on_mission_state, 10)
         self.create_subscription(Int8, queue_state_topic, self.on_queue_state, 10)
@@ -115,12 +111,6 @@ class DroneVizNode(Node):
 
         # Publish at a steady rate so Foxglove receives updates even without new messages
         self.timer = self.create_timer(0.2, self.publish_all)
-
-    # ---------- Helpers ----------
-    def _frame_id(self, header_frame_id: str) -> str:
-        if header_frame_id and len(header_frame_id) > 0:
-            return header_frame_id
-        return self.get_parameter('fixed_frame').value
 
     # ---------- Marker builders ----------
     def _drone_markers(self, pose_msg: PoseStamped) -> List[Marker]:
@@ -381,7 +371,7 @@ class DroneVizNode(Node):
     # ---------- Callbacks ----------
     def on_pose(self, msg: PoseStamped):
         self._last_pose = msg
-        frame_id = self._frame_id(msg.header.frame_id)
+        frame_id = self.frame_id
 
         # update path accumulator
         if bool(self.get_parameter('accumulate_path').value):

@@ -222,7 +222,6 @@ docker build -f Dockerfile.arm -t bv_img:arm .
 ```
 
 For x86:
-For arm:
 ```bash
 docker build -f Dockerfile.x86 -t bv_img:x86 .
 ```
@@ -261,7 +260,7 @@ Environment and build (all terminals):
 cd ~/bv_ws
 source /opt/ros/humble/setup.bash
 source install/local_setup.bash
-colcon build --packages-select bv_core
+colcon build
 ```
 
 PX4 SITL (from PX4-Autopilot repo root):
