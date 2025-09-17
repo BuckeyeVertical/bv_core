@@ -37,9 +37,17 @@ def generate_launch_description():
         output='both',
     )
 
+    bv_viz_node = Node(
+        package='bv_core',
+        executable='bv_viz_node',
+        name='bv_viz_node',
+        output='both',
+    )
+
     return LaunchDescription([
         mission_node,
         vision_node,
         filter_node,
-        stitching_node
+        stitching_node,
+        bv_viz_node,
     ])
