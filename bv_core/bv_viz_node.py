@@ -114,22 +114,22 @@ class DroneVizNode(Node):
 
     # ---------- Marker builders ----------
     def _drone_markers(self, pose_msg: PoseStamped) -> List[Marker]:
-        frame_id = self._frame_id(pose_msg.header.frame_id)
+        frame_id = self.frame_id
         markers: List[Marker] = []
 
         # Clear existing "drone" namespace
-        del_all = Marker()
-        del_all.header.frame_id = frame_id
-        del_all.header.stamp = self.get_clock().now().to_msg()
-        del_all.ns = 'drone'
-        del_all.id = 0
-        del_all.action = Marker.DELETEALL
-        markers.append(del_all)
+        # del_all = Marker()
+        # del_all.header.frame_id = frame_id
+        # del_all.header.stamp = self.get_clock().now().to_msg()
+        # del_all.ns = 'drone'
+        # del_all.id = 0
+        # del_all.action = Marker.DELETEALL
+        # markers.append(del_all)
 
         # Arrow
         arrow = Marker()
         arrow.header.frame_id = frame_id
-        arrow.header.stamp = del_all.header.stamp
+        arrow.header.stamp = self.get_clock().now().to_msg()
         arrow.ns = 'drone'
         arrow.id = 1
         arrow.type = Marker.ARROW
@@ -145,30 +145,32 @@ class DroneVizNode(Node):
         arrow.color.a = 1.0
 
         # Text (yaw/alt)
-        text = Marker()
-        text.header.frame_id = frame_id
-        text.header.stamp = del_all.header.stamp
-        text.ns = 'drone'
-        text.id = 2
-        text.type = Marker.TEXT_VIEW_FACING
-        text.action = Marker.ADD
-        text.pose.position.x = pose_msg.pose.position.x
-        text.pose.position.y = pose_msg.pose.position.y
-        text.pose.position.z = pose_msg.pose.position.z + scale * 1.0
-        text.scale.z = float(self.get_parameter('text_scale').value)
-        yaw = yaw_from_quaternion(
-            pose_msg.pose.orientation.x,
-            pose_msg.pose.orientation.y,
-            pose_msg.pose.orientation.z,
-            pose_msg.pose.orientation.w
-        )
-        text.text = f"Yaw {math.degrees(yaw):.1f}° | Alt {pose_msg.pose.position.z:.1f} m"
-        text.color.r = 1.0
-        text.color.g = 1.0
-        text.color.b = 1.0
-        text.color.a = 0.95
+        # text = Marker()
+        # text.header.frame_id = frame_id
+        # text.header.stamp = del_all.header.stamp
+        # text.ns = 'drone'
+        # text.id = 2
+        # text.type = Marker.TEXT_VIEW_FACING
+        # text.action = Marker.ADD
+        # text.pose.position.x = pose_msg.pose.position.x
+        # text.pose.position.y = pose_msg.pose.position.y
+        # text.pose.position.z = pose_msg.pose.position.z + scale * 1.0
+        # text.scale.z = float(self.get_parameter('text_scale').value)
+        # yaw = yaw_from_quaternion(
+        #     pose_msg.pose.orientation.x,
+        #     pose_msg.pose.orientation.y,
+        #     pose_msg.pose.orientation.z,
+        #     pose_msg.pose.orientation.w
+        # )
+        # text.text = f"Yaw {math.degrees(yaw):.1f}° | Alt {pose_msg.pose.position.z:.1f} m"
+        # text.color.r = 1.0
+        # text.color.g = 1.0
+        # text.color.b = 1.0
+        # text.color.a = 0.95
 
-        markers.extend([arrow, text])
+        # markers.extend([arrow, text])
+        
+        markers.append(arrow)
         return markers
 
     def _path_markers(self, frame_id: str) -> List[Marker]:
@@ -385,6 +387,7 @@ class DroneVizNode(Node):
                 self._path_pts = self._path_pts[-max_n:]
 
         self._last_markers_pose = self._drone_markers(msg)
+        print(f"Last Marker Pose: {self._last_markers_pose}")
         self._last_markers_path = self._path_markers(frame_id)
 
     def on_obj_dets(self, msg):
@@ -417,10 +420,11 @@ class DroneVizNode(Node):
             self._last_markers_hud,
             self._accum_wp_markers,
         ):
-            if group:
+            if group: 
                 ma.markers.extend(group)
         if ma.markers:
-            self.marker_pub.publish(ma)
+            self.marker_pub.publish(ma)  
+
 
 
 def main():
