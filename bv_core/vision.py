@@ -394,17 +394,25 @@ class Detector():
         return annotated_frame
 
     def save_frame(self, frame, output_dir):
+        os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"{self.frame_save_cnt}_annotated.jpg")
         Image.fromarray(frame).save(output_path)
         self.frame_save_cnt += 1
 
-    def create_model(self, dtype=torch.float16):
-        # Initialize the model
-        torch.cuda.empty_cache()
+    def create_model(self, dtype=None):
+        # Prefer float16 on CUDA, otherwise fall back to float32 for CPU-only runs.
+        has_cuda = torch.cuda.is_available()
+        chosen_dtype = dtype or (torch.float16 if has_cuda else torch.float32)
+
+        if has_cuda:
+            torch.cuda.empty_cache()
+
         model = RFDETRBase(resolution=self.resolution)
+        model.optimize_for_inference(batch_size=self.batch_size, dtype=chosen_dtype)
 
-        model.optimize_for_inference(batch_size=self.batch_size, dtype=dtype)
-
-        rclpy.logging.get_logger("filtering_node").info(f"Model created with batch size: {self.batch_size}")
+        logger = rclpy.logging.get_logger("filtering_node")
+        logger.info(
+            f"Model created with batch size: {self.batch_size}, dtype: {chosen_dtype}, cuda: {has_cuda}"
+        )
 
         return model

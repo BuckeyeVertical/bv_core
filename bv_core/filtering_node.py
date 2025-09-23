@@ -78,6 +78,13 @@ class FilteringNode(Node):
         self.prev_state = None
         self.state = None
 
+        # publish raw locations so downstream tooling can monitor pre-cluster results
+        self.raw_loc_pub = self.create_publisher(
+            ObjectLocations,
+            '/obj_locs_raw',
+            10
+        )
+
         # === service to expose the object locations ===
         self.get_obj_locs_srv = self.create_service(
             GetObjectLocations,
@@ -170,6 +177,16 @@ class FilteringNode(Node):
             drone_orientation=drone_orientation
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
+
+        for lat, lon, cls in detections_global:
+            loc_msg = ObjectLocations()
+            loc_msg.latitude = float(lat)
+            loc_msg.longitude = float(lon)
+            loc_msg.class_id = int(cls)
+            self.get_logger().info(
+                f"raw_loc lat={lat:.6f} lon={lon:.6f} cls={COCO_CLASSES[int(cls)]}"
+            )
+            self.raw_loc_pub.publish(loc_msg)
 
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
