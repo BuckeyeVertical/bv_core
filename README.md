@@ -254,6 +254,11 @@ ros2 bag play <bag_path>
 
 [*Learn more about ros bags.*](https://docs.ros.org/en/foxy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html)
 
+To run foxglove:
+```bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765
+```
+
 ## Simulation (SITL) and vehicle setup
 
 Environment and build (all terminals):
