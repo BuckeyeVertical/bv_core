@@ -64,6 +64,10 @@ class DroneVizNode(Node):
         self.declare_parameter('max_path_pts', 2000)
         self.declare_parameter('dets_z', 0.0)  # z-height for 2D det labels (pixels -> world placeholder)
         self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  # where to place mission/queue HUD text
+        
+        self.declare_parameter('mesh_uri', 'package://bv_core/meshes/Render_CAD.STL')
+        self.declare_parameter('mesh_scale', 1.0) 
+
 
         self.frame_id = self.get_parameter('fixed_frame').value
         
@@ -168,7 +172,30 @@ class DroneVizNode(Node):
         text.color.b = 1.0
         text.color.a = 0.95
 
-        markers.extend([arrow, text])
+
+        #Drone Mesh Marker
+        drone_mesh = Marker()
+        drone_mesh.header.frame_id = frame_id
+        drone_mesh.header.stamp = self.get_clock().now().to_msg()
+        drone_mesh.ns = 'drone'
+        drone_mesh.id = 3
+        drone_mesh.type = Marker.MESH_RESOURCE
+        drone_mesh.action = Marker.ADD
+
+        drone_mesh.pose = pose_msg.pose
+
+        s = float(self.get_parameter('mesh_scale').value)
+        drone_mesh.scale.x = drone_mesh.scale.y = drone_mesh.scale.z = s
+
+        drone_mesh.color.r = 1.0
+        drone_mesh.color.g = 1.0
+        drone_mesh.color.b = 1.0
+        drone_mesh.color.a = 1.0
+
+        drone_mesh.mesh_resource = self.get_parameter('mesh_uri').value
+        drone_mesh.mesh_use_embedded_materials = False
+
+        markers.extend([arrow, text, drone_mesh])
         
         # markers.append(arrow)
         return markers

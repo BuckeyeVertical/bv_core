@@ -150,6 +150,7 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
 - [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
 - [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
+- download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
 Install python deps (setup a venv... I recommend uv):

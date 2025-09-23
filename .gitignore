@@ -59,3 +59,7 @@ qtcreator-*
 # Catkin custom files
 CATKIN_IGNORE
 rf-detr-large.pth
+
+# render cad too large for github
+meshes/Render_CAD.STL
+meshes/Render_CAD.stl

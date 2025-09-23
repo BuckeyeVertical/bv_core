@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name + '/config', ['config/vision_params.yaml']),
         ('share/' + package_name + '/config', ['config/filtering_params.yaml']),
         ('share/' + package_name + '/launch', ['launch/mission.launch.py']),
+        ('share/' + package_name + '/meshes', ['meshes/Render_CAD.STL']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
