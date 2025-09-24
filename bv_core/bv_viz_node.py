@@ -66,7 +66,10 @@ class DroneVizNode(Node):
         self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  # where to place mission/queue HUD text
         
         self.declare_parameter('mesh_uri', 'package://bv_core/meshes/Render_CAD.STL')
-        self.declare_parameter('mesh_scale', 1.0) 
+        self.declare_parameter('mesh_scale', 0.001) 
+        self.declare_parameter('offsetX', 0.9)
+        self.declare_parameter('offsetY', -0.1)
+        self.declare_parameter('offsetZ', -0.3)
 
 
         self.frame_id = self.get_parameter('fixed_frame').value
@@ -184,6 +187,12 @@ class DroneVizNode(Node):
 
         drone_mesh.pose = pose_msg.pose
 
+
+        drone_mesh.pose.position.x += float(self.get_parameter('offsetX').value)
+        drone_mesh.pose.position.y += float(self.get_parameter('offsetY').value)
+        drone_mesh.pose.position.z += float(self.get_parameter('offsetZ').value)
+
+
         s = float(self.get_parameter('mesh_scale').value)
         drone_mesh.scale.x = drone_mesh.scale.y = drone_mesh.scale.z = s
 
@@ -195,7 +204,7 @@ class DroneVizNode(Node):
         drone_mesh.mesh_resource = self.get_parameter('mesh_uri').value
         drone_mesh.mesh_use_embedded_materials = False
 
-        markers.extend([arrow, text, drone_mesh])
+        markers.extend([drone_mesh])
         
         # markers.append(arrow)
         return markers
@@ -253,7 +262,7 @@ class DroneVizNode(Node):
             end.color.b = 0.3
             end.color.a = 0.9
 
-            markers.extend([start, end])
+            markers.extend([start])
 
         return markers
 
