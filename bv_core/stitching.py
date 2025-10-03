@@ -1,288 +1,298 @@
 #!/usr/bin/env python3
-
 # ----------------------------------------------------
 # Image Stitcher Node (ROS2 + OpenCV in Python)
 # ----------------------------------------------------
-# - Subscribes to a ROS2 raw image topic
-# - Buffers incoming frames (decoded to H×W×C NumPy arrays)
-# - Every N seconds, stitches them
-# - Saves and displays the result (no publishing)
+# - Subscribes to camera images (sensor_msgs/Image)
+# - Subscribes to mission state (String)
+# - Subscribes to GPS (NavSatFix)
+# - Stores images with GPS coords when waypoints are reached
+# - After N images, stitches them with GPS + ORB keypoints
+# - Saves and displays the stitched result
 # ----------------------------------------------------
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, NavSatFix
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from std_msgs.msg import String
 import cv2
 import numpy as np
 import os
-# for stitching
-from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, CommandCode
-
+from mavros_msgs.msg import WaypointReached
 from datetime import datetime
+import time
+import math
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from enum import Enum
 
-MAX_PICS = 2
+
+# indexing into image gps tuple
+import math
+import numpy as np
+import cv2
+
+# Works with geometry_msgs.msg.Pose or PoseStamped
+def _pose_xy_yaw(pose_msg):
+    """Return (x, y, yaw_rad) from a geometry_msgs Pose or PoseStamped."""
+    if hasattr(pose_msg, "pose"):  # PoseStamped
+        p = pose_msg.pose
+    else:  # Pose
+        p = pose_msg
+    x = float(p.position.x)
+    y = float(p.position.y)
+    qx = float(p.orientation.x)
+    qy = float(p.orientation.y)
+    qz = float(p.orientation.z)
+    qw = float(p.orientation.w)
+    # yaw from quaternion (ROS uses xyzw; ENU assumed)
+    # yaw = atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+    yaw = math.atan2(2.0*(qw*qz + qx*qy), 1.0 - 2.0*(qy*qy + qz*qz))
+    return x, y, yaw
+
+def mosaic_from_images_and_poses(
+    frames,
+    gsd_m_per_px=0.004,
+    background_color=(0, 0, 0)
+):
+    """
+    Build a 2D mosaic from a list of (image_bgr, pose_msg) tuples.
+
+    Args:
+        frames: list of (img_bgr, pose) where img_bgr is HxWx3 uint8 (OpenCV BGR)
+                and pose is geometry_msgs.msg.Pose or PoseStamped in a common world frame (meters).
+        gsd_m_per_px: ground sampling distance (meters per pixel) for the images.
+                      We use the same value for the canvas, so scale=1 by default.
+        background_color: canvas background (B,G,R).
+    Returns:
+        canvas_bgr: the stitched mosaic as a numpy array (uint8 BGR).
+        origin_m:  (min_x_m, min_y_m) world coords of canvas pixel (0,0)
+        px_per_m:  pixels per meter used for the canvas
+    """
+    if not frames:
+        raise ValueError("frames is empty")
+
+    px_per_m = 1.0 / float(gsd_m_per_px)
+
+    # --- 1) Predict canvas bounds in world meters by transforming each image's corners ---
+    world_corners = []  # list of Nx2 arrays of transformed corners for each image
+
+    centers_xy_yaw = []
+    sizes_px = []
+    for img, pose in frames:
+        h, w = img.shape[:2]
+        x_m, y_m, yaw = _pose_xy_yaw(pose)
+        # image size in meters on ground (assuming nadir camera & constant GSD)
+        w_m = w * gsd_m_per_px
+        h_m = h * gsd_m_per_px
+
+        # image-local corners (meters), centered at (0,0), +y up in world math
+        # We'll treat image's +y (down in pixels) as negative in math space, then rotate by yaw.
+        local = np.array([
+            [-w_m/2, -h_m/2],
+            [ w_m/2, -h_m/2],
+            [ w_m/2,  h_m/2],
+            [-w_m/2,  h_m/2],
+        ], dtype=np.float32)
+
+        # 2D rotation by yaw (world frame Z-up): image-to-world
+        c, s = math.cos(yaw), math.sin(yaw)
+        R = np.array([[c, -s],
+                      [s,  c]], dtype=np.float32)
+
+        corners_world = (local @ R.T) + np.array([x_m, y_m], dtype=np.float32)
+        world_corners.append(corners_world)
+
+        centers_xy_yaw.append((x_m, y_m, yaw))
+        sizes_px.append((w, h))
+
+    all_pts = np.vstack(world_corners)  # (4*N, 2)
+    min_x_m = float(all_pts[:, 0].min())
+    max_x_m = float(all_pts[:, 0].max())
+    min_y_m = float(all_pts[:, 1].min())
+    max_y_m = float(all_pts[:, 1].max())
+
+    # Add a small border (in meters)
+    pad_m = 2.0 * gsd_m_per_px * 10  # ~10px padding
+    min_x_m -= pad_m
+    min_y_m -= pad_m
+    max_x_m += pad_m
+    max_y_m += pad_m
+
+    # --- 2) Canvas size in pixels ---
+    width_px  = int(math.ceil((max_x_m - min_x_m) * px_per_m))
+    height_px = int(math.ceil((max_y_m - min_y_m) * px_per_m))
+    if width_px <= 0 or height_px <= 0:
+        raise RuntimeError("Computed non-positive canvas size")
+
+    canvas = np.full((height_px, width_px, 3), background_color, dtype=np.uint8)
+
+    # --- 3) Paste each image onto canvas using a 2D SE(2) (rotate about center, then translate) ---
+    for (img, _pose), (x_m, y_m, yaw), (w, h) in zip(frames, centers_xy_yaw, sizes_px):
+        # Where should the *center* land on the canvas (pixels)?
+        cx = (x_m - min_x_m) * px_per_m
+        cy = (y_m - min_y_m) * px_per_m
+
+        # Rotate image by -yaw so that world axes align (east→right).
+        angle_deg = -math.degrees(yaw)
+        M = cv2.getRotationMatrix2D(center=(w/2, h/2), angle=angle_deg, scale=1.0)
+
+        # Shift so that the rotated image center goes to (cx, cy) on the canvas
+        M[0, 2] += (cx - w/2)
+        M[1, 2] += (cy - h/2)
+
+        # Warp directly into the big canvas; simple overwrite compositing
+        cv2.warpAffine(
+            img, M,
+            dsize=(canvas.shape[1], canvas.shape[0]),
+            dst=canvas,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_TRANSPARENT  # leave background as-is where img is out of bounds
+        )
+
+        # If you prefer alpha blending instead of overwrite:
+        # tmp = np.zeros_like(canvas)
+        # cv2.warpAffine(img, M, (canvas.shape[1], canvas.shape[0]), tmp, flags=cv2.INTER_LINEAR,
+        #                borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+        # mask = (tmp.sum(axis=2) > 0).astype(np.uint8)[..., None]
+        # canvas = (tmp * mask + canvas * (1 - mask)).astype(np.uint8)
+
+    origin_m = (min_x_m, min_y_m)  # world meters corresponding to canvas (0,0)
+    return canvas, origin_m, px_per_m
+
 
 class ImageStitcherNode(Node):
     def __init__(self):
         super().__init__('image_stitcher_node')
 
-        # Parameters
-
-        #default to not transitioning
+        # State variables
         self.transition_in_progress = False
-
-        #default to 0th waypoint
         self.waypoint_current = 0
-
-        #default to no previous waypoint
         self.waypoint_prev = -1
-
-        #default say no frame stored
         self.latest_frame = None
-
-        #default to lap state at the beginning
+        self.latest_gps = None
         self.state = "lap"
-
-        #default reached mode
         self.reached = False
-
-        #counter for how many total pictures to take
         self.pic_counter = 0
 
+        # Parameters
         self.declare_parameter('image_topic', '/image_raw')
-        self.declare_parameter('output_path', '/home/bvorinnano/bv_ws/stitched_image')
+        self.declare_parameter('output_path', 'images')
         self.declare_parameter('crop', True)
         self.declare_parameter('preprocessing', False)
-        self.declare_parameter('stitch_interval_sec', 5.0)
+        self.declare_parameter('stitch_interval_sec', 60.0)
+        os.makedirs("images", exist_ok=True)
 
-        # Fetch parameters
-        image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
-        self.output_path = self.get_parameter('output_path').get_parameter_value().string_value
+        image_topic = self.get_parameter(
+            'image_topic').get_parameter_value().string_value
+        self.output_path = self.get_parameter(
+            'output_path').get_parameter_value().string_value
         self.crop = self.get_parameter('crop').get_parameter_value().bool_value
-        self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
-        self.stitch_interval_sec = self.get_parameter('stitch_interval_sec').get_parameter_value().double_value
+        self.preprocessing = self.get_parameter(
+            'preprocessing').get_parameter_value().bool_value
+        self.stitch_interval_sec = self.get_parameter(
+            'stitch_interval_sec').get_parameter_value().double_value
 
-        # Subscription & Timer
+        # Subscriptions
+
         self.image_sub = self.create_subscription(
-            Image,
-            image_topic,
-            self.image_callback,
-            10 #what is this 10
-        )
-
-        # Subscribe to the state the drone is in
+            Image, image_topic, self.image_callback, 10)
         self.mission_state_sub = self.create_subscription(
-            String,
-            '/mission_state',
-            self.state_callback,
-            10
-        )
-
-        # Subscribe to when drone reaches position
+            String, '/mission_state', self.state_callback, 10)
         self.reached_sub = self.create_subscription(
-            WaypointReached,
-            '/mavros/mission/reached',
-            self.reached_callback,
-            10
+            WaypointReached, '/mavros/mission/reached', self.reached_callback, 10)
+
+        pose_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
+        self.create_subscription(
+            PoseStamped, "/mavros/local_position/pose", self.pose_callback, qos_profile=pose_qos)
+
+        gps_sub_QoS = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE
         )
 
-        self.stitch_timer = self.create_timer(self.stitch_interval_sec, self.timer_callback)
+        self.gps_sub = self.create_subscription(
+            NavSatFix, '/mavros/global_position/global', self.gps_callback, gps_sub_QoS)
 
-        # Helpers & buffer
+        self.stitch_timer = self.create_timer(
+            self.stitch_interval_sec, self.timer_callback)
+
+        # Helpers
         self.bridge = CvBridge()
-        self.received_images = []
-        self.get_logger().info(f"Subscribed to {image_topic}`; stitch every {self.stitch_interval_sec}s")
+        self.received_images = []  # will store (image, pose)
 
+        self.get_logger().info(
+            f"Subscribed to {image_topic}; stitch every {self.stitch_interval_sec}s")
+
+    # -------------------------
+    # Callbacks
+    # -------------------------
     def rosimg_to_ndarray(self, msg: Image) -> np.ndarray:
-        """Convert any sensor_msgs/Image to an H×W×C uint8 NumPy array."""
-        enc = msg.encoding.lower()
-        # Choose dtype by bit-depth
-        if enc.endswith('16'):
-            dtype = np.uint16
-        else:
-            dtype = np.uint8
+        """Convert any sensor_msgs/Image to an H×W×C NumPy array."""
+        img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        return img
 
-        # View the raw buffer
-        flat = np.frombuffer(msg.data, dtype=dtype)
+    def crop_image(self, img):
+        h, w = img.shape[:2]
+        cx, cy = w // 2, h // 2
+        crop_w, crop_h = h, h
 
-        # msg.step = total bytes per row; convert to elements per row
-        elems_per_row = msg.step // dtype().itemsize
-        mat = flat.reshape((msg.height, elems_per_row))
+        cropped = img[cy-crop_h//2: cy+crop_h//2,
+                      cx-crop_w//2: cx+crop_w//2]
+        return cropped
 
-        # Handle multi-channel layouts
-        if enc in ('rgb8', 'bgr8', 'rgba8', 'bgra8'):
-            nch = 3 if enc.endswith('8') else 4
-            # keep only real pixel data, discard padding
-            mat = mat[:, : msg.width * nch ]
-            mat = mat.reshape((msg.height, msg.width, nch))
-            # drop alpha if present
-            if nch == 4:
-                mat = mat[:, :, :3]
-        else:
-            # mono8 or mono16: single-channel image already
-            # mat is H×W
-            pass
-
-        # If needed, convert colors for OpenCV
-        if enc == 'rgb8':
-            mat = cv2.cvtColor(mat, cv2.COLOR_RGB2BGR)
-
-        # If 16-bit, scale down to 8-bit
-        if mat.dtype == np.uint16:
-            mat = cv2.convertScaleAbs(mat, alpha=(255.0 / 65535.0))
-
-        return mat
-
-    def image_callback(self, msg: Image):
-        #self.get_logger().warn(f"Image_callback is running")
-        try:
-            frame = self.rosimg_to_ndarray(msg)
-            self.latest_frame = frame
-            #self.get_logger().info(f"got pic")
-        except Exception as e:
-            self.get_logger().error(f"Failed to convert raw image: {e}")
+    def deblur_image(self, img):
+        pass
 
     def state_callback(self, msg: String):
-        try:
-            self.get_logger().info(f"Received State: state={msg.data}")
-            self.state = msg.data
-        except Exception as e:
-            self.get_logger().error(f"Failed to determine state")
+        # self.get_logger().info(f"Received State: state={msg.data}")
+        self.state = msg.data
 
     def reached_callback(self, msg: WaypointReached):
         if self.transition_in_progress:
             return
         idx = msg.wp_seq
         self.get_logger().info(f'Reached waypoint {idx} (state={self.state})')
-
-        #setting waypoint number
         self.waypoint_current = idx
-
-
-        # if idx == self.expected_final_wp:
-        #     self.handle_mission_completion()
-
-        # store an image if mission state is 
-        #ask shankar if self.state can equal WaypointReached
-        if (self.state == "stitching"): #or self.state == "lap" or self.state == "scan"):
+        if self.state == "stitching":
             self.reached = True
             self.get_logger().info(f'Reached waypoint in {self.state}')
-        else: 
+        else:
             self.reached = False
             self.get_logger().info(f'Reached waypoint, NOT in stitching')
 
+    def gps_callback(self, msg: NavSatFix):
+        pass
+
     def timer_callback(self):
-        
-        if (self.latest_frame is not None and self.reached == True and self.pic_counter < MAX_PICS and self.waypoint_current != self.waypoint_prev):
+        self.get_logger().info(f'callback enter')
+        canvas, origin_m, px_per_m = mosaic_from_images_and_poses(self.received_images)
+        path = os.path.join(self.output_path, f"stitch -- stamp -- {datetime.now()}.jpg")
+        cv2.imwrite(path, canvas)
+        self.get_logger().info(f'saved at: {path}')
 
-                self.get_logger().info(f"Took picture number: {self.pic_counter}")
-                self.waypoint_prev = self.waypoint_current
-                self.received_images.append(self.latest_frame)
-                self.get_logger().info(f"Received frame: shape={self.latest_frame.shape} dtype={self.latest_frame.dtype} (buffer={len(self.received_images)})")
-                
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                out_file = os.path.join(os.path.dirname(self.output_path), f"pic_{self.waypoint_current}.jpg")
-                cv2.imwrite(out_file, self.latest_frame)
-                self.get_logger().info(f"Saved: {out_file}")
-                self.pic_counter = self.pic_counter + 1
+    def image_callback(self, msg: Image):
+        try:
+            frame = self.rosimg_to_ndarray(msg)
+            cropped_frame = self.crop_image(frame)
+            self.latest_frame = cropped_frame
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert raw image: {e}")
 
-        elif self.pic_counter >= MAX_PICS:
-                    self.get_logger().info(f"Got all pictures: {self.pic_counter}, starting stitching")
-                    imgs = list(self.received_images)
-                    self.received_images.clear()
-                    self.get_logger().info(f"Stitching {len(imgs)} frames…")
+    def pose_callback(self, msg: PoseStamped):
+        self.get_logger().info(f"(msg.pose)")
+        pose = msg.pose
+        self.received_images.append((self.latest_frame, pose))
 
-                    status, pano = self.stitch_images(imgs)
-                    if status == cv2.Stitcher_OK:
-                        self.get_logger().info("Stitch successful")
-                        if self.crop:
-                            pano = self.crop_image(pano)
 
-                        # save with timestamp
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
-                        cv2.imwrite(out_file, pano)
-                        self.get_logger().info(f"Saved: {out_file}")
+# =====================
 
-                        # display
-                        cv2.imshow("Stitched", pano)
-                        cv2.waitKey(1)
-                    else:
-                        self.get_logger().error(f"Stitch failed (code={status})")
-                        # optional: handle specific errors here…
-        else:
-                return
-        # if len(self.received_images) < 2:
-        #     self.get_logger().warn("Not enough images to stitch yet.")
-        #     return
-
-        # imgs = list(self.received_images)
-        # self.received_images.clear()
-        # self.get_logger().info(f"Stitching {len(imgs)} frames…")
-
-        # status, pano = self.stitch_images(imgs)
-        # if status == cv2.Stitcher_OK:
-        #     self.get_logger().info("Stitch successful")
-        #     if self.crop:
-        #         pano = self.crop_image(pano)
-
-        #     # save with timestamp
-        #     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        #     out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
-        #     cv2.imwrite(out_file, pano)
-        #     self.get_logger().info(f"Saved: {out_file}")
-
-        #     # display
-        #     cv2.imshow("Stitched", pano)
-        #     cv2.waitKey(1)
-        # else:
-        #     self.get_logger().error(f"Stitch failed (code={status})")
-        #     # optional: handle specific errors here…
-
-    def resize_images(self, images, widthThreshold=1500):
-        resized = []
-        for img in images:
-            h, w = img.shape[:2]
-            if w > widthThreshold:
-                r = widthThreshold / w
-                resized.append(cv2.resize(img, (widthThreshold, int(h*r))))
-            else:
-                resized.append(img)
-        return resized
-
-    def preprocess_images(self, images):
-        if not self.preprocessing:
-            return images
-        self.get_logger().info("Preprocessing (CLAHE)…")
-        out = []
-        for img in images:
-            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            l = clahe.apply(l)
-            lab = cv2.merge((l,a,b))
-            out.append(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
-        return out
-
-    def stitch_images(self, images):
-        images = self.resize_images(images)
-        images = self.preprocess_images(images)
-        stitcher = cv2.Stitcher.create(cv2.Stitcher_SCANS)
-        return stitcher.stitch(images)
-
-    def crop_image(self, stitched):
-        self.get_logger().info("Cropping black borders…")
-        img = cv2.copyMakeBorder(stitched,10,10,10,10,cv2.BORDER_CONSTANT,value=(0,0,0))
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray,0,255,cv2.THRESH_BINARY|cv2.THRESH_OTSU)
-        cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if cnts:
-            c = max(cnts, key=cv2.contourArea)
-            x,y,w,h = cv2.boundingRect(c)
-            img = img[y:y+h, x:x+w]
-        return img
 
 def main(args=None):
     rclpy.init(args=args)
@@ -291,6 +301,7 @@ def main(args=None):
     cv2.destroyAllWindows()
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
