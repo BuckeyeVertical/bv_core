@@ -32,6 +32,8 @@ import math
 import numpy as np
 import cv2
 
+
+
 # Works with geometry_msgs.msg.Pose or PoseStamped
 def _pose_xy_yaw(pose_msg):
     """Return (x, y, yaw_rad) from a geometry_msgs Pose or PoseStamped."""
@@ -52,7 +54,6 @@ def _pose_xy_yaw(pose_msg):
 
 def mosaic_from_images_and_poses(
     frames,
-    gsd_m_per_px=0.004,
     background_color=(0, 0, 0)
 ):
     """
@@ -72,7 +73,6 @@ def mosaic_from_images_and_poses(
     if not frames:
         raise ValueError("frames is empty")
 
-    px_per_m = 1.0 / float(gsd_m_per_px)
 
     # --- 1) Predict canvas bounds in world meters by transforming each image's corners ---
     world_corners = []  # list of Nx2 arrays of transformed corners for each image
@@ -80,6 +80,10 @@ def mosaic_from_images_and_poses(
     centers_xy_yaw = []
     sizes_px = []
     for img, pose in frames:
+        base_alt = 9 
+        base_gsd = 0.004
+        gsd_m_per_px = base_gsd * (pose.position.z / base_alt)
+        px_per_m = 1.0 / float(gsd_m_per_px)
         h, w = img.shape[:2]
         x_m, y_m, yaw = _pose_xy_yaw(pose)
         # image size in meters on ground (assuming nadir camera & constant GSD)
