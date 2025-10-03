@@ -12,7 +12,7 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, NavSatFix
+from sensor_msgs.msg import Image, NavSatFix, CameraInfo
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from std_msgs.msg import String
@@ -28,10 +28,6 @@ from enum import Enum
 
 
 # indexing into image gps tuple
-import math
-import numpy as np
-import cv2
-
 
 
 # Works with geometry_msgs.msg.Pose or PoseStamped
@@ -80,7 +76,7 @@ def mosaic_from_images_and_poses(
     centers_xy_yaw = []
     sizes_px = []
     for img, pose in frames:
-        base_alt = 9 
+        base_alt = 9
         base_gsd = 0.004
         gsd_m_per_px = base_gsd * (pose.position.z / base_alt)
         px_per_m = 1.0 / float(gsd_m_per_px)
@@ -163,7 +159,6 @@ def mosaic_from_images_and_poses(
 
     origin_m = (min_x_m, min_y_m)  # world meters corresponding to canvas (0,0)
     return canvas, origin_m, px_per_m
-
 
 class ImageStitcherNode(Node):
     def __init__(self):
@@ -277,7 +272,9 @@ class ImageStitcherNode(Node):
     def timer_callback(self):
         self.get_logger().info(f'callback enter')
         canvas, origin_m, px_per_m = mosaic_from_images_and_poses(self.received_images)
-        path = os.path.join(self.output_path, f"stitch -- stamp -- {datetime.now()}.jpg")
+
+        path = os.path.join(
+            self.output_path, f"stitch -- stamp -- {datetime.now()}.jpg")
         cv2.imwrite(path, canvas)
         self.get_logger().info(f'saved at: {path}')
 
@@ -290,10 +287,36 @@ class ImageStitcherNode(Node):
             self.get_logger().error(f"Failed to convert raw image: {e}")
 
     def pose_callback(self, msg: PoseStamped):
-        self.get_logger().info(f"(msg.pose)")
-        pose = msg.pose
-        self.received_images.append((self.latest_frame, pose))
+        self.get_logger().info(f"image count: {len(self.received_images)}")
 
+        # Require a valid image to pair with this pose
+        if self.latest_frame is None:
+            self.get_logger().debug("No latest_frame yet; skipping append.")
+            return
+
+        pose = msg.pose
+
+        # If this is the first one, always append
+        if not self.received_images:
+            self.received_images.append((self.latest_frame, pose))
+            self.get_logger().info("Appended first image/pose (seed).")
+            # Optional: prevent re-using the same frame with later poses
+            # self.latest_frame = None
+            return
+
+        # Compare to the most recently appended pose (XY distance)
+        last_pose = self.received_images[-1][1]
+        dx = pose.position.x - last_pose.position.x
+        dy = pose.position.y - last_pose.position.y
+        dist_xy = math.hypot(dx, dy)
+
+        if dist_xy >= 5.0:
+            self.received_images.append((self.latest_frame, pose))
+            self.get_logger().info(f"Appended (Δ= {dist_xy:.2f} m ≥ 5.0 m).")
+            # Optional: clear the frame so the same image isn't reused
+            # self.latest_frame = None
+        else:
+            self.get_logger().info(f"Skipped (Δ= {dist_xy:.2f} m < 5.0 m).")
 
 # =====================
 
