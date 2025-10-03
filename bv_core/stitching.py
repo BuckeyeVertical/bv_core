@@ -180,6 +180,7 @@ class ImageStitcherNode(Node):
         self.declare_parameter('crop', True)
         self.declare_parameter('preprocessing', False)
         self.declare_parameter('stitch_interval_sec', 60.0)
+        self.declare_parameter('minimum_stitch_distance', 4.0)
         os.makedirs("images", exist_ok=True)
 
         image_topic = self.get_parameter(
@@ -191,6 +192,8 @@ class ImageStitcherNode(Node):
             'preprocessing').get_parameter_value().bool_value
         self.stitch_interval_sec = self.get_parameter(
             'stitch_interval_sec').get_parameter_value().double_value
+        self.minimum_stitch_distance = self.get_parameter(
+            'minimum_stitch_distance').get_parameter_value().double_value
 
         # Subscriptions
 
@@ -310,13 +313,13 @@ class ImageStitcherNode(Node):
         dy = pose.position.y - last_pose.position.y
         dist_xy = math.hypot(dx, dy)
 
-        if dist_xy >= 5.0:
+        if dist_xy >= self.minimum_stitch_distance:
             self.received_images.append((self.latest_frame, pose))
-            self.get_logger().info(f"Appended (Δ= {dist_xy:.2f} m ≥ 5.0 m).")
+            self.get_logger().info(f"Appended (Δ= {dist_xy:.2f} m ≥ {self.minimum_stitch_distance} m).")
             # Optional: clear the frame so the same image isn't reused
             # self.latest_frame = None
         else:
-            self.get_logger().info(f"Skipped (Δ= {dist_xy:.2f} m < 5.0 m).")
+            self.get_logger().info(f"Skipped (Δ= {dist_xy:.2f} m < {self.minimum_stitch_distance} m).")
 
 # =====================
 
