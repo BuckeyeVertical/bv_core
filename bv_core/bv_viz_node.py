@@ -36,6 +36,8 @@ from std_msgs.msg import String, Int8
 from geometry_msgs.msg import PoseStamped, Point, Vector3
 from visualization_msgs.msg import Marker, MarkerArray
 from mavros_msgs.msg import WaypointReached
+from mavros_msgs.msg import Waypoint
+
 
 
 def yaw_from_quaternion(x, y, z, w) -> float:
@@ -54,6 +56,7 @@ class DroneVizNode(Node):
         self.declare_parameter('mission_state_topic', '/mission_state')
         self.declare_parameter('queue_state_topic', '/queue_state')
         self.declare_parameter('wp_reached_topic', '/mavros/mission/reached')
+        self.declare_parameter('wp_waypoints_traj_topic', '/mavros/mission/waypoints')
 
         self.declare_parameter('fixed_frame', 'map')
         self.declare_parameter('drone_scale', 0.6)
@@ -75,6 +78,7 @@ class DroneVizNode(Node):
         mission_state_topic = self.get_parameter('mission_state_topic').value
         queue_state_topic = self.get_parameter('queue_state_topic').value
         wp_reached_topic = self.get_parameter('wp_reached_topic').value
+        wp_waypoints_traj_topic = self.get_parameter('wp_waypoints_traj_topic').value
 
         # ---------- Publishers ----------
         marker_qos = QoSProfile(
@@ -98,6 +102,7 @@ class DroneVizNode(Node):
         self._last_markers_hud: List[Marker] = []
         # Waypoint markers accumulate; we store them separately to append over time
         self._accum_wp_markers: List[Marker] = []
+        self._last_markers_planned_wp: List[Marker] = []
 
         # ---------- Subscriptions ----------
         pose_qos = QoSProfile(
@@ -111,6 +116,8 @@ class DroneVizNode(Node):
         self.create_subscription(String, mission_state_topic, self.on_mission_state, 10)
         self.create_subscription(Int8, queue_state_topic, self.on_queue_state, 10)
         self.create_subscription(WaypointReached, wp_reached_topic, self.on_wp_reached, 10)
+        self.create_subscription(Waypoint, wp_waypoints_traj_topic, self.on_wp, 10)
+
 
         # Publish at a steady rate so Foxglove receives updates even without new messages
         self.timer = self.create_timer(0.2, self.publish_all)
@@ -396,7 +403,33 @@ class DroneVizNode(Node):
 
         self._accum_wp_markers.extend([s, t])
 
+    def _marker_from_waypoint(self, wp: Waypoint, marker_id: int) -> Marker:
+        m = Marker()
+        m.header.frame_id = self.frame_id
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = 'planned_wp'
+        m.id = marker_id
+        m.type = Marker.SPHERE
+        m.action = Marker.ADD
+        m.pose.position.x = wp.x_lat   # convert if using local coords
+        m.pose.position.y = wp.y_long
+        m.pose.position.z = wp.z_alt
+        m.scale.x = m.scale.y = m.scale.z = 0.25
+        m.color.r = 0.9
+        m.color.g = 0.9
+        m.color.b = 0.1
+        m.color.a = 1.0
+        return m
+
+
     # ---------- Callbacks ----------
+
+    def on_wp(self, msg: Waypoint):
+        marker_id = len(self._last_markers_planned_wp)
+        m = self._marker_from_waypoint(msg, marker_id)
+        self._last_markers_planned_wp.append(m)
+
+
     def on_pose(self, msg: PoseStamped):
         self._last_pose = msg
         frame_id = self.frame_id
@@ -429,6 +462,7 @@ class DroneVizNode(Node):
     def on_wp_reached(self, msg: WaypointReached):
         try:
             seq = int(msg.wp_seq)
+            self.get_logger().info(f"Waypoint reached callback: seq={seq}")
         except Exception:
             seq = 0
         self._wp_markers_add(seq)
@@ -436,6 +470,7 @@ class DroneVizNode(Node):
     # ---------- Publishing ----------
     def publish_all(self):
         ma = MarkerArray()
+       
         # DO NOT clear 'wp' namespace; we accumulate it over time.
         # For other namespaces we already include DELETEALL on each group build.
         for group in (
@@ -444,12 +479,12 @@ class DroneVizNode(Node):
             self._last_markers_dets,
             self._last_markers_hud,
             self._accum_wp_markers,
+            self._last_markers_planned_wp
         ):
             if group: 
                 ma.markers.extend(group)
         if ma.markers:
-            self.marker_pub.publish(ma)  
-
+            self.marker_pub.publish(ma)
 
 
 def main():
