@@ -29,12 +29,32 @@ sudo v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=0
 
 gst-launch-1.0 v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert ! autovideosink
 
-export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
+export GSCAM_CONFIG="v4l2src device=/dev/video4 io-mode=2 do-timestamp=true ! image/jpeg,width=4640,height=3480,framerate=8/1 ! jpegdec ! videoconvert"
 
-export GSCAM_CONFIG="v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert"
+export GSCAM_CONFIG="v4l2src device=/dev/video4 io-mode=2 do-timestamp=true ! image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec ! videoconvert"
 
 ros2 run gscam2 gscam_main -p use_gst_timestamps=true
 
+ros2 run image_transport republish raw compressed \ 
+	--ros-args \
+	-r in:=/camera/image_raw -r out:=/camera/image_compressed \
+	-p compressed.format:=jpeg \
+	-p compressed.jpeg_quality:=80
+
+docker run -it --rm \
+	--net=host \
+	--ipc=host \
+	--privileged \
+	-v /dev/bus/usb:/dev/bus/usb \
+	gscam-cont:latest \
+	bash
+	
+docker run -it --rm \
+	--net=host \
+	--device=/dev/video4:/dev/video4
+	gscam-cont bash
+	
+	
 
 Terminal 3
 __________
