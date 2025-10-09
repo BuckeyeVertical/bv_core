@@ -50,7 +50,7 @@ ENV GeographicLib_DIR=/usr/local/lib/cmake/GeographicLib
 ENV CMAKE_PREFIX_PATH=/usr/local:/usr:/usr/lib/aarch64-linux-gnu
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ros-humble-mavros-msgs ros-humble-cv-bridge \
+    ros-humble-mavros ros-humble-mavros-msgs ros-humble-cv-bridge \
     python3-opencv python3-pil \
  && rm -rf /var/lib/apt/lists/*
  
@@ -68,6 +68,12 @@ RUN apt-get update && \
     apt-get install -y ros-${ROS_DISTRO}-foxglove-bridge && \
     rm -rf /var/lib/apt/lists/*
 
+# RF-DETR (cloned one level above bv_ws per README instructions)
+WORKDIR /
+RUN git clone --depth 1 https://github.com/BuckeyeVertical/rf-detr.git && \
+    pip install --no-cache-dir -e /rf-detr
+
+WORKDIR /bv_ws
 
 # Entrypoint & env
 COPY entrypoint.sh /entrypoint.sh

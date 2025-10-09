@@ -205,6 +205,8 @@ Prereq: Install and set up Docker Desktop and leave the application open
 ```bash
 cd ~/bv_ws
 mkdir src
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git
+touch PX4-Autopilot/COLCON_IGNORE
 cd src
 # clone the two repos into src
 git clone https://github.com/BuckeyeVertical/bv_core.git
@@ -230,6 +232,7 @@ docker build -f Dockerfile.x86 -t bv_img:x86 .
 4. Run the container interactively:
 ```bash
 ./run_docker.sh <IMAGE_NAME>
+bash ./PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 ```
 
 ## How to run
@@ -321,6 +324,7 @@ Prerequisites
 
 ```bash
 # If you don't already have PX4 worlds from the BuckeyeVertical repo
+# Follow steps in the readme of this repo
 git clone https://github.com/BuckeyeVertical/PX4-gazebo-models.git
 ```
 
@@ -339,7 +343,8 @@ git checkout humble
 git pull
 
 # Move only the bridge package into src (or build in place and remove other packages later)
-mv ros_gz/ros_gz_bridge ../
+mv ros_gz_bridge ..
+cd ..
 rm -rf ros_gz
 
 cd ~/bv_ws

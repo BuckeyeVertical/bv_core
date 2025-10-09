@@ -7,7 +7,7 @@ HOST_DIR="$(cd ../../.. && pwd)"
 CONTAINER_SRC_DIR="/bv_ws"
 
 
-docker run -it --rm \
+docker run -it \
   --name "$CONTAINER_NAME" \
   --privileged \
   -v "$HOST_DIR":"$CONTAINER_SRC_DIR" \

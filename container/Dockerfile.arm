@@ -28,9 +28,9 @@ RUN pip install --no-cache-dir -r /requirements.txt
 # -------------------- ROS 2 workspace --------------------
 RUN mkdir -p /bv_ws/src
 WORKDIR /bv_ws
-RUN cd /root && \
-    git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git && \
-    yes | bash /root/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
+# RUN cd /root && \
+#     git clone --depth 1 --recursive https://github.com/PX4/PX4-Autopilot.git && \
+#     yes | bash /root/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 # Build context must include ./src at repo root
 #COPY src/ /ros2_ws/src/
 
@@ -53,7 +53,7 @@ ENV CMAKE_PREFIX_PATH=/usr/local:/usr:/usr/lib/aarch64-linux-gnu
 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ros-humble-mavros-msgs ros-humble-cv-bridge \
+    ros-humble-mavros ros-humble-mavros-msgs ros-humble-cv-bridge \
     python3-opencv python3-pil \
  && rm -rf /var/lib/apt/lists/*
  
@@ -71,6 +71,12 @@ RUN apt-get update && \
     apt-get install -y ros-${ROS_DISTRO}-foxglove-bridge && \
     rm -rf /var/lib/apt/lists/*
 
+
+WORKDIR /
+RUN git clone https://github.com/BuckeyeVertical/rf-detr.git && \
+    pip install --no-cache-dir -e /rf-detr
+
+WORKDIR /bv_ws
 
 # Entrypoint & env
 COPY entrypoint.sh /entrypoint.sh
