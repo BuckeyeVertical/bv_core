@@ -82,14 +82,16 @@ class GzTransportPipeline(VisionPipeline):
         if msg.pixel_format_type != expected_format:
             raise ValueError("Expected L_INT8 (mono8) pixel format from Gazebo camera")
 
-        
+        #flat array view on top of raw bytes from gazebo
         data = np.frombuffer(msg.data, dtype=np.uint8)
-
+        
+        #how many bytes each row occupies
         row_stride = msg.step if msg.step > 0 else msg.width
         if row_stride * msg.height > data.size:
             raise ValueError("Image buffer shorter than expected for reported stride/height")
-
+        #convert flat bugger to 2d array 
         frame = data.reshape(msg.height, row_stride)
+        #remove padding from stride > width
         frame = frame[:, : msg.width]
-
+        #return copy so we dont run into issues with references to gazebos data
         return frame.copy()
