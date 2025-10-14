@@ -1,8 +1,25 @@
 """Gazebo Transport-based vision pipeline"""
 
+import importlib
 import numpy as np
-import gz.transport as gz_transport 
-from gz.msgs import image_pb2 
+
+try:
+    import gz.transport as gz_transport
+except ImportError:
+    gz_transport = importlib.import_module("gz.transport13")
+
+try:
+    from gz.msgs import image_pb2
+except ImportError:
+    image_pb2 = None
+    for module_name in ("gz.msgs10.image_pb2", "gz.msgs13.image_pb2"):
+        try:
+            image_pb2 = importlib.import_module(module_name)
+            break
+        except ImportError:
+            continue
+    if image_pb2 is None:
+        raise
 
 from .VisionPipeline import VisionPipeline
 

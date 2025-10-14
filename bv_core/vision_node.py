@@ -5,12 +5,10 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 
-from sensor_msgs.msg import Image
 from std_msgs.msg import String, Int8
 from .vision import Detector
 import queue
 import threading
-from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
 from mavros_msgs.msg import WaypointReached
 from geometry_msgs.msg import Vector3
@@ -20,8 +18,9 @@ from rfdetr.util.coco_classes import COCO_CLASSES
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
-from message_filters import Subscriber, ApproximateTimeSynchronizer
 import time
+
+from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
 class VisionNode(Node):
     def __init__(self):
@@ -30,12 +29,11 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.image_sub = self.create_subscription(
-            msg_type=Image, 
-            topic='/image_raw',
-            callback=self.camera_callback,
-            qos_profile=qos
-        )
+        self.pipeline_topic = '/camera/image'
+        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
+        self.pipeline_running = False
+        self.scan_active = threading.Event()
+        self.shutdown_flag = threading.Event()
 
         self.reached_sub = self.create_subscription(
             WaypointReached,
@@ -101,26 +99,43 @@ class VisionNode(Node):
         self.queue = queue.Queue()
 
         self.worker = threading.Thread(target=self.worker_loop, daemon=True)
+        self.worker.start()
+
+        self.frame_fetcher = threading.Thread(target=self.frame_fetch_loop, daemon=True)
+        self.frame_fetcher.start()
 
         self.prev_state = ""
         self.state = ""
-        self.last_enqueue = self.get_clock().now()
 
         self.latest_wp = None
         self.last_wp = None
 
     def mission_state_callback(self, msg: String):
-        if msg.data != self.prev_state:
-            self.state = msg.data
-            self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
+        if msg.data == self.prev_state:
+            return
 
-            if self.state == 'scan':
-                self.worker.start()
+        new_state = msg.data
+        self.state = new_state
+        self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
 
-            if self.prev_state == 'scan':
-                self.worker.join()
-                
-        self.prev_state = msg.data
+        if new_state == 'scan':
+            if not self.pipeline_running:
+                try:
+                    self.pipeline.start()
+                    self.pipeline_running = True
+                except RuntimeError as exc:
+                    self.get_logger().error(f"Failed to start Gazebo pipeline: {exc}")
+                    self.state = self.prev_state
+                    return
+            self.scan_active.set()
+        else:
+            self.scan_active.clear()
+            if self.pipeline_running:
+                self.pipeline.stop()
+                self.pipeline_running = False
+            self.queue.put(None)
+
+        self.prev_state = new_state
 
     def handle_reached(self, msg):
         if self.last_wp != None and msg.wp_seq != self.last_wp:
@@ -128,19 +143,36 @@ class VisionNode(Node):
             self.latest_wp = msg.wp_seq
         
         self.last_wp = msg.wp_seq
+#
+    def frame_fetch_loop(self):
+        while not self.shutdown_flag.is_set():
+            if not self.scan_active.wait(timeout=0.1):
+                continue
 
-    def camera_callback(self, msg):
-        # now = self.get_clock().now()
-        if self.state != 'scan' or self.latest_wp == None:
-            return
-    
-        # self.get_logger().info("Waiting 1.0 seconds before adding to queue")
-        # time.sleep(1.0)
-        self.get_logger().info("Adding to queue")
-        self.queue.put(msg)
-        self.latest_wp = None
-        # self.get_logger().info(f"Adding to queue {(now - self.last_enqueue).nanoseconds}")
-        # self.last_enqueue = now
+            if self.shutdown_flag.is_set():
+                break
+
+            if not self.pipeline_running:
+                time.sleep(0.05)
+                continue
+
+            try:
+                frame = self.pipeline.get_frame(timeout=0.1)
+            except RuntimeError:
+                time.sleep(0.05)
+                continue
+
+            if frame is None:
+                continue
+
+            if self.state != 'scan' or self.latest_wp is None:
+                time.sleep(0.05)
+                continue
+
+            stamp = self.get_clock().now()
+            self.get_logger().info("Adding to queue")
+            self.queue.put((frame, stamp))
+            self.latest_wp = None
 
     def timer_cb(self):
         # queue.unfinished_tasks is incremented on put(), 
@@ -153,12 +185,26 @@ class VisionNode(Node):
         self.queue_state_pub.publish(msg)
 
     def worker_loop(self):
-        while rclpy.ok() and self.state == 'scan':
-            msg = self.queue.get()
-            self.get_logger().info(f"Processsing frame from queue")
+        while not self.shutdown_flag.is_set():
             try:
-                flat = np.frombuffer(msg.data, dtype=np.uint8)
-                frame = flat.reshape((msg.height, msg.width, 3))
+                item = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if item is None:
+                self.queue.task_done()
+                continue
+
+            if self.state != 'scan':
+                self.queue.task_done()
+                continue
+
+            frame, stamp = item
+            self.get_logger().info("Processsing frame from queue")
+            try:
+                if frame.ndim == 2:
+                    frame = np.repeat(frame[:, :, None], 3, axis=2)
+
                 detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
 
                 labels = [
@@ -170,25 +216,27 @@ class VisionNode(Node):
                 annotated_frame = self.detector.annotate_frame(frame, detections, labels)
                 self.detector.save_frame(annotated_frame, "annotated_frames")
 
-                self.get_logger().info(f"Saved Frame")
+                self.get_logger().info("Saved Frame")
 
                 detections_msg = ObjectDetections()
                 detections_msg.dets = []
-                detections_msg.header = msg.header
+                detections_msg.header.stamp = stamp.to_msg()
+                detections_msg.header.frame_id = self.pipeline_topic
 
                 for (x1, y1, x2, y2), score, cls in zip(
-                                                            detections.xyxy,
-                                                            detections.confidence,
-                                                            detections.class_id
-                                                        ):
+                        detections.xyxy,
+                        detections.confidence,
+                        detections.class_id,
+                ):
                     if score > self.det_thresh:
                         vec = Vector3()
-                        vec.x = float(x1 + x2)/2.0
-                        vec.y = float(y1 + y2)/2.0
+                        vec.x = float(x1 + x2) / 2.0
+                        vec.y = float(y1 + y2) / 2.0
                         vec.z = float(cls)
                         detections_msg.dets.append(vec)
+
                 self.obj_dets_pub.publish(detections_msg)
-                
+
             except Exception as e:
                 tb = traceback.format_exc()
                 self.get_logger().error(
@@ -196,6 +244,15 @@ class VisionNode(Node):
                 )
             finally:
                 self.queue.task_done()
+
+    def destroy_node(self):
+        self.shutdown_flag.set()
+        self.scan_active.set()
+        if self.pipeline_running:
+            self.pipeline.stop()
+            self.pipeline_running = False
+        self.queue.put(None)
+        return super().destroy_node()
 
 def main(args=None):
     # Before running, ensure PX4’s yaw mode is set:

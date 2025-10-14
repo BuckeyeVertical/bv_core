@@ -398,7 +398,7 @@ class Detector():
         Image.fromarray(frame).save(output_path)
         self.frame_save_cnt += 1
 
-    def create_model(self, dtype=torch.float16):
+    def create_model(self, dtype=torch.float32):
         # Initialize the model
         torch.cuda.empty_cache()
         model = RFDETRBase(resolution=self.resolution)
