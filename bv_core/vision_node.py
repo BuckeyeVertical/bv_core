@@ -19,6 +19,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
 import time
+import cv2
 
 from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
@@ -29,7 +30,7 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.pipeline_topic = '/camera/image'
+        self.pipeline_topic = '/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image'
         self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
         self.pipeline_running = False
         self.scan_active = threading.Event()
@@ -200,6 +201,8 @@ class VisionNode(Node):
                 continue
 
             frame, stamp = item
+            cv2.imshow("gazebo_camera", frame)
+            cv2.waitKey(1)
             self.get_logger().info("Processsing frame from queue")
             try:
                 if frame.ndim == 2:
@@ -252,6 +255,7 @@ class VisionNode(Node):
             self.pipeline.stop()
             self.pipeline_running = False
         self.queue.put(None)
+        cv2.destroyAllWindows()
         return super().destroy_node()
 
 def main(args=None):
