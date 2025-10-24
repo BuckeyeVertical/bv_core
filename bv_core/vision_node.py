@@ -6,7 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 
 from std_msgs.msg import String, Int8
-from .vision import Detector
+# from .vision import Detector
 import queue
 import threading
 from bv_msgs.msg import ObjectDetections
@@ -14,13 +14,13 @@ from mavros_msgs.msg import WaypointReached
 from geometry_msgs.msg import Vector3
 import numpy as np
 import traceback
-from rfdetr.util.coco_classes import COCO_CLASSES
+#from rfdetr.util.coco_classes import COCO_CLASSES
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
 import time
 
-from .pipelines.gz_transport_pipeline import GzTransportPipeline
+from bv_core.pipelines.camera_pipeline import CameraPipeline
 
 class VisionNode(Node):
     def __init__(self):
@@ -29,9 +29,21 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.pipeline_topic = '/camera/image'
-        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
+        self.gst = (
+            "v4l2src device=/dev/video0 ! "
+            "video/x-raw, width=640, height=480, framerate=30/1 ! "
+            "videoconvert ! appsink"
+        )   
+
+        self.pipeline = CameraPipeline(
+            gst_pipeline=self.gst,
+            record=True,           # Publishes /image_compressed
+            ros_context=self,      # Needed for ROS publisher
+            fps=30.0,
+            max_queue_size=2
+        )
         self.pipeline_running = False
+
         self.scan_active = threading.Event()
         self.shutdown_flag = threading.Event()
 
@@ -94,7 +106,7 @@ class VisionNode(Node):
 
         self.obj_dets = []
 
-        self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
+       #self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
 
         self.queue = queue.Queue()
 
@@ -205,25 +217,25 @@ class VisionNode(Node):
                 if frame.ndim == 2:
                     frame = np.repeat(frame[:, :, None], 3, axis=2)
 
-                detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
+               # detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
 
-                labels = [
-                    f"{COCO_CLASSES[class_id]} {confidence:.2f}"
-                    for class_id, confidence
-                    in zip(detections.class_id, detections.confidence)
-                ]
+                #labels = [
+                #   f"{COCO_CLASSES[class_id]} {confidence:.2f}"
+                #    for class_id, confidence
+                #    in zip(detections.class_id, detections.confidence)
+                #]
 
-                annotated_frame = self.detector.annotate_frame(frame, detections, labels)
-                self.detector.save_frame(annotated_frame, "annotated_frames")
+                #annotated_frame = self.detector.annotate_frame(frame, detections, labels)
+                #self.detector.save_frame(annotated_frame, "annotated_frames")
 
                 self.get_logger().info("Saved Frame")
 
-                detections_msg = ObjectDetections()
-                detections_msg.dets = []
-                detections_msg.header.stamp = stamp.to_msg()
-                detections_msg.header.frame_id = self.pipeline_topic
+                #detections_msg = ObjectDetections()
+                #detections_msg.dets = []
+                #detections_msg.header.stamp = stamp.to_msg()
+                #detections_msg.header.frame_id = self.pipeline_topic
 
-                for (x1, y1, x2, y2), score, cls in zip(
+                """for (x1, y1, x2, y2), score, cls in zip(
                         detections.xyxy,
                         detections.confidence,
                         detections.class_id,
@@ -236,7 +248,7 @@ class VisionNode(Node):
                         detections_msg.dets.append(vec)
 
                 self.obj_dets_pub.publish(detections_msg)
-
+                """
             except Exception as e:
                 tb = traceback.format_exc()
                 self.get_logger().error(
@@ -251,6 +263,7 @@ class VisionNode(Node):
         if self.pipeline_running:
             self.pipeline.stop()
             self.pipeline_running = False
+        cv2.destroyAllWindows()
         self.queue.put(None)
         return super().destroy_node()
 
