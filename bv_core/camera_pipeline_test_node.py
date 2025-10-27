@@ -14,9 +14,9 @@ class CameraPipelineTestNode(Node):
 
         # Example GStreamer pipeline: modify to match your setup
         self.gst = (
-            "v4l2src device=/dev/video0 ! "
-            "video/x-raw, width=640, height=480, framerate=30/1 ! "
-            "videoconvert ! appsink"
+            "v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! "
+            "image/jpeg,width=3840,height=2160,framerate=24/1 ! jpegdec"
+            "videoconvert"
         )
 
         # Create CameraPipeline (record to /image_compressed)
