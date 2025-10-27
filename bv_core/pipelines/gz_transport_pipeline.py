@@ -21,7 +21,7 @@ except ImportError:
     if image_pb2 is None:
         raise
 
-from .VisionPipeline import VisionPipeline
+from .Vision_Pipeline import VisionPipeline
 
 
 ImageMsg = image_pb2.Image

@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CompressedImage
-from .VisionPipeline import VisionPipeline
+from .Vision_Pipeline import VisionPipeline
 
 
 class CameraPipeline(VisionPipeline):
