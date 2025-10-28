@@ -149,7 +149,7 @@ class MissionRunner(Node):
         self.last_winch_change = time.monotonic()   #  ⇦  NEW
 
         # FSM variables
-        self.state = 'scan'
+        self.state = 'lap'
         self.lap_count = 1
         self.deliver_index = 0
         self.in_auto_mission = False
