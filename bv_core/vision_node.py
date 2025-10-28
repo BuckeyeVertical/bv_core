@@ -6,6 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 
 from std_msgs.msg import String, Int8
+from sensor_msgs.msg import Image
 from .vision import Detector
 import queue
 import threading
@@ -20,6 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 import os
 import time
 import cv2
+from cv_bridge import CvBridge, CvBridgeError
 
 from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
@@ -58,6 +60,17 @@ class VisionNode(Node):
             topic='/obj_dets',
             qos_profile=objs_pub_qos
         )
+
+        live_feed_qos = QoSProfile(depth=5)
+        live_feed_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+
+        self.live_feed_pub = self.create_publisher(
+            msg_type=Image,
+            topic='/gazebo/live_feed',
+            qos_profile=live_feed_qos,
+        )
+
+        self.bridge = CvBridge()
 
         qos_queue = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -166,6 +179,24 @@ class VisionNode(Node):
             if frame is None:
                 continue
 
+            try:
+                if frame.ndim == 3 and frame.shape[2] == 1:
+                    frame_to_publish = frame[:, :, 0]
+                    encoding = "mono8"
+                elif frame.ndim == 2:
+                    frame_to_publish = frame
+                    encoding = "mono8"
+                else:
+                    frame_to_publish = frame
+                    encoding = "bgr8"
+
+                live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
+                live_msg.header.stamp = self.get_clock().now().to_msg()
+                live_msg.header.frame_id = self.pipeline_topic
+                self.live_feed_pub.publish(live_msg)
+            except (CvBridgeError, ValueError) as exc:
+                self.get_logger().error(f"Failed to publish live feed frame: {exc}")
+
             if self.state != 'scan' or self.latest_wp is None:
                 time.sleep(0.05)
                 continue
@@ -201,8 +232,6 @@ class VisionNode(Node):
                 continue
 
             frame, stamp = item
-            cv2.imshow("gazebo_camera", frame)
-            cv2.waitKey(1)
             self.get_logger().info("Processsing frame from queue")
             try:
                 if frame.ndim == 2:
@@ -255,7 +284,6 @@ class VisionNode(Node):
             self.pipeline.stop()
             self.pipeline_running = False
         self.queue.put(None)
-        cv2.destroyAllWindows()
         return super().destroy_node()
 
 def main(args=None):
