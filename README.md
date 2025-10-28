@@ -285,7 +285,12 @@ colcon build
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
 make px4_sitl gz_x500
+
+# once px4 is running
+# in the same terminal
+param set NAV_DLL_ACT 0
 ```
+
 
 More on Gazebo (gz) simulation configuration and usage:
 - https://docs.px4.io/main/en/sim_gazebo_gz/
