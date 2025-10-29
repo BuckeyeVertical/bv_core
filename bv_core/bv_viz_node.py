@@ -368,7 +368,7 @@ class DroneVizNode(Node):
         """Add a sphere + label at the last known drone position when a waypoint is reached."""
         if self._last_pose is None:
             return
-        frame_id = self._frame_id(self._last_pose.header.frame_id)
+        frame_id = self.frame_id
         pos = self._last_pose.pose.position
 
         # Sphere
