@@ -22,6 +22,7 @@ import os
 import time
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
+from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
 from bv_core.pipelines.camera_pipeline import CameraPipeline
 
