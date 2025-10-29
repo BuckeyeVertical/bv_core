@@ -63,3 +63,4 @@ rf-detr-large.pth
 # render cad too large for github
 meshes/Render_CAD.STL
 meshes/Render_CAD.stl
+bv_core/.DS_Store
