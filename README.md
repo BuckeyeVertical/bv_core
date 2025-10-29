@@ -170,6 +170,16 @@ sudo apt install ros-humble-mavros
 ```
 *Note: If MAVROS installation doesn't work, you can build it from source by cloning the MAVROS package into your ros workspace.*
 
+*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+```bash
+sudo apt install geographiclib-tools
+sudo /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
+
+# Then copy the geoid file to the correct location
+sudo mkdir -p /usr/share/GeographicLib/geoids
+sudo cp /usr/local/share/GeographicLib/geoids/egm96-5.pgm    /usr/share/GeographicLib/geoids/
+```
+
 Build and install:
 1) Source your ROS 2 and MAVROS environment.
 2) Install Python packages in your workspace venv if desired.
@@ -275,7 +285,12 @@ colcon build
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
 make px4_sitl gz_x500
+
+# once px4 is running
+# in the same terminal
+param set NAV_DLL_ACT 0
 ```
+
 
 More on Gazebo (gz) simulation configuration and usage:
 - https://docs.px4.io/main/en/sim_gazebo_gz/
