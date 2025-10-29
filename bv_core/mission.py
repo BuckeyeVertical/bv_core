@@ -157,8 +157,11 @@ class MissionRunner(Node):
 
         self.completed_deliver_build = False
         
-        self.start_scan()
-        self.timer = self.create_timer(0.5, self.timer_callback)
+        arm_req = CommandBool.Request()
+        arm_req.value = True
+        fut = self.cli_arm.call_async(arm_req)
+        fut.add_done_callback(self.arm_cb)
+
 
 
     def queue_state_callback(self, msg: Int8):
@@ -171,26 +174,26 @@ class MissionRunner(Node):
         msg.data = self.state
         self.mission_state_pub.publish(msg)
         ## Commented out because we only want to scan and then return to launch
-        # if self.queue_state == 1 and self.maybe_deliver and not self.transition_in_progress :
-        #     self.get_logger().info("Starting deliver")
-        #     self.maybe_deliver = False
-        #     self.start_deliver()
-        #     if self.completed_deliver_build is True:
-        #         self.maybe_deliver = False
+        if self.queue_state == 1 and self.maybe_deliver and not self.transition_in_progress :
+            self.get_logger().info("Starting deliver")
+            self.maybe_deliver = False
+            self.start_deliver()
+            if self.completed_deliver_build is True:
+                self.maybe_deliver = False
 
-        # if self.state in ('deploy',):                  # run only while we are in DEPLOY
-        #     now = time.monotonic()
-        #     if now - self.last_winch_change >= 5.0:    # 5-second cadence
-        #         # cycle 0 ➜ 1 ➜ 2 ➜ 0 …
-        #         self.winch_state = (self.winch_state + 1) % 3
-        #         self.last_winch_change = now
-        #
-        #         # console feedback so we can watch it in SITL
-        #         self.get_logger().info(
-        #             f'[DEPLOY] Winch state → {self.winch_state}')
-        #
-        #         # command the servo (real HW) or just print (SITL)
-        #         self.deploy()
+        if self.state in ('deploy',):                  # run only while we are in DEPLOY
+            now = time.monotonic()
+            if now - self.last_winch_change >= 5.0:    # 5-second cadence
+                # cycle 0 ➜ 1 ➜ 2 ➜ 0 …
+                self.winch_state = (self.winch_state + 1) % 3
+                self.last_winch_change = now
+
+                # console feedback so we can watch it in SITL
+                self.get_logger().info(
+                    f'[DEPLOY] Winch state → {self.winch_state}')
+
+                # command the servo (real HW) or just print (SITL)
+                self.deploy()
 
     def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
         wp_list = []
@@ -367,8 +370,8 @@ class MissionRunner(Node):
             self.start_scan()
         elif self.state == 'scan':
             #for test flight
-            self.return_to_rtl()
-            # self.maybe_deliver = True
+            # self.return_to_rtl()
+            self.maybe_deliver = True
         elif self.state == 'deliver':
             self.state = 'deploy'
         elif self.state == 'deploy':
@@ -396,11 +399,28 @@ class MissionRunner(Node):
                 f'Push failed: transferred {resp.wp_transfered}')
             self.transition_in_progress = False
             return
-        self.get_logger().info('Mission pushed ✓ → Arming…')
-        arm_req = CommandBool.Request()
-        arm_req.value = True
-        fut = self.cli_arm.call_async(arm_req)
-        fut.add_done_callback(self.arm_cb)
+
+        self.get_logger().info('Mission pushed ✓ -> setting mode')
+        mode_req = SetMode.Request()
+        mode_req.base_mode = 0
+        mode_req.custom_mode = 'AUTO.MISSION'
+        fut = self.cli_mode.call_async(mode_req)
+        fut.add_done_callback(self.mode_cb)
+
+    def mode_cb(self, future):
+        resp = future.result()
+        if not resp.mode_sent:
+            self.get_logger().error('Mode change failed')
+            self.transition_in_progress = False
+            return
+        self.get_logger().info('Mode set ✓ → flying...')
+        self.in_auto_mission = True
+        self.transition_in_progress = False
+        # Reset all servos to default on takeoff
+        for i, pwm in enumerate(self.default_servo_pwms, start=1):
+            self.set_servo_pwm(i, pwm)
+        self.set_mpc_xy_vel_all(self.desired_speed)
+
 
     def arm_cb(self, future):
         resp = future.result()
@@ -415,20 +435,9 @@ class MissionRunner(Node):
         fut = self.cli_mode.call_async(mode_req)
         fut.add_done_callback(self.mode_cb)
 
-    # THIS
-    def mode_cb(self, future):
-        resp = future.result()
-        if not resp.mode_sent:
-            self.get_logger().error('Mode change failed')
-            self.transition_in_progress = False
-            return
-        self.get_logger().info('Mode set ✓ → flying...')
-        self.in_auto_mission = True
-        self.transition_in_progress = False
-        # Reset all servos to default on takeoff
-        for i, pwm in enumerate(self.default_servo_pwms, start=1):
-            self.set_servo_pwm(i, pwm)
-        self.set_mpc_xy_vel_all(self.desired_speed)
+        ##STARTING POINT
+        self.start_scan()
+        self.timer = self.create_timer(0.5, self.timer_callback)
 
     def set_mpc_xy_vel_all(self, speed):
         req = ParamSetV2.Request()
@@ -470,6 +479,7 @@ class MissionRunner(Node):
             self.home_alt = msg.altitude
             self.get_logger().info(
                 f'GPS fixed: lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}')
+
         # self.destroy_subscription(self.gps_sub)
         # self.gps_sub = None
 
