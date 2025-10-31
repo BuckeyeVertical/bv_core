@@ -358,8 +358,7 @@ git checkout humble
 git pull
 
 # Move only the bridge package into src (or build in place and remove other packages later)
-mv ros_gz_bridge ..
-cd ..
+mv ros_gz/ros_gz_bridge ../
 rm -rf ros_gz
 
 cd ~/bv_ws
