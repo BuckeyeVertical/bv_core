@@ -7,6 +7,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from std_msgs.msg import String, Int8
 from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from .vision import Detector
 import queue
 import threading
@@ -15,7 +16,7 @@ from mavros_msgs.msg import WaypointReached
 from geometry_msgs.msg import Vector3
 import numpy as np
 import traceback
-#from rfdetr.util.coco_classes import COCO_CLASSES
+from rfdetr.util.coco_classes import COCO_CLASSES
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -62,15 +63,19 @@ class VisionNode(Node):
             topic='/obj_dets',
             qos_profile=objs_pub_qos
         )
-
-        live_feed_qos = QoSProfile(depth=5)
-        live_feed_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-
-        self.live_feed_pub = self.create_publisher(
-            msg_type=Image,
-            topic='/gazebo/live_feed',
-            qos_profile=live_feed_qos,
+        
+        self.compressed_pub = self.create_publisher(
+            CompressedImage, '/image_compressed', 10
         )
+
+        #live_feed_qos = QoSProfile(depth=5)
+        #live_feed_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+
+        #self.live_feed_pub = self.create_publisher(
+        #    msg_type=Image,
+        #    topic='/gazebo/live_feed',
+        #    qos_profile=live_feed_qos,
+        #)
 
         self.bridge = CvBridge()
 
@@ -110,7 +115,7 @@ class VisionNode(Node):
 
         self.obj_dets = []
 
-       #self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
+        self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
 
         self.queue = queue.Queue()
 
@@ -195,7 +200,7 @@ class VisionNode(Node):
                 live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
                 live_msg.header.stamp = self.get_clock().now().to_msg()
                 live_msg.header.frame_id = self.pipeline_topic
-                self.live_feed_pub.publish(live_msg)
+                #self.live_feed_pub.publish(live_msg)
             except (CvBridgeError, ValueError) as exc:
                 self.get_logger().error(f"Failed to publish live feed frame: {exc}")
 
@@ -239,25 +244,29 @@ class VisionNode(Node):
                 if frame.ndim == 2:
                     frame = np.repeat(frame[:, :, None], 3, axis=2)
 
-               # detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
+                detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
 
-                #labels = [
-                #   f"{COCO_CLASSES[class_id]} {confidence:.2f}"
-                #    for class_id, confidence
-                #    in zip(detections.class_id, detections.confidence)
-                #]
+                labels = [
+                   f"{COCO_CLASSES[class_id]} {confidence:.2f}"
+                    for class_id, confidence
+                    in zip(detections.class_id, detections.confidence)
+                ]
 
-                #annotated_frame = self.detector.annotate_frame(frame, detections, labels)
-                #self.detector.save_frame(annotated_frame, "annotated_frames")
+                annotated_frame = self.detector.annotate_frame(frame, detections, labels)
+                self.detector.save_frame(annotated_frame, "annotated_frames")
+                
 
                 self.get_logger().info("Saved Frame")
+                msg = self.bridge.cv2_to_compressed_imgmsg(annotated_frame, dst_format='jpeg')
+                msg.header.stamp = self.get_clock().now().to_msg()
+                self.compressed_pub.publish(msg)
+                
+                detections_msg = ObjectDetections()
+                detections_msg.dets = []
+                detections_msg.header.stamp = stamp.to_msg()
+                detections_msg.header.frame_id = self.pipeline_topic
 
-                #detections_msg = ObjectDetections()
-                #detections_msg.dets = []
-                #detections_msg.header.stamp = stamp.to_msg()
-                #detections_msg.header.frame_id = self.pipeline_topic
-
-                """for (x1, y1, x2, y2), score, cls in zip(
+                for (x1, y1, x2, y2), score, cls in zip(
                         detections.xyxy,
                         detections.confidence,
                         detections.class_id,
@@ -270,7 +279,7 @@ class VisionNode(Node):
                         detections_msg.dets.append(vec)
 
                 self.obj_dets_pub.publish(detections_msg)
-                """
+                
             except Exception as e:
                 tb = traceback.format_exc()
                 self.get_logger().error(
