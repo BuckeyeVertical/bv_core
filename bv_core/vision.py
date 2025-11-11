@@ -398,13 +398,26 @@ class Detector():
         Image.fromarray(frame).save(output_path)
         self.frame_save_cnt += 1
 
-    def create_model(self, dtype=torch.float16):
-        # Initialize the model
-        torch.cuda.empty_cache()
+    def create_model(self, dtype=None):
+        # Prefer fp16 on GPU, fall back to fp32 elsewhere.
+        if dtype is None:
+            if torch.cuda.is_available():
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            device_info = "cuda"
+        else:
+            device_info = "cpu"
+
         model = RFDETRBase(resolution=self.resolution)
 
         model.optimize_for_inference(batch_size=self.batch_size, dtype=dtype)
 
-        rclpy.logging.get_logger("filtering_node").info(f"Model created with batch size: {self.batch_size}")
+        rclpy.logging.get_logger("vision_node").info(
+            f"Model created with batch size: {self.batch_size} (dtype={dtype}, device={device_info})"
+        )
 
         return model

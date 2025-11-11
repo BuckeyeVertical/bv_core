@@ -170,6 +170,16 @@ sudo apt install ros-humble-mavros
 ```
 *Note: If MAVROS installation doesn't work, you can build it from source by cloning the MAVROS package into your ros workspace.*
 
+*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+```bash
+sudo apt install geographiclib-tools
+sudo /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
+
+# Then copy the geoid file to the correct location
+sudo mkdir -p /usr/share/GeographicLib/geoids
+sudo cp /usr/local/share/GeographicLib/geoids/egm96-5.pgm    /usr/share/GeographicLib/geoids/
+```
+
 Build and install:
 1) Source your ROS 2 and MAVROS environment.
 2) Install Python packages in your workspace venv if desired.
@@ -205,6 +215,8 @@ Prereq: Install and set up Docker Desktop and leave the application open
 ```bash
 cd ~/bv_ws
 mkdir src
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git
+touch PX4-Autopilot/COLCON_IGNORE
 cd src
 # clone the two repos into src
 git clone https://github.com/BuckeyeVertical/bv_core.git
@@ -230,6 +242,7 @@ docker build -f Dockerfile.x86 -t bv_img:x86 .
 4. Run the container interactively:
 ```bash
 ./run_docker.sh <IMAGE_NAME>
+bash ./PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 ```
 
 ## How to run
@@ -254,6 +267,11 @@ ros2 bag play <bag_path>
 
 [*Learn more about ros bags.*](https://docs.ros.org/en/foxy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html)
 
+To run foxglove:
+```bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765
+```
+
 ## Simulation (SITL) and vehicle setup
 
 Environment and build (all terminals):
@@ -267,7 +285,12 @@ colcon build
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
 make px4_sitl gz_x500
+
+# once px4 is running
+# in the same terminal
+param set NAV_DLL_ACT 0
 ```
+
 
 More on Gazebo (gz) simulation configuration and usage:
 - https://docs.px4.io/main/en/sim_gazebo_gz/
@@ -300,6 +323,118 @@ ros2 launch bv_core mission.launch.py
 # or run only the mission node
 ros2 run bv_core mission_node
 ```
+
+## SITL Camera Setup (Gazebo + ros_gz_bridge)
+
+This section walks through running PX4 SITL with a monocular down-facing camera in Gazebo (gz) and bridging the simulator camera into ROS 2 using `ros_gz_bridge`.
+
+Prerequisites
+- A working PX4-Autopilot checkout (we use [BuckeyeVertical/PX4-gazebo-models] for custom worlds). If you already have PX4 cloned, skip cloning.
+- `ros_gz_bridge` (part of the `ros_gz` repository) built for the Humble branch.
+- `colcon`, `ros2` (Humble) and `gz` (Ignition/Gazebo) toolchain installed.
+
+1) Prepare PX4 and world files
+
+- Clone or update PX4 world assets (if you use our repo):
+
+```bash
+# If you don't already have PX4 worlds from the BuckeyeVertical repo
+# Follow steps in the readme of this repo
+git clone https://github.com/BuckeyeVertical/PX4-gazebo-models.git
+```
+
+- The `bv_mission` world is the default world used by the BV SITL setup. If you want to edit object positions or try different environments, edit or replace `bv_mission.sdf` in the PX4-Autopilot/Tools/simulation/gz/worlds directory (or pick another world like `Baylands.sdf`).
+
+2) Install / build `ros_gz_bridge` (recommended approach)
+
+Clone `ros_gz` into your `bv_ws/src` and build only the bridge package. This avoids polluting your workspace with simulator-only code.
+
+```bash
+cd ~/bv_ws/src
+git clone https://github.com/gazebosim/ros_gz.git
+cd ros_gz
+git checkout humble
+# Optional: pull latest
+git pull
+
+# Move only the bridge package into src (or build in place and remove other packages later)
+mv ros_gz/ros_gz_bridge ../
+rm -rf ros_gz
+
+cd ~/bv_ws
+colcon build --packages-select ros_gz_bridge
+source install/setup.bash
+```
+
+Notes:
+- We recommend checking out the `humble` branch of `ros_gz` because ROS 2 Humble-compatible changes live there.
+- If you prefer to keep the full `ros_gz` repo, you can; just ensure you use the `humble` branch and build only the packages you need.
+
+3) Start the PX4 SITL world with the down-facing monocular camera
+
+From your PX4-Autopilot repository root (not the ROS workspace):
+
+```bash
+export PX4_GZ_WORLD=bv_mission
+make px4_sitl gz_x500_mono_cam_down
+```
+
+This will launch PX4 with the `bv_mission` Gazebo world and the monocular down-facing camera model named `x500_mono_cam_down`.
+
+4) Bridge the simulator camera into ROS 2
+
+Use `ros_gz_bridge`'s `parameter_bridge` to convert the Gazebo camera topic to a ROS 2 `sensor_msgs/Image` topic. The example below publishes the image topic only; you can add other topics (camera_info, imu, etc.) as needed.
+
+```bash
+ros2 run ros_gz_bridge parameter_bridge \
+	/world/default/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image@sensor_msgs/msg/Image@gz.msgs.Image
+```
+
+Tips:
+- The exact topic path depends on the world and model names. Use `ros2 topic list` or `gz topic -l` to discover available simulator topics if the above path doesn't exist.
+- If your world uses `/world/bv_mission/...` rather than `/world/default/...`, update the topic prefix accordingly. For example:
+
+```
+/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image
+```
+
+5) View the camera in RViz or Foxglove
+
+Add the bridged image topic to RViz (Image display) or open it in Foxglove. Example topic names to try:
+
+```
+/world/default/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image
+# or
+/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image
+```
+
+6) Customizing the environment and objects
+
+- To reposition or edit objects, locate `bv_mission.sdf` (PX4-Autopilot/Tools/simulation/gz/worlds) and edit object pose / spawn definitions.
+- To try stitching-friendly worlds, copy or link `Baylands.sdf` into the same folder and launch with `PX4_GZ_WORLD=Baylands make px4_sitl gz_x500` (or a matching camera variant).
+
+Troubleshooting
+- If `ros_gz_bridge` fails to find the topic, run `gz topic -l` to list simulator topics and confirm the path.
+- If images appear black or distorted, confirm the camera resolution and encoding match what `ros_gz_bridge` expects; check the camera model's SDF settings.
+- If the `humble` branch fails to build, ensure you have correct system Gazebo/ignition versions that match the `ros_gz` commit.
+
+Quick checklist (short form)
+
+```bash
+# 1. Build ros_gz_bridge
+cd ~/bv_ws
+colcon build --packages-select ros_gz_bridge
+source install/setup.bash
+
+# 2. Start PX4 SITL with bv_mission world
+export PX4_GZ_WORLD=bv_mission
+make px4_sitl gz_x500_mono_cam_down
+
+# 3. Start the bridge
+ros2 run ros_gz_bridge parameter_bridge /world/default/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image@sensor_msgs/msg/Image@gz.msgs.Image
+```
+
+You can now proceed to run the BV stack (`ros2 launch bv_core mission.launch.py`) and the vision node will receive `/image_raw` from whichever bridge/topic you mapped into ROS 2.
 
 ## Topics, services, and states (quick reference)
 
