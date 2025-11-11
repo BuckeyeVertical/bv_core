@@ -11,7 +11,9 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/mission_params.yaml']),
         ('share/' + package_name + '/config', ['config/vision_params.yaml']),
-        ('share/' + package_name + '/config', ['config/filtering_params.yaml']),
+        ('share/' + package_name + '/config',
+         ['config/filtering_params.yaml']),
+        ('share/' + package_name + '/config', ['config/test_obj_loc.yaml']),
         ('share/' + package_name + '/launch', ['launch/mission.launch.py']),
         ('share/' + package_name + '/meshes', ['meshes/Render_CAD.STL']),
     ],
@@ -30,7 +32,8 @@ setup(
             'stitching_node = bv_core.stitching:main',
             'bv_viz_node = bv_core.bv_viz_node:main',
             'test_servo = bv_core.test_servo:main',
-            'camera_pipeline_test_node = bv_core.camera_pipeline_test_node:main'
+            'camera_pipeline_test_node = bv_core.camera_pipeline_test_node:main',
+            'test_obj_loc = bv_core.test_obj_loc:main'
         ],
     },
 )
