@@ -65,7 +65,17 @@ class DroneVizNode(Node):
         self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  # where to place mission/queue HUD text
         
         self.declare_parameter('mesh_uri', 'package://bv_core/meshes/Render_CAD.STL')
-        self.declare_parameter('mesh_scale', 1.0) 
+        self.declare_parameter('mesh_scale', 0.001) 
+        self.declare_parameter('offsetX', 0.9)
+        self.declare_parameter('offsetY', -0.1)
+        self.declare_parameter('offsetZ', -0.3)
+        
+
+        self.offsetX = float(self.get_parameter('offsetX').value)
+        self.offsetY = float(self.get_parameter('offsetY').value)
+        self.offsetZ = float(self.get_parameter('offsetZ').value)
+        self.mesh_scale = float(self.get_parameter('mesh_scale').value)
+        self.mesh_uri = self.get_parameter('mesh_uri').value
 
 
         self.frame_id = self.get_parameter('fixed_frame').value
@@ -130,47 +140,47 @@ class DroneVizNode(Node):
         markers.append(del_all)
 
         # Arrow
-        arrow = Marker()
-        arrow.header.frame_id = frame_id
-        arrow.header.stamp = self.get_clock().now().to_msg()
-        arrow.ns = 'drone'
-        arrow.id = 1
-        arrow.type = Marker.ARROW
-        arrow.action = Marker.ADD
-        arrow.pose = pose_msg.pose
-        scale = float(self.get_parameter('drone_scale').value)
-        arrow.scale.x = scale * 1.5
-        arrow.scale.y = scale * 0.3
-        arrow.scale.z = scale * 0.3
-        arrow.color.r = 0.0
-        arrow.color.g = 0.8
-        arrow.color.b = 0.7
-        arrow.color.a = 1.0
+        # arrow = Marker()
+        # arrow.header.frame_id = frame_id
+        # arrow.header.stamp = self.get_clock().now().to_msg()
+        # arrow.ns = 'drone'
+        # arrow.id = 1
+        # arrow.type = Marker.ARROW
+        # arrow.action = Marker.ADD
+        # arrow.pose = pose_msg.pose
+        # scale = float(self.get_parameter('drone_scale').value)
+        # arrow.scale.x = scale * 1.5
+        # arrow.scale.y = scale * 0.3
+        # arrow.scale.z = scale * 0.3
+        # arrow.color.r = 0.0
+        # arrow.color.g = 0.8
+        # arrow.color.b = 0.7
+        # arrow.color.a = 1.0
 
         # Text (yaw/alt)
-        text = Marker()
-        text.header.frame_id = frame_id
-        text.header.stamp = del_all.header.stamp
-        text.ns = 'drone'
-        text.id = 2
-        text.type = Marker.TEXT_VIEW_FACING
-        text.action = Marker.ADD
-        text.pose.position.x = pose_msg.pose.position.x
-        text.pose.position.y = pose_msg.pose.position.y
-        text.pose.position.z = pose_msg.pose.position.z + scale * 1.0
-        text.scale.z = float(self.get_parameter('text_scale').value)
-        yaw = yaw_from_quaternion(
-            pose_msg.pose.orientation.x,
-            pose_msg.pose.orientation.y,
-            pose_msg.pose.orientation.z,
-            pose_msg.pose.orientation.w
-        )
-        text.text = f"Yaw {math.degrees(yaw):.1f}° | Alt {pose_msg.pose.position.z:.1f} m"
-        text.color.r = 1.0
-        text.color.g = 1.0
-        text.color.b = 1.0
-        text.color.a = 0.95
-
+        # text = Marker()
+        # text.header.frame_id = frame_id
+        # text.header.stamp = del_all.header.stamp
+        # text.ns = 'drone'
+        # text.id = 2
+        # text.type = Marker.TEXT_VIEW_FACING
+        # text.action = Marker.ADD
+        # text.pose.position.x = pose_msg.pose.position.x
+        # text.pose.position.y = pose_msg.pose.position.y
+        # text.pose.position.z = pose_msg.pose.position.z + scale * 1.0
+        # text.scale.z = float(self.get_parameter('text_scale').value)
+        # yaw = yaw_from_quaternion(
+        #     pose_msg.pose.orientation.x,
+        #     pose_msg.pose.orientation.y,
+        #     pose_msg.pose.orientation.z,
+        #     pose_msg.pose.orientation.w
+        # )
+        # text.text = f"Yaw {math.degrees(yaw):.1f}° | Alt {pose_msg.pose.position.z:.1f} m"
+        # text.color.r = 1.0
+        # text.color.g = 1.0
+        # text.color.b = 1.0
+        # text.color.a = 0.95
+        #
 
         #Drone Mesh Marker
         drone_mesh = Marker()
@@ -183,7 +193,13 @@ class DroneVizNode(Node):
 
         drone_mesh.pose = pose_msg.pose
 
-        s = float(self.get_parameter('mesh_scale').value)
+
+        drone_mesh.pose.position.x += self.offsetX
+        drone_mesh.pose.position.y += self.offsetY
+        drone_mesh.pose.position.z += self.offsetZ
+
+
+        s = self.mesh_scale
         drone_mesh.scale.x = drone_mesh.scale.y = drone_mesh.scale.z = s
 
         drone_mesh.color.r = 1.0
@@ -191,10 +207,10 @@ class DroneVizNode(Node):
         drone_mesh.color.b = 1.0
         drone_mesh.color.a = 1.0
 
-        drone_mesh.mesh_resource = self.get_parameter('mesh_uri').value
+        drone_mesh.mesh_resource = self.mesh_uri
         drone_mesh.mesh_use_embedded_materials = False
 
-        markers.extend([arrow, text, drone_mesh])
+        markers.extend([drone_mesh])
         
         # markers.append(arrow)
         return markers
@@ -252,7 +268,7 @@ class DroneVizNode(Node):
             end.color.b = 0.3
             end.color.a = 0.9
 
-            markers.extend([start, end])
+            markers.extend([start])
 
         return markers
 
@@ -352,7 +368,7 @@ class DroneVizNode(Node):
         """Add a sphere + label at the last known drone position when a waypoint is reached."""
         if self._last_pose is None:
             return
-        frame_id = self._frame_id(self._last_pose.header.frame_id)
+        frame_id = self.frame_id
         pos = self._last_pose.pose.position
 
         # Sphere
