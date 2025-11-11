@@ -1,0 +1,3 @@
+data/*.bag
+data/*.db3
+data/bag_*/

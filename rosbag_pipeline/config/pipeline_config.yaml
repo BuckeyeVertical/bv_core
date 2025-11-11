@@ -1,0 +1,63 @@
+
+# config.yaml - Configuration for ROSbag Vision Pipeline
+
+# Vision processing parameters
+vision:
+  batch_size: 8
+  detection_threshold: 0.5
+  resolution: [1920, 1080]
+  model_path: "rf-detr-base.pth"
+  device: "cuda"  # or "cpu"
+  save_raw_frames: false
+
+# Filtering and geolocation parameters
+filtering:
+  # Camera intrinsic matrix (3x3)
+  c_matrix: [
+    [1000.0, 0.0, 960.0],
+    [0.0, 1000.0, 540.0],
+    [0.0, 0.0, 1.0]
+  ]
+
+  # Distortion coefficients [k1, k2, p1, p2, k3]
+  dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # Camera orientation [roll, pitch, yaw] in radians
+  # For nadir-looking camera: [0, 1.5708, 0] (90 deg pitch)
+  camera_orientation: [0.0, 1.5708, 0.0]
+
+  # Time synchronization tolerance (seconds)
+  max_time_offset: 0.5
+
+# Stitching parameters
+stitching:
+  enable_stitching: true
+  max_stitch_images: 50
+  stitch_mode: "panorama"  # or "scans"
+
+# Processing options
+processing:
+  # Process every Nth frame (1 = process all frames)
+  frame_skip: 1
+
+  # Output options
+  save_annotated_frames: true
+  save_detection_crops: false
+
+  # Performance
+  num_threads: 4
+
+# ROSbag topics to subscribe to
+topics:
+  image: "/image_raw"
+  gps: "/mavros/global_position/global"
+  altitude: "/mavros/global_position/rel_alt"
+  pose: "/mavros/local_position/pose"
+  camera_info: "/camera_info"
+
+# Output structure
+output:
+  create_geojson: true
+  create_kml: true
+  create_video: false
+  video_fps: 10
