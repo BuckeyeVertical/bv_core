@@ -39,7 +39,7 @@ class MissionRunner(Node):
         with open(mission_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
 
-        self.points = cfg.get('points', [])
+        self.lap_points = cfg.get('lap_points', [])
         self.scan_points = cfg.get('scan_points', [])
         self.deliver_points = cfg.get('deliver_points', [])
         self.stitch_points = cfg.get('stitch_points', [])
@@ -83,8 +83,8 @@ class MissionRunner(Node):
             GetObjectLocations,
             'get_object_locations'
         )
-        # while not self.cli_get_locs.wait_for_service(timeout_sec=1.0):
-        #     self.get_logger().info('Waiting for get_object_locations service…')
+        while not self.cli_get_locs.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for get_object_locations service…')
 
         # MAVROS service clients
         self.cli_push = self.create_client(
@@ -147,16 +147,17 @@ class MissionRunner(Node):
         self.last_winch_change = time.monotonic()  # ⇦  NEW
 
         # FSM variables
-        self.state = 'scan'
+        self.state = 'lap'
         self.lap_count = 1
         self.deliver_index = 0
         self.in_auto_mission = False
         self.queue_state = 0
-        self.maybe_deliver = False
+        self.scan_done = False
         self.awaiting_object_locs = True
 
         self.completed_deliver_build = False
         
+        self.get_logger().info(f"ARMING")
         arm_req = CommandBool.Request()
         arm_req.value = True
         fut = self.cli_arm.call_async(arm_req)
@@ -174,12 +175,12 @@ class MissionRunner(Node):
         msg.data = self.state
         self.mission_state_pub.publish(msg)
         ## Commented out because we only want to scan and then return to launch
-        if self.queue_state == 1 and self.maybe_deliver and not self.transition_in_progress :
+        if self.queue_state == 1 and self.scan_done and not self.transition_in_progress :
             self.get_logger().info("Starting deliver")
-            self.maybe_deliver = False
+            self.scan_done = False
             self.start_deliver()
             if self.completed_deliver_build is True:
-                self.maybe_deliver = False
+                self.scan_done = False
 
         if self.state in ('deploy',):                  # run only while we are in DEPLOY
             now = time.monotonic()
@@ -258,7 +259,7 @@ class MissionRunner(Node):
         self.desired_speed = self.lap_velocity
         self.get_logger().info(f'Starting lap {self.lap_count}…')
         self.wp_list = self.build_waypoints(
-            self.points, self.lap_tolerance, 1.0)
+            self.lap_points, self.lap_tolerance, 1.0)
         self.expected_final_wp = len(self.wp_list)-1
         self.push_mission()
 
@@ -298,7 +299,7 @@ class MissionRunner(Node):
             self.get_logger().info(f'Delivering to point {pt+1}...')
             self.wp_list = self.build_waypoints(
                 [(lat, lon, alt)], self.deliver_tolerance)
-            self.expected_final_wp = 0
+            self.expected_final_wp = len(self.wp_list)-1
             self.push_mission()
             self.state = 'deliver'
             self.completed_deliver_build = True
@@ -322,17 +323,15 @@ class MissionRunner(Node):
     def object_locs_cb(self, future):
         resp = future.result()
         locs = resp.locations
-        if self.state != 'deliver':
-            self.deliver_points = [
-                (loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
-            return
         if not locs:
             self.get_logger().warn('No drop points yet; retrying in 1s…')
             self.create_timer(1.0, lambda: self.request_object_locations())
             return
+        if self.state != 'deliver':
+            self.deliver_points = [(loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
+            return
         self.awaiting_object_locs = False
-        self.deliver_points = [
-            (loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
+        self.deliver_points = [(loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
         self.deliver_index = 0
         self.get_logger().info(
             f'Received {len(self.deliver_points)} drop point(s) → pushing deliver mission'
@@ -369,9 +368,7 @@ class MissionRunner(Node):
         elif self.state == 'stitching':
             self.start_scan()
         elif self.state == 'scan':
-            #for test flight
-            # self.return_to_rtl()
-            self.maybe_deliver = True
+            self.scan_done = True
         elif self.state == 'deliver':
             self.state = 'deploy'
         elif self.state == 'deploy':
@@ -425,18 +422,17 @@ class MissionRunner(Node):
     def arm_cb(self, future):
         resp = future.result()
         if not resp.success:
-            self.get_logger().error(f'Arming FAILED {resp}')
+            self.get_logger().error(f'Arming FAILED {resp} trying again')
+            arm_req = CommandBool.Request()
+            arm_req.value = True
+            fut = self.cli_arm.call_async(arm_req)
+            fut.add_done_callback(self.arm_cb)
             self.transition_in_progress = False
             return
-        self.get_logger().info('Armed ✓ → Setting AUTO.MISSION…')
-        mode_req = SetMode.Request()
-        mode_req.base_mode = 0
-        mode_req.custom_mode = 'AUTO.MISSION'
-        fut = self.cli_mode.call_async(mode_req)
-        fut.add_done_callback(self.mode_cb)
 
+        self.get_logger().info('Armed')
         ##STARTING POINT
-        self.start_scan()
+        self.start_lap()
         self.timer = self.create_timer(0.5, self.timer_callback)
 
     def set_mpc_xy_vel_all(self, speed):
@@ -488,6 +484,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = MissionRunner()
     rclpy.spin(node)
+    node.destroy_node()
     rclpy.shutdown()
 
 
