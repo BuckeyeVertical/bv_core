@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
-from bv_msgs.srv import GetObjectLocations     # your custom srv
-from bv_msgs.msg import ObjectLocations         # your custom msg
+from bv_msgs.srv import GetObjectLocations
+from bv_msgs.msg import ObjectLocations
 from ament_index_python.packages import get_package_share_directory
 import yaml
 import os
@@ -10,7 +10,7 @@ import os
 class TestObjLoc(Node):
 
     def __init__(self):
-        super().__init__('test_obj_loc')  # Node name visible
+        super().__init__('test_obj_loc')
         self.get_logger().info('test object locations service node has started')
 
         locations_yaml = os.path.join(
@@ -29,13 +29,14 @@ class TestObjLoc(Node):
             'get_object_locations',
             self.handle_get_object_locations
         )
+        self.get_logger().info('init done')
 
     def handle_get_object_locations(self, request, response):
-        for (lon, lat, cls_id) in self.locations:
+        for (lat, lon, cls_id) in self.locations:
             loc = ObjectLocations()
-            loc.latitude = float()
-            loc.longitude = float()
-            loc.class_id = int()
+            loc.latitude = float(lat)
+            loc.longitude = float(lon)
+            loc.class_id = int(cls_id)
             response.locations.append(loc)
         return response
 
