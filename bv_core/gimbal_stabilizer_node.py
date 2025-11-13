@@ -91,7 +91,7 @@ class GimbalStabilizerNode(Node):
         return roll, pitch
 
     def _ensure_gz_publisher(self, topic: str):
-        publisher = self._gz_node.advertise(DoubleMsg, topic)
+        publisher = self._gz_node.advertise(topic, DoubleMsg)
         if not publisher:
             raise RuntimeError(f"Failed to advertise Gazebo topic '{topic}'")
 
@@ -100,6 +100,12 @@ class GimbalStabilizerNode(Node):
     def _publish_gz(self, topic: str, value: float):
         msg = DoubleMsg()
         msg.data = value
+
+        value_deg = math.degrees(value)
+        print(
+            f"[GimbalStabilizerNode] Publishing {topic}: "
+            f"{value:.4f} rad ({value_deg:.2f} deg)"
+        )
 
         publisher = self._gazebo_publishers.get(topic)
         publish_fn = None
@@ -111,6 +117,8 @@ class GimbalStabilizerNode(Node):
         else:
             success = self._gz_node.publish(topic, msg)
 
+        if success:
+            print(f"[GimbalStabilizerNode] Publish succeeded on {topic}")
         if success is False:
             self.get_logger().warn(f"Failed to publish Gazebo command on topic '{topic}'")
 
