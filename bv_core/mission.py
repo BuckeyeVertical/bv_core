@@ -29,12 +29,24 @@ class MissionRunner(Node):
         self.transition_in_progress = False
         self.expected_final_wp = None
 
-        # Load all parameters from mission_params.yaml
-        mission_yaml = os.path.join(
-            get_package_share_directory('bv_core'),
+        pkg_share = get_package_share_directory('bv_core')
+        default_mission_yaml = os.path.join(
+            pkg_share,
             'config',
             'mission_params.yaml'
         )
+        mission_yaml = self.declare_parameter(
+            'mission_config',
+            default_mission_yaml
+        ).get_parameter_value().string_value
+
+        if not os.path.isabs(mission_yaml):
+            mission_yaml = os.path.join(pkg_share, mission_yaml)
+
+        if not os.path.isfile(mission_yaml):
+            raise FileNotFoundError(f'Mission config not found: {mission_yaml}')
+
+        self.get_logger().info(f'Loading mission config from {mission_yaml}')
         with open(mission_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
 
