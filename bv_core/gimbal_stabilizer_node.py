@@ -4,57 +4,54 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-
-from sensor_msgs.msg import Imu
 
 from gz.transport13 import Node as GzNode
 from gz.msgs10.double_pb2 import Double as DoubleMsg
+from gz.msgs10.imu_pb2 import IMU as GzImuMsg
 
 
 class GimbalStabilizerNode(Node):
     def __init__(self):
         super().__init__('gimbal_stabilizer_node')
 
-        self.declare_parameter('attitude_topic', '/mavros/imu/data')
+        self.declare_parameter(
+            'attitude_topic',
+            '/world/bv_mission/model/x500_gimbal_0/link/base_link/sensor/imu_sensor/imu'
+        )
         self.declare_parameter(
             'roll_cmd_topic',
-            '/world/default/model/x500_gimbal_0/command/gimbal_roll'
+            '/model/x500_gimbal_0/command/gimbal_roll'
         )
         self.declare_parameter(
             'pitch_cmd_topic',
-            '/world/default/model/x500_gimbal_0/command/gimbal_pitch'
+            '/model/x500_gimbal_0/command/gimbal_pitch'
         )
 
         attitude_topic = self.get_parameter('attitude_topic').value
         self.roll_topic = self.get_parameter('roll_cmd_topic').value
         self.pitch_topic = self.get_parameter('pitch_cmd_topic').value
 
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-
         self._gz_node = GzNode()
         self._gazebo_publishers = {}
         self._ensure_gz_publisher(self.roll_topic)
         self._ensure_gz_publisher(self.pitch_topic)
 
-        self.create_subscription(Imu, attitude_topic, self.handle_attitude, qos)
+        subscribed = self._gz_node.subscribe(GzImuMsg, attitude_topic, self._handle_gz_imu)
+        if not subscribed:
+            raise RuntimeError(f"Failed to subscribe to Gazebo IMU topic '{attitude_topic}'")
 
         self.get_logger().info(
             f"Gimbal stabilizer listening to {attitude_topic} and publishing roll"
             f" commands to {self.roll_topic}, pitch commands to {self.pitch_topic}"
         )
 
-    def handle_attitude(self, msg: Imu):
+    def _handle_gz_imu(self, msg: GzImuMsg):
+        orientation = msg.orientation
         roll, pitch = self._quaternion_to_roll_pitch(
-            msg.orientation.x,
-            msg.orientation.y,
-            msg.orientation.z,
-            msg.orientation.w
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w
         )
 
         if roll is None or pitch is None:
@@ -62,7 +59,7 @@ class GimbalStabilizerNode(Node):
             return
 
         roll_cmd = -roll
-        pitch_cmd = -math.pi / 2 - pitch
+        pitch_cmd = -pitch
 
         self._publish_gz(self.roll_topic, roll_cmd)
         self._publish_gz(self.pitch_topic, pitch_cmd)
