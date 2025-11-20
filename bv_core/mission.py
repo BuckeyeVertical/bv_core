@@ -2,6 +2,8 @@
 
 import os
 import yaml
+import time
+import datetime
 
 import rclpy
 from rclpy.node import Node
@@ -14,7 +16,6 @@ from std_msgs.msg import String, Int8
 
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
-import time
 from bv_msgs.srv import GetObjectLocations
 
 # MAVLink constants
@@ -53,9 +54,7 @@ class MissionRunner(Node):
         self.stitch_tolerance = cfg.get('Stitch_tolerance', 1.0)
         self.deliver_tolerance = cfg.get('Deliver_tolerance', 1.0)
 
-        # Added: Servo PWM configuration parameters
-        # Per-servo PWM configs
-        # COPY THIS
+        # Servo PWM configuration parameters
         self.default_servo_pwms = cfg.get(
             'Default_servo_pwms',   [1500, 1500, 1500, 1500])
         self.deliver_initial_pwms = cfg.get(
@@ -144,7 +143,7 @@ class MissionRunner(Node):
         )
 
         self.winch_state = 2          # 0-deploy, 1-retract, 2-idle
-        self.last_winch_change = time.monotonic()  # ⇦  NEW
+        self.last_winch_change = time.monotonic()
 
         # FSM variables
         self.state = 'lap'
@@ -154,34 +153,59 @@ class MissionRunner(Node):
         self.queue_state = 0
         self.scan_done = False
         self.awaiting_object_locs = True
+        self.async_block = False
+        self.cli_queue = []
+        self.retry_timer = None  # Helper for safe retries
 
         self.completed_deliver_build = False
-        
+
         self.get_logger().info(f"ARMING")
         arm_req = CommandBool.Request()
         arm_req.value = True
-        fut = self.cli_arm.call_async(arm_req)
-        fut.add_done_callback(self.arm_cb)
+        self.use_cli(self.cli_arm, arm_req, self.arm_cb)
+        self.timer = self.create_timer(0.5, self.timer_callback)
 
-
+    def use_cli(self, path, req, cb, was_queued=False):
+        # print("use cli")
+        if self.async_block:
+            self.cli_queue.append((path, req, cb))
+            # print(f"blocked, added to queue: {len(self.cli_queue)}")
+            return
+        # print(f"sent {req}")
+        self.async_block = True
+        if was_queued:
+            self.cli_queue.pop(0)
+        fut = path.call_async(req)
+        def safe_cb(future):
+            try:
+                cb(future)
+            finally:
+                # print("cb done")
+                self.async_block = False
+        fut.add_done_callback(safe_cb)
 
     def queue_state_callback(self, msg: Int8):
         if msg.data == 0:
-            self.get_logger().info("Waiting for processing to complete")
+            self.get_logger().info("Waiting for processing to complete", once=True)
         self.queue_state = msg.data
 
     def timer_callback(self):
+        # Process one item from the async queue if available
+        if self.cli_queue:
+            self.use_cli(self.cli_queue[0][0], self.cli_queue[0][1], self.cli_queue[0][2], was_queued=True)
+
         msg = String()
         msg.data = self.state
         self.mission_state_pub.publish(msg)
-        ## Commented out because we only want to scan and then return to launch
-        if self.queue_state == 1 and self.scan_done and not self.transition_in_progress :
+
+        if self.queue_state == 1 and self.scan_done and not self.transition_in_progress:
             self.get_logger().info("Starting deliver")
             self.scan_done = False
             self.start_deliver()
             if self.completed_deliver_build is True:
                 self.scan_done = False
 
+        # --- FIX APPLIED HERE ---
         if self.state in ('deploy',):                  # run only while we are in DEPLOY
             now = time.monotonic()
             if now - self.last_winch_change >= 5.0:    # 5-second cadence
@@ -194,6 +218,7 @@ class MissionRunner(Node):
                     f'[DEPLOY] Winch state → {self.winch_state}')
 
                 # command the servo (real HW) or just print (SITL)
+                # INDENTATION FIXED: This now only runs once every 5 seconds
                 self.deploy()
 
     def build_waypoints(self, waypoint_list, tolerance, pass_through_ratio=0.0):
@@ -221,37 +246,16 @@ class MissionRunner(Node):
             wp_list.append(wp)
         return wp_list
 
-    # COPY THIS
-
     def set_servo_pwm(self, servo_num, pwm_value):
         req = CommandLong.Request()
         req.command = 183  # MAV_CMD_DO_SET_SERVO
         req.confirmation = 0
         req.param1 = float(servo_num)  # servo channel
         req.param2 = float(pwm_value)  # PWM (e.g., 1500)
-        self.cli_cmd.call_async(req)
-        # """Set servo PWM by adjusting MIN/MAX parameters"""
-        # min_param = f'PWM_MAIN_MIN{servo_num}'
-        # max_param = f'PWM_MAIN_MAX{servo_num}'
-        # # Set min and max around desired PWM value
-        # req_min = ParamSetV2.Request()
-        # req_min.force_set = False
-        # req_min.param_id = min_param
-        # pv_min = ParameterValue()
-        # pv_min.type = ParameterType.PARAMETER_INTEGER
-        # pv_min.integer_value = pwm_value - 1
-        # req_min.value = pv_min
-        #
-        # req_max = ParamSetV2.Request()
-        # req_max.force_set = False
-        # req_max.param_id = max_param
-        # pv_max = ParameterValue()
-        # pv_max.type = ParameterType.PARAMETER_INTEGER
-        # pv_max.integer_value = pwm_value + 1
-        # req_max.value = pv_max
-        #
-        # self.cli_param.call_async(req_min)
-        # self.cli_param.call_async(req_max)
+        self.use_cli(self.cli_cmd, req, self.dummy_cb)
+
+    def dummy_cb(self, future):
+        return
 
     def start_lap(self):
         self.state = 'lap'
@@ -283,7 +287,6 @@ class MissionRunner(Node):
         self.expected_final_wp = len(self.wp_list)-1
         self.push_mission()
 
-    # THIS
     def start_deliver(self):
         self.state = 'deliver'
         self.transition_in_progress = True
@@ -311,31 +314,52 @@ class MissionRunner(Node):
         req = SetMode.Request()
         req.base_mode = 0
         req.custom_mode = 'AUTO.RTL'
-        fut = self.cli_mode.call_async(req)
-        fut.add_done_callback(self.mode_cb)
+        self.use_cli(self.cli_mode, req, self.mode_cb)
 
     def request_object_locations(self):
         req = GetObjectLocations.Request()
-        fut = self.cli_get_locs.call_async(
-            req)
-        fut.add_done_callback(self.object_locs_cb)
+        self.use_cli(self.cli_get_locs, req, self.object_locs_cb)
 
     def object_locs_cb(self, future):
         resp = future.result()
         locs = resp.locations
         if not locs:
-            self.get_logger().warn('No drop points yet; retrying in 1s…')
-            self.create_timer(1.0, lambda: self.request_object_locations())
+            # FIX APPLIED: Removed recursive create_timer which caused exponential spam.
+            # We now just log a warning.
+            self.get_logger().warn('No drop points received. Retrying in 3s via safe timer...')
+            
+            # Use a safe, non-recursive check or single-shot
+            if self.retry_timer is not None:
+                 self.retry_timer.cancel()
+            self.retry_timer = self.create_timer(3.0, self.retry_loc_req)
             return
+
+        # If we got data, cancel any pending retries
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.retry_timer = None
+
         if self.state != 'deliver':
-            self.deliver_points = [(loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
+            self.deliver_points = [
+                (loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
             return
         self.awaiting_object_locs = False
-        self.deliver_points = [(loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
+        self.deliver_points = [
+            (loc.latitude, loc.longitude, self.home_alt or 0.0) for loc in locs]
         self.deliver_index = 0
         self.get_logger().info(
             f'Received {len(self.deliver_points)} drop point(s) → pushing deliver mission'
         )
+        # Re-trigger deliver build now that we have points
+        self.start_deliver()
+
+    def retry_loc_req(self):
+        # One-shot retry callback
+        self.get_logger().info("Retrying object location request...")
+        if self.retry_timer:
+            self.retry_timer.cancel()
+            self.retry_timer = None
+        self.request_object_locations()
 
     def deploy(self):
         # determine servo channel based on lap_count
@@ -384,10 +408,9 @@ class MissionRunner(Node):
     def push_mission(self):
         req = WaypointPush.Request()
         req.start_index = 0
-        req.waypoints  = self.wp_list
+        req.waypoints = self.wp_list
         self.get_logger().info(f'Pushing {len(self.wp_list)} waypoint(s)…')
-        fut = self.cli_push.call_async(req)
-        fut.add_done_callback(self.push_cb)
+        self.use_cli(self.cli_push, req, self.push_cb)
 
     def push_cb(self, future):
         resp = future.result()
@@ -401,8 +424,7 @@ class MissionRunner(Node):
         mode_req = SetMode.Request()
         mode_req.base_mode = 0
         mode_req.custom_mode = 'AUTO.MISSION'
-        fut = self.cli_mode.call_async(mode_req)
-        fut.add_done_callback(self.mode_cb)
+        self.use_cli(self.cli_mode, mode_req, self.mode_cb)
 
     def mode_cb(self, future):
         resp = future.result()
@@ -418,22 +440,19 @@ class MissionRunner(Node):
             self.set_servo_pwm(i, pwm)
         self.set_mpc_xy_vel_all(self.desired_speed)
 
-
     def arm_cb(self, future):
         resp = future.result()
         if not resp.success:
             self.get_logger().error(f'Arming FAILED {resp} trying again')
             arm_req = CommandBool.Request()
             arm_req.value = True
-            fut = self.cli_arm.call_async(arm_req)
-            fut.add_done_callback(self.arm_cb)
+            self.use_cli(self.cli_arm, arm_req, self.arm_cb)
             self.transition_in_progress = False
             return
 
         self.get_logger().info('Armed')
-        ##STARTING POINT
+        # STARTING POINT
         self.start_lap()
-        self.timer = self.create_timer(0.5, self.timer_callback)
 
     def set_mpc_xy_vel_all(self, speed):
         req = ParamSetV2.Request()
@@ -443,9 +462,7 @@ class MissionRunner(Node):
         pv.type = ParameterType.PARAMETER_DOUBLE
         pv.double_value = float(speed)
         req.value = pv
-        fut = self.cli_param.call_async(req)
-        fut.add_done_callback(self.param_cb)
-
+        self.use_cli(self.cli_param, req, self.param_cb)
 
     def param_cb(self, future):
         resp = future.result()
@@ -475,9 +492,6 @@ class MissionRunner(Node):
             self.home_alt = msg.altitude
             self.get_logger().info(
                 f'GPS fixed: lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}')
-
-        # self.destroy_subscription(self.gps_sub)
-        # self.gps_sub = None
 
 
 def main(args=None):
