@@ -24,8 +24,8 @@ import time
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 from .pipelines.gz_transport_pipeline import GzTransportPipeline
-
 from bv_core.pipelines.camera_pipeline import CameraPipeline
+from .pipelines.ros_cam_pipeline import RosCamPipeline
 
 class VisionNode(Node):
     def __init__(self):
@@ -34,8 +34,45 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.pipeline_topic = '/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image'
-        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
+        # Declare parameters allowing overrides with default of gz
+        self.declare_parameter('input_source', 'gz') # Options: 'gz', 'real', 'bag'
+        self.declare_parameter('input_topic', '/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image')
+        self.declare_parameter('gst_string', 'videotestsrc ! video/x-raw,format=BGR ! appsink drop=1') # Default dummy cam
+        self.declare_parameter('show_display', False)
+        
+        # Get values
+        self.show_display = self.get_parameter('show_display').get_parameter_value().bool_value
+        source_mode = self.get_parameter('input_source').get_parameter_value().string_value
+        topic_name = self.get_parameter('input_topic').get_parameter_value().string_value
+        gst_str = self.get_parameter('gst_string').get_parameter_value().string_value
+        self.pipeline_topic = topic_name
+        self.get_logger().info(f"Initializing Vision Node with Source: {source_mode}")
+
+        # Initialize the correct Pipeline
+        if source_mode == 'gz':
+            self.pipeline = GzTransportPipeline(
+                topic=topic_name, 
+                queue_size=5
+            )
+
+        elif source_mode == 'real':
+            self.pipeline = CameraPipeline(
+                gst_pipeline=gst_str, 
+                record=True, 
+                ros_context=self, 
+                fps=30.0
+            )
+
+        elif source_mode == 'bag':
+            self.pipeline = RosCamPipeline(
+                parent_node=self, 
+                topic=topic_name, 
+                queue_size=5
+            )
+            
+        else:
+            raise ValueError(f"Unknown input_source: {source_mode}. Must be 'gz', 'real', or 'bag'.")
+
         self.pipeline_running = False
 
         self.scan_active = threading.Event()
@@ -196,6 +233,12 @@ class VisionNode(Node):
                 else:
                     frame_to_publish = frame
                     encoding = "bgr8"
+                """
+                If show_display flag is set to true, open a CV2 window and display frames
+                """
+                if self.show_display:
+                    cv2.imshow("Vision Node Debug", frame_to_publish)
+                    cv2.waitKey(1)
 
                 live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
                 live_msg.header.stamp = self.get_clock().now().to_msg()
@@ -255,7 +298,6 @@ class VisionNode(Node):
                 annotated_frame = self.detector.annotate_frame(frame, detections, labels)
                 self.detector.save_frame(annotated_frame, "annotated_frames")
                 
-
                 self.get_logger().info("Saved Frame")
                 msg = self.bridge.cv2_to_compressed_imgmsg(annotated_frame, dst_format='jpeg')
                 msg.header.stamp = self.get_clock().now().to_msg()
