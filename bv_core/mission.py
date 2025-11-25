@@ -259,9 +259,9 @@ class MissionRunner(Node):
         req.confirmation = 0
         req.param1 = float(servo_num)  # servo channel
         req.param2 = float(pwm_value)  # PWM (e.g., 1500)
-        self.use_cli(self.cli_cmd, req, self.dummy_cb)
+        self.use_cli(self.cli_cmd, req, self.empty_cb)
 
-    def dummy_cb(self, future):
+    def empty_cb(self, future):
         return
 
     def start_lap(self):
