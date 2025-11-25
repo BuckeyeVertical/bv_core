@@ -151,7 +151,7 @@ class MissionRunner(Node):
         self.deliver_index = 0
         self.in_auto_mission = False
         self.queue_state = 0
-        self.scan_done = False
+        self.try_deliver = False
         self.awaiting_object_locs = True
         self.async_block = False
         self.cli_queue = []
@@ -159,30 +159,37 @@ class MissionRunner(Node):
 
         self.completed_deliver_build = False
 
-        self.get_logger().info(f"ARMING")
-        arm_req = CommandBool.Request()
-        arm_req.value = True
-        self.use_cli(self.cli_arm, arm_req, self.arm_cb)
-        self.timer = self.create_timer(0.5, self.timer_callback)
-
-    def use_cli(self, path, req, cb, was_queued=False):
-        # print("use cli")
-        if self.async_block:
-            self.cli_queue.append((path, req, cb))
-            # print(f"blocked, added to queue: {len(self.cli_queue)}")
-            return
-        # print(f"sent {req}")
-        self.async_block = True
-        if was_queued:
-            self.cli_queue.pop(0)
+    def use_cli(self, path, req, cb):
+        # if self.async_block:
+            # self.cli_queue.append((path, req, cb))
+            # return
+        # self.async_block = True
         fut = path.call_async(req)
-        def safe_cb(future):
-            try:
-                cb(future)
-            finally:
-                # print("cb done")
-                self.async_block = False
-        fut.add_done_callback(safe_cb)
+        # def safe_cb(future):
+        #     try:
+        #         cb(future)
+        #     finally:
+        #         self.async_block = False
+        fut.add_done_callback(cb)
+
+    # def check_cli_queue(self):
+    #     if self.async_block:
+    #         return
+    #     if not self.cli_queue:
+    #         return
+    #     command = self.cli_queue.pop(0)
+    #     path = command[0]
+    #     req = command[1]
+    #     cb = command[2]
+    #     self.async_block = True
+    #     fut = path.call_async(req)
+    #     def safe_cb(future):
+    #         try:
+    #             cb(future)
+    #         finally:
+    #             self.async_block = False
+    #     fut.add_done_callback(safe_cb)
+
 
     def queue_state_callback(self, msg: Int8):
         if msg.data == 0:
@@ -191,22 +198,22 @@ class MissionRunner(Node):
 
     def timer_callback(self):
         # Process one item from the async queue if available
-        if self.cli_queue:
-            self.use_cli(self.cli_queue[0][0], self.cli_queue[0][1], self.cli_queue[0][2], was_queued=True)
+        # self.check_cli_queue()
 
         msg = String()
         msg.data = self.state
         self.mission_state_pub.publish(msg)
-
-        if self.queue_state == 1 and self.scan_done and not self.transition_in_progress:
+        # print(f"-> \n {self.queue_state} \n {self.scan_done} \n {self.transition_in_progress} \n <-")
+        # if self.queue_state == 1 and self.scan_done and not self.transition_in_progress:
+        if self.try_deliver and not self.transition_in_progress:
             self.get_logger().info("Starting deliver")
-            self.scan_done = False
+            self.try_deliver = False
             self.start_deliver()
             if self.completed_deliver_build is True:
-                self.scan_done = False
+                self.try_deliver = False
 
         # --- FIX APPLIED HERE ---
-        if self.state in ('deploy',):                  # run only while we are in DEPLOY
+        if self.state in ('deploy',):             # run only while we are in DEPLOY
             now = time.monotonic()
             if now - self.last_winch_change >= 5.0:    # 5-second cadence
                 # cycle 0 ➜ 1 ➜ 2 ➜ 0 …
@@ -327,10 +334,10 @@ class MissionRunner(Node):
             # FIX APPLIED: Removed recursive create_timer which caused exponential spam.
             # We now just log a warning.
             self.get_logger().warn('No drop points received. Retrying in 3s via safe timer...')
-            
+
             # Use a safe, non-recursive check or single-shot
             if self.retry_timer is not None:
-                 self.retry_timer.cancel()
+                self.retry_timer.cancel()
             self.retry_timer = self.create_timer(3.0, self.retry_loc_req)
             return
 
@@ -392,7 +399,7 @@ class MissionRunner(Node):
         elif self.state == 'stitching':
             self.start_scan()
         elif self.state == 'scan':
-            self.scan_done = True
+            self.try_deliver = True
         elif self.state == 'deliver':
             self.state = 'deploy'
         elif self.state == 'deploy':
@@ -492,6 +499,11 @@ class MissionRunner(Node):
             self.home_alt = msg.altitude
             self.get_logger().info(
                 f'GPS fixed: lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}')
+            self.get_logger().info(f"ARMING")
+            arm_req = CommandBool.Request()
+            arm_req.value = True
+            self.use_cli(self.cli_arm, arm_req, self.arm_cb)
+            self.timer = self.create_timer(0.5, self.timer_callback)
 
 
 def main(args=None):
