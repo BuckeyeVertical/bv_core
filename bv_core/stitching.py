@@ -11,18 +11,18 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
 from std_msgs.msg import String
 import cv2
 import numpy as np
 import os
 # for stitching
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, CommandCode
+from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
 from datetime import datetime
 
-MAX_PICS = 2
+# Number of images to capture before stitching (matches current scan waypoint count)
+MAX_PICS = 7
 
 class ImageStitcherNode(Node):
     def __init__(self):
@@ -51,8 +51,10 @@ class ImageStitcherNode(Node):
         #counter for how many total pictures to take
         self.pic_counter = 0
 
-        self.declare_parameter('image_topic', '/image_raw')
-        self.declare_parameter('output_path', '/home/bvorinnano/bv_ws/stitched_image')
+        # Match vision_node default camera topic (Gazebo gz transport bridge)
+        self.declare_parameter('image_topic', '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image')
+        # Directory where snapshots/stitched images are written
+        self.declare_parameter('output_path', 'annotated_frames')
         self.declare_parameter('crop', True)
         self.declare_parameter('preprocessing', False)
         self.declare_parameter('stitch_interval_sec', 5.0)
@@ -64,13 +66,19 @@ class ImageStitcherNode(Node):
         self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
         self.stitch_interval_sec = self.get_parameter('stitch_interval_sec').get_parameter_value().double_value
 
-        # Subscription & Timer
-        self.image_sub = self.create_subscription(
-            Image,
-            image_topic,
-            self.image_callback,
-            10 #what is this 10
-        )
+        # Ensure output directory exists
+        os.makedirs(self.output_path, exist_ok=True)
+
+        # Gazebo transport pipeline (same feed as vision_node)
+        self.pipeline_topic = image_topic
+        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
+        self.pipeline_running = False
+        try:
+            self.pipeline.start()
+            self.pipeline_running = True
+            self.get_logger().info(f"Gazebo image pipeline started on {self.pipeline_topic}")
+        except RuntimeError as exc:
+            self.get_logger().error(f"Failed to start Gazebo pipeline: {exc}")
 
         # Subscribe to the state the drone is in
         self.mission_state_sub = self.create_subscription(
@@ -91,58 +99,8 @@ class ImageStitcherNode(Node):
         self.stitch_timer = self.create_timer(self.stitch_interval_sec, self.timer_callback)
 
         # Helpers & buffer
-        self.bridge = CvBridge()
         self.received_images = []
         self.get_logger().info(f"Subscribed to {image_topic}`; stitch every {self.stitch_interval_sec}s")
-
-    def rosimg_to_ndarray(self, msg: Image) -> np.ndarray:
-        """Convert any sensor_msgs/Image to an H×W×C uint8 NumPy array."""
-        enc = msg.encoding.lower()
-        # Choose dtype by bit-depth
-        if enc.endswith('16'):
-            dtype = np.uint16
-        else:
-            dtype = np.uint8
-
-        # View the raw buffer
-        flat = np.frombuffer(msg.data, dtype=dtype)
-
-        # msg.step = total bytes per row; convert to elements per row
-        elems_per_row = msg.step // dtype().itemsize
-        mat = flat.reshape((msg.height, elems_per_row))
-
-        # Handle multi-channel layouts
-        if enc in ('rgb8', 'bgr8', 'rgba8', 'bgra8'):
-            nch = 3 if enc.endswith('8') else 4
-            # keep only real pixel data, discard padding
-            mat = mat[:, : msg.width * nch ]
-            mat = mat.reshape((msg.height, msg.width, nch))
-            # drop alpha if present
-            if nch == 4:
-                mat = mat[:, :, :3]
-        else:
-            # mono8 or mono16: single-channel image already
-            # mat is H×W
-            pass
-
-        # If needed, convert colors for OpenCV
-        if enc == 'rgb8':
-            mat = cv2.cvtColor(mat, cv2.COLOR_RGB2BGR)
-
-        # If 16-bit, scale down to 8-bit
-        if mat.dtype == np.uint16:
-            mat = cv2.convertScaleAbs(mat, alpha=(255.0 / 65535.0))
-
-        return mat
-
-    def image_callback(self, msg: Image):
-        #self.get_logger().warn(f"Image_callback is running")
-        try:
-            frame = self.rosimg_to_ndarray(msg)
-            self.latest_frame = frame
-            #self.get_logger().info(f"got pic")
-        except Exception as e:
-            self.get_logger().error(f"Failed to convert raw image: {e}")
 
     def state_callback(self, msg: String):
         try:
@@ -175,6 +133,15 @@ class ImageStitcherNode(Node):
 
     def timer_callback(self):
         
+        # Refresh latest frame from Gazebo pipeline
+        if self.pipeline_running:
+            try:
+                frame = self.pipeline.get_frame(timeout=0.01)
+                if frame is not None:
+                    self.latest_frame = frame
+            except RuntimeError as exc:
+                self.get_logger().warn(f"Failed to fetch frame from pipeline: {exc}")
+        
         if (self.latest_frame is not None and self.reached == True and self.pic_counter < MAX_PICS and self.waypoint_current != self.waypoint_prev):
 
                 self.get_logger().info(f"Took picture number: {self.pic_counter}")
@@ -183,7 +150,7 @@ class ImageStitcherNode(Node):
                 self.get_logger().info(f"Received frame: shape={self.latest_frame.shape} dtype={self.latest_frame.dtype} (buffer={len(self.received_images)})")
                 
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                out_file = os.path.join(os.path.dirname(self.output_path), f"pic_{self.waypoint_current}.jpg")
+                out_file = os.path.join(self.output_path, f"pic_{self.waypoint_current}.jpg")
                 cv2.imwrite(out_file, self.latest_frame)
                 self.get_logger().info(f"Saved: {out_file}")
                 self.pic_counter = self.pic_counter + 1
@@ -193,6 +160,7 @@ class ImageStitcherNode(Node):
                     imgs = list(self.received_images)
                     self.received_images.clear()
                     self.get_logger().info(f"Stitching {len(imgs)} frames…")
+                    self.get_logger().info("Stitching now and will write stitched output if successful")
 
                     status, pano = self.stitch_images(imgs)
                     if status == cv2.Stitcher_OK:
@@ -202,7 +170,7 @@ class ImageStitcherNode(Node):
 
                         # save with timestamp
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        out_file = os.path.join(os.path.dirname(self.output_path), f"stitched_{ts}.jpg")
+                        out_file = os.path.join(self.output_path, f"stitched_{ts}.jpg")
                         cv2.imwrite(out_file, pano)
                         self.get_logger().info(f"Saved: {out_file}")
 
