@@ -8,26 +8,13 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     pkg = 'bv_core'
-    mission_config = LaunchConfiguration('mission_config')
-    default_mission_config = os.path.join(
-        get_package_share_directory(pkg),
-        'config',
-        'mission_params.yaml'
-    )
-
-    declare_mission_config = DeclareLaunchArgument(
-        'mission_config',
-        default_value=default_mission_config,
-        description='Path to mission parameter YAML file.'
-    )
 
     # Mission node
     mission_node = Node(
         package='bv_core',
         name='mission_node',
         executable='mission_node',
-        output='both',
-        parameters=[{'mission_config': mission_config}]
+        output='both'
     )
 
     vision_node = Node(
@@ -59,7 +46,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        declare_mission_config,
         mission_node,
         vision_node,
         filter_node,
