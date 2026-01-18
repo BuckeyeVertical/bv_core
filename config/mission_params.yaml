@@ -1,38 +1,40 @@
+# ============================================================
+# MISSION PARAMETERS
+# ============================================================
+
+# (latitude, longitude, altitude).
+#
+# Altitude is relative to takeoff point (AGL - Above Ground Level)
+
+
+
+# MISSION CONFIGURATION
+
+# Number of objects to detect and deliver payloads to
+num_objects: 4
+
+# Takeoff altitude used as anchor for all waypoints
 takeoff_alt: &TAKEOFF 16.2
 
-# Lap Waypoints
-# points:
-#   - [47.39792614, 8.54609739, *TAKEOFF]
-#   - [47.39792614, 8.54623009, *TAKEOFF]
-#   - [47.39801597, 8.54623009, *TAKEOFF]
-#   - [47.39801597, 8.54609739, *TAKEOFF]
+
+
+# LAP WAYPOINTS
 
 
 points:
   - [38.3876112, -76.4190542, *TAKEOFF]
+  # Add more lap waypoints as needed:
   # - [38.3862744, -76.4182914, *TAKEOFF]
   # - [38.3876112, -76.4190542, *TAKEOFF]
 
-# stitch_points:
-#   - [47.397750, 8.545600, *TAKEOFF]
-#   - [47.397755, 8.545605, *TAKEOFF]
-#   - [47.397760, 8.545610, *TAKEOFF]
 
-stitch_points:
-  - [38.3877010311175, -76.4190542, *TAKEOFF]
-  - [38.3877010311175, -76.4189395943129, *TAKEOFF]
-  - [38.3877010311175, -76.41882498862581, *TAKEOFF]
-  - [38.3877010311175, -76.41871038293871, *TAKEOFF]
-  - [38.3877010311175, -76.41859577725162, *TAKEOFF]
-  - [38.3877010311175, -76.41848117156452, *TAKEOFF]
-  - [38.3877010311175, -76.41836656587742, *TAKEOFF]
 
-# Scan Waypoints
-# scan_points:
-#   - [47.397760, 8.545610, *TAKEOFF]
-#   - [47.397755, 8.545605, *TAKEOFF]
-#   - [47.397750, 8.545600, *TAKEOFF]
+# SCAN WAYPOINTS
 
+# Search pattern for object detection.
+# Drone flies this pattern while vision system actively looks
+# for targets. When an object is detected, the drone stops,
+# localizes, and delivers before resuming from where it left off.
 
 scan_points:
   - [38.3877010311175, -76.4190542, *TAKEOFF]
@@ -43,22 +45,47 @@ scan_points:
   - [38.3877010311175, -76.41848117156452, *TAKEOFF]
   - [38.3877010311175, -76.41836656587742, *TAKEOFF]
 
-# Payload waypoints
-# deliver_points:
-#   - [47.397780, 8.545620, *TAKEOFF]
-#   - [47.397785, 8.545625, *TAKEOFF]
-#   - [47.397790, 8.545630, *TAKEOFF]
-#   - [47.397795, 8.545635, *TAKEOFF]
-
-deliver_points:
-  - [38.3876112, -76.4190542, *TAKEOFF]
 
 
-# Other params
-Lap_velocity: 5.0
-Lap_tolerance: 2.0
-Scan_velocity: 2.5
-Scan_tolerance: 1.0
-Stitch_velocity: 5.0
-Stitch_tolerance: 1.0
-Deliver_tolerance: 1.0
+
+
+
+# VELOCITY PARAMETERS (m/s)
+
+# Maximum horizontal velocities for each mission phase.
+# Lower velocities improve detection accuracy but increase
+# mission time.
+
+Lap_velocity: 5.0       # Fast - reconnaissance only
+Scan_velocity: 2.5      # Slow - need time for detection
+Deliver_velocity: 5.0   # Fast - target already localized (stitching runs in background)
+
+
+
+# WAYPOINT TOLERANCE PARAMETERS (meters)
+
+# Acceptance radius for considering a waypoint "reached".
+# Smaller values = more precise but may cause overshoot.
+# Larger values = faster transitions but less precise.
+
+Lap_tolerance: 2.0      # Loose - just need to cover area
+Scan_tolerance: 1.0     # Medium - balance speed/accuracy
+Deliver_tolerance: 1.0  # Tight - need accurate drop position
+
+
+
+# SERVO PWM CONFIGURATION
+
+# PWM values for payload release servos (microseconds).
+# Each object uses a different servo channel (cycles 1-4).
+#
+# Sequence for each deploy:
+#   1. Initial PWM (extend/release)
+#   2. Second PWM (retract)
+#   3. Default PWM (idle/neutral)
+#
+# Values are per-servo: [CH1, CH2, CH3, CH4]
+
+Default_servo_pwms: [1500, 1500, 1500, 1500]    # Neutral position
+Deliver_initial_pwms: [1600, 1600, 1600, 1600]  # Release position
+Deliver_second_pwms: [1400, 1400, 1400, 1400]   # Retract position
