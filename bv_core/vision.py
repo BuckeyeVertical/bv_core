@@ -394,6 +394,8 @@ class Detector():
         return annotated_frame
 
     def save_frame(self, frame, output_dir):
+        # Ensure output directory exists so saving doesn't fail at runtime
+        os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"{self.frame_save_cnt}_annotated.jpg")
         Image.fromarray(frame).save(output_path)
         self.frame_save_cnt += 1

@@ -34,7 +34,7 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.pipeline_topic = '/world/bv_mission/model/x500_mono_cam_down_0/link/camera_link/sensor/imager/image'
+        self.pipeline_topic = '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
         self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
         self.pipeline_running = False
 
