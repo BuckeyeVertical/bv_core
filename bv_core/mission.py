@@ -159,6 +159,7 @@ class MissionRunner(Node):
         self.active_waypoint_list = []
         self.desired_velocity = self.lap_velocity
         self.last_waypoint_reached = None  # Track in case event fires during transition
+        self.last_processed_waypoint = -1  # Prevent duplicate waypoint processing
         
         # Scan resume tracking
         self.scan_waypoint_index_on_detection = 0
@@ -370,6 +371,10 @@ class MissionRunner(Node):
         self.is_transitioning = True
         self.desired_velocity = self.lap_velocity
         
+        # Reset waypoint tracking for new state
+        self.last_waypoint_reached = None
+        self.last_processed_waypoint = -1
+        
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: TAKEOFF")
         self.get_logger().info("-" * 40)
@@ -395,6 +400,10 @@ class MissionRunner(Node):
         self.is_transitioning = True
         self.desired_velocity = self.lap_velocity
         
+        # Reset waypoint tracking for new state
+        self.last_waypoint_reached = None
+        self.last_processed_waypoint = -1
+        
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: LAP")
         self.get_logger().info("-" * 40)
@@ -416,6 +425,10 @@ class MissionRunner(Node):
         self.current_state = STATE_SCAN
         self.is_transitioning = True
         self.desired_velocity = self.scan_velocity
+        
+        # Reset waypoint tracking for new state
+        self.last_waypoint_reached = None
+        self.last_processed_waypoint = -1
         
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: SCAN")
@@ -467,6 +480,10 @@ class MissionRunner(Node):
         self.current_state = STATE_DELIVER  # Publishes "stitching" to activate stitching.py
         self.is_transitioning = True
         self.desired_velocity = self.deliver_velocity
+        
+        # Reset waypoint tracking for new state
+        self.last_waypoint_reached = None
+        self.last_processed_waypoint = -1
         
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: DELIVER")
@@ -835,6 +852,10 @@ class MissionRunner(Node):
         """Callback when a waypoint is reached."""
         waypoint_index = msg.wp_seq
         
+        # Ignore duplicate waypoint messages (MAVROS publishes repeatedly)
+        if waypoint_index == self.last_processed_waypoint and not self.is_transitioning:
+            return
+        
         # Always store the last reached waypoint (even during transitions)
         self.last_waypoint_reached = waypoint_index
         
@@ -848,6 +869,9 @@ class MissionRunner(Node):
                 f"Waypoint {waypoint_index} reached during transition - stored for later"
             )
             return
+        
+        # Mark as processed
+        self.last_processed_waypoint = waypoint_index
         
         self.get_logger().info(
             f"Reached waypoint {waypoint_index} (state={self.current_state})"
