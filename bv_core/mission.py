@@ -9,11 +9,12 @@ Each detected object triggers the sequence:
     2. Localize object using camera intrinsics
     3. Fly to localized object (stitching runs in background)
     4. Deploy payload via servo sequence
-    5. Resume scanning from where we left off
+    5. Wait for stitching to complete
+    6. Resume scanning from where we left off
 
 FUTURE CHANGES:
     1. vision node:
-       - Must publish Bool to '/object_detected' when a new detection is added
+       - Now publishes ObjectDetections to '/obj_dets' (IMPLEMENTED)
        
     2. stitching.py:
        - Must subscribe to '/mission_state' and stitch when mission state is 'deliver'
@@ -40,11 +41,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
-from std_msgs.msg import String, Int8, Bool
+from std_msgs.msg import String, Int8
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
-from bv_msgs.srv import GetObjectLocations
+from bv_msgs.srv import GetObjectLocations, TriggerStitching
+from bv_msgs.msg import ObjectDetections
 
 
 # Mission configuration
@@ -176,6 +178,9 @@ class MissionRunner(Node):
         self.home_lat = None
         self.home_lon = None
         self.home_alt = None
+        
+        # Pending scan resume data (set after deploy, used after stitching)
+        self.pending_scan_waypoint_index = None
 
     def setup_ros_interfaces(self):
         """Set up all ROS publishers, subscribers, and service clients."""
@@ -235,18 +240,10 @@ class MissionRunner(Node):
         
         # Object detection trigger from filtering_node
         self.object_detected_sub = self.create_subscription(
-            Bool,
-            '/object_detected',
+            ObjectDetections,
+            '/obj_dets',
             self.on_object_detected,
             qos_profile=reliable_qos
-        )
-        
-        # Queue state from vision_node (for legacy compatibility)
-        self.queue_state_sub = self.create_subscription(
-            Int8,
-            '/queue_state',
-            self.on_queue_state_changed,
-            qos_profile=transient_local_qos
         )
         
         
@@ -276,6 +273,10 @@ class MissionRunner(Node):
             GetObjectLocations,
             'get_object_locations'
         )
+        self.trigger_stitching_client = self.create_client(
+            TriggerStitching,
+            'trigger_stitching'
+        )
 
     def wait_for_gps_fix(self):
         """Block until we receive a GPS fix for the home position."""
@@ -301,6 +302,7 @@ class MissionRunner(Node):
             (self.command_client, '/mavros/cmd/command'),
             (self.param_set_client, '/mavros/param/set'),
             (self.get_object_locations_client, 'get_object_locations'),
+            (self.trigger_stitching_client, 'trigger_stitching'),
         ]
         
         for client, name in services:
@@ -684,6 +686,15 @@ class MissionRunner(Node):
         future = self.get_object_locations_client.call_async(request)
         future.add_done_callback(self.on_object_location_received)
 
+    def request_stitching_complete(self):
+        """Request stitching service and wait for completion before resuming scan."""
+        request = TriggerStitching.Request()
+        
+        self.get_logger().info("Waiting for stitching to complete...")
+        
+        future = self.trigger_stitching_client.call_async(request)
+        future.add_done_callback(self.on_stitching_complete)
+
     # Deploy servo logic
     def execute_deploy_servo_step(self):
         """
@@ -729,20 +740,35 @@ class MissionRunner(Node):
             self.get_logger().info("All payloads delivered!")
             self.enter_rtl_state()
         else:
-            # Resume scanning for next object
-            # Advance scan index to continue from where we left off
-            self.scan_waypoint_index_on_detection = (
+            # Calculate and store the scan resume index for after stitching completes
+            self.pending_scan_waypoint_index = (
                 self.scan_waypoint_index_on_detection + self.last_reached_scan_waypoint + 1
             )
             
             # Wrap around if we've passed the end
-            if self.scan_waypoint_index_on_detection >= len(self.scan_waypoints):
-                self.scan_waypoint_index_on_detection = 0
+            if self.pending_scan_waypoint_index >= len(self.scan_waypoints):
+                self.pending_scan_waypoint_index = 0
             
-            self.get_logger().info(
-                f"Resuming scan from waypoint {self.scan_waypoint_index_on_detection}"
-            )
-            self.enter_scan_state()
+            # Wait for stitching to complete before resuming scan
+            self.request_stitching_complete()
+
+    def on_stitching_complete(self, future):
+        """Callback when stitching service returns - now safe to resume scanning."""
+        response = future.result()
+        
+        if response.success:
+            self.get_logger().info("Stitching completed successfully")
+        else:
+            self.get_logger().warn("Stitching reported failure, continuing anyway...")
+        
+        # Now resume scanning from the stored waypoint index
+        self.scan_waypoint_index_on_detection = self.pending_scan_waypoint_index
+        self.pending_scan_waypoint_index = None
+        
+        self.get_logger().info(
+            f"Resuming scan from waypoint {self.scan_waypoint_index_on_detection}"
+        )
+        self.enter_scan_state()
 
     # Callbacks - service responses
     def on_waypoint_push_complete(self, future):
@@ -894,10 +920,11 @@ class MissionRunner(Node):
 
     def on_object_detected(self, msg):
         """
-        Callback when filtering_node detects a new object during scan.
+        Callback when filtering_node publishes detections during scan.
         Immediately stops the drone and transitions to localization.
         """
-        if not msg.data:
+        # Check if there are any detections in the message
+        if not msg.detections:
             return
         
         if self.current_state != STATE_SCAN:
@@ -907,8 +934,8 @@ class MissionRunner(Node):
             return  # Already handling a transition
         
         self.get_logger().info(
-            f"OBJECT DETECTED! (#{self.objects_delivered_count + 1}) - "
-            "Stopping to localize..."
+            f"OBJECT DETECTED! (#{self.objects_delivered_count + 1}, "
+            f"{len(msg.detections)} detection(s)) - Stopping to localize..."
         )
         
         # Save current scan progress for later resume
@@ -919,17 +946,6 @@ class MissionRunner(Node):
         
         # Brief delay to ensure loiter is set, then transition
         self.create_timer(0.5, lambda: self.enter_localize_state())
-
-    def on_queue_state_changed(self, msg):
-        """
-        Callback for vision processing queue state.
-        Kept for legacy compatibility - not used in new flow.
-        """
-        queue_state = msg.data
-        if queue_state == 0:
-            self.get_logger().debug("Vision queue: still processing")
-        elif queue_state == 1:
-            self.get_logger().debug("Vision queue: processing complete")
 
     # Main timer
     def main_timer_callback(self):
