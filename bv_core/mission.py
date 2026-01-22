@@ -13,18 +13,13 @@ Each detected object triggers the sequence:
     6. Resume scanning from where we left off
 
 FUTURE CHANGES:
-    1. vision node:
-       - Now publishes ObjectDetections to '/obj_dets' (IMPLEMENTED)
-       
-    2. stitching.py:
-       - Must subscribe to '/mission_state' and stitch when mission state is 'deliver'
-       so that mission code is more readable. right now Deliver == stithcing
-       
-    3. localizer  localizer livesMust respond to get_object_locations service when state is "localize":
-    4. get_object_locations topic.
+    1. if no detections are found the drone stays at the last waypoint instead of restarting scan region
+       i believe its because px4 doesnt restart and thinks mission is complete
+    2. localizer  localizer livesMust respond to get_object_locations service when state is "localize":
+    3. get_object_locations topic.
        - Must return localized GPS coordinates when called
        - First location in list should be the most recent detection
-    5. stithcing node should collect its own frames
+    4. stithcing node should collect its own frames
     
 
 """
@@ -59,7 +54,7 @@ STATE_TAKEOFF  = "takeoff"
 STATE_LAP      = "lap"
 STATE_SCAN     = "scan"
 STATE_LOCALIZE = "localize"
-STATE_DELIVER  = "stitching"    # Named "stitching" so stitching.py activates during delivery
+STATE_DELIVER  = "stitching"
 STATE_DEPLOY   = "deploy"
 STATE_RTL      = "return"
 
@@ -559,7 +554,7 @@ class MissionRunner(Node):
         
         # Determine hold time at each waypoint based on state
         if self.current_state == STATE_SCAN:
-            hold_time = 1.0  # Brief pause for image capture
+            hold_time = 0.0  # Make this 1.0 for the drone to stop at waypoints
         elif self.current_state == STATE_DELIVER:
             hold_time = 1.0  # Pause before deploy
         else:

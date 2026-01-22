@@ -1,102 +1,83 @@
 #!/usr/bin/env python3
+"""
+Vision Node for SUAS Drone System
 
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+Handles camera frame capture and object detection during scan missions.
+Uses a producer-consumer pattern with separate threads for frame fetching
+and detection processing.
+"""
 
+# Imports
 
-from std_msgs.msg import String, Int8
-from sensor_msgs.msg import Image
-from sensor_msgs.msg import CompressedImage
-from .vision import Detector
+# Standard library
+import os
 import queue
 import threading
-from bv_msgs.msg import ObjectDetections
-from mavros_msgs.msg import WaypointReached
-from geometry_msgs.msg import Vector3
-import numpy as np
-import traceback
-from rfdetr.util.coco_classes import COCO_CLASSES
-import yaml
-from ament_index_python.packages import get_package_share_directory
-import os
 import time
-import cv2
-from cv_bridge import CvBridge, CvBridgeError
-from .pipelines.gz_transport_pipeline import GzTransportPipeline
+import traceback
 
-from bv_core.pipelines.camera_pipeline import CameraPipeline
+# Third-party
+import cv2
+import numpy as np
+import yaml
+
+# ROS2
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
+
+# ROS2 messages
+from std_msgs.msg import String, Int8
+from sensor_msgs.msg import Image, CompressedImage
+from geometry_msgs.msg import Vector3
+from mavros_msgs.msg import WaypointReached
+from bv_msgs.msg import ObjectDetections
+
+# ROS2 utilities
+from cv_bridge import CvBridge, CvBridgeError
+from ament_index_python.packages import get_package_share_directory
+
+# Local
+from .vision import Detector
+from rfdetr.util.coco_classes import COCO_CLASSES
+
+
+# Vision Node
 
 class VisionNode(Node):
+    """
+    ROS2 node for capturing and processing camera frames during scan missions.
+    
+    Architecture:
+        - Main thread: ROS2 callbacks and publishing
+        - Frame fetcher thread: Captures frames from camera pipeline
+        - Worker thread: Runs object detection on queued frames
+    """
+
+    
+    # Initialization
+    
+
     def __init__(self):
         super().__init__('vision_node')
 
-        qos = QoSProfile(depth=10)
-        qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        self._load_config()
+        self._init_state()
+        self._init_pipeline()
+        self._init_threading()
+        self._init_subscribers()
+        self._init_publishers()
+        self._init_detector()
+        self._start_worker_threads()
 
-        self.pipeline_topic = '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
-        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
-        self.pipeline_running = False
-
-        self.scan_active = threading.Event()
-        self.shutdown_flag = threading.Event()
-
-        self.reached_sub = self.create_subscription(
-            WaypointReached,
-            topic='/mavros/mission/reached',
-            callback=self.handle_reached,
-            qos_profile=qos
-        )
-
-        self.mission_state_sub = self.create_subscription(
-            msg_type=String,
-            topic='/mission_state',
-            callback=self.mission_state_callback,
-            qos_profile=qos,
-        )
-
-        objs_pub_qos = QoSProfile(depth=10)
-        objs_pub_qos.reliability = ReliabilityPolicy.RELIABLE
-
-        self.obj_dets_pub = self.create_publisher(
-            msg_type=ObjectDetections,
-            topic='/obj_dets',
-            qos_profile=objs_pub_qos
-        )
-        
-        self.compressed_pub = self.create_publisher(
-            CompressedImage, '/image_compressed', 10
-        )
-
-        #live_feed_qos = QoSProfile(depth=5)
-        #live_feed_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-
-        #self.live_feed_pub = self.create_publisher(
-        #    msg_type=Image,
-        #    topic='/gazebo/live_feed',
-        #    qos_profile=live_feed_qos,
-        #)
-
-        self.bridge = CvBridge()
-
-        qos_queue = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5
-        )
-
-        self.queue_state_pub = self.create_publisher(
-            msg_type=Int8,
-            topic="/queue_state",
-            qos_profile=qos_queue,
-        )
-
-        self.timer = self.create_timer(
-            0.1,
-            self.timer_cb
-        )
-
+    def _load_config(self):
+        """Load configuration from YAML files."""
+        # Load vision parameters
         vision_yaml = os.path.join(
             get_package_share_directory('bv_core'),
             'config',
@@ -113,60 +94,245 @@ class VisionNode(Node):
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
-        self.obj_dets = []
+        # Load mission parameters (including pipeline config)
+        mission_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'mission_params.yaml'
+        )
 
-        self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
+        with open(mission_yaml, 'r') as f:
+            mission_cfg = yaml.safe_load(f)
 
-        self.queue = queue.Queue()
+        # Pipeline configuration
+        self.pipeline_type = mission_cfg.get('pipeline_type', 'sim')
+        self.gz_topic = mission_cfg.get(
+            'gz_topic',
+            '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
+        )
+        self.gst_pipeline_str = mission_cfg.get(
+            'gst_pipeline',
+            'v4l2src device=/dev/video0 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! appsink'
+        )
+        self.camera_fps = mission_cfg.get('camera_fps', 30.0)
+        self.record_video = mission_cfg.get('record_video', False)
 
-        self.worker = threading.Thread(target=self.worker_loop, daemon=True)
-        self.worker.start()
-
-        self.frame_fetcher = threading.Thread(target=self.frame_fetch_loop, daemon=True)
-        self.frame_fetcher.start()
-
+    def _init_state(self):
+        """Initialize state tracking variables."""
         self.prev_state = ""
         self.state = ""
-
         self.latest_wp = None
         self.last_wp = None
+        self.obj_dets = []
 
-    def mission_state_callback(self, msg: String):
-        if msg.data == self.prev_state:
+    def _init_pipeline(self):
+        """Initialize the camera pipeline based on configuration."""
+        if self.pipeline_type == 'sim':
+            # Import and use Gazebo transport pipeline for simulation
+            from .pipelines.gz_transport_pipeline import GzTransportPipeline
+
+            self.pipeline_topic = self.gz_topic
+            self.pipeline = GzTransportPipeline(
+                topic=self.pipeline_topic,
+                queue_size=5
+            )
+            self.get_logger().info(f"Initialized Gazebo pipeline on topic: {self.pipeline_topic}")
+
+        elif self.pipeline_type == 'real':
+            # Import and use camera pipeline for physical drone
+            from .pipelines.camera_pipeline import CameraPipeline
+
+            self.pipeline_topic = '/camera/image'
+            self.pipeline = CameraPipeline(
+                gst_pipeline=self.gst_pipeline_str,
+                record=self.record_video,
+                ros_context=self,
+                fps=self.camera_fps,
+                max_queue_size=5
+            )
+            self.get_logger().info(f"Initialized camera pipeline with GStreamer")
+
+        else:
+            raise ValueError(f"Unknown pipeline_type: '{self.pipeline_type}'. Use 'sim' or 'real'.")
+
+        self.pipeline_running = False
+
+    def _init_threading(self):
+        """Initialize threading primitives."""
+        self.scan_active = threading.Event()
+        self.shutdown_flag = threading.Event()
+        self.queue = queue.Queue()
+        self.bridge = CvBridge()
+
+    def _init_subscribers(self):
+        """Set up ROS2 subscriptions."""
+        qos_best_effort = QoSProfile(depth=10)
+        qos_best_effort.reliability = ReliabilityPolicy.BEST_EFFORT
+
+        self.reached_sub = self.create_subscription(
+            WaypointReached,
+            '/mavros/mission/reached',
+            self._on_waypoint_reached,
+            qos_best_effort
+        )
+
+        self.mission_state_sub = self.create_subscription(
+            String,
+            '/mission_state',
+            self._on_mission_state_changed,
+            qos_best_effort
+        )
+
+    def _init_publishers(self):
+        """Set up ROS2 publishers and timers."""
+        # Object detections (reliable for mission-critical data)
+        qos_reliable = QoSProfile(depth=10)
+        qos_reliable.reliability = ReliabilityPolicy.RELIABLE
+
+        self.obj_dets_pub = self.create_publisher(
+            ObjectDetections,
+            '/obj_dets',
+            qos_reliable
+        )
+
+        # Compressed image feed
+        self.compressed_pub = self.create_publisher(
+            CompressedImage,
+            '/image_compressed',
+            10
+        )
+
+        # Queue state (transient local so late subscribers get last value)
+        qos_queue_state = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
+
+        self.queue_state_pub = self.create_publisher(
+            Int8,
+            '/queue_state',
+            qos_queue_state
+        )
+
+        # Timer for queue state publishing
+        self.timer = self.create_timer(0.1, self._on_timer)
+
+    def _init_detector(self):
+        """Initialize the object detector."""
+        self.detector = Detector(
+            batch_size=self.batch_size,
+            resolution=self.resolution
+        )
+
+    def _start_worker_threads(self):
+        """Start background worker threads."""
+        self.frame_fetcher = threading.Thread(
+            target=self._frame_fetch_loop,
+            daemon=True
+        )
+        self.frame_fetcher.start()
+
+        self.worker = threading.Thread(
+            target=self._detection_worker_loop,
+            daemon=True
+        )
+        self.worker.start()
+
+    
+    # ROS2 Callbacks
+    
+
+    def _on_mission_state_changed(self, msg: String):
+        """
+        Handle mission state transitions.
+        
+        Starts/stops the camera pipeline and frame capture based on
+        whether we're in 'scan' state.
+        """
+        new_state = msg.data
+
+        if new_state == self.prev_state:
             return
 
-        new_state = msg.data
         self.state = new_state
         self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
 
         if new_state == 'scan':
-            if not self.pipeline_running:
-                try:
-                    self.pipeline.start()
-                    self.pipeline_running = True
-                except RuntimeError as exc:
-                    self.get_logger().error(f"Failed to start Gazebo pipeline: {exc}")
-                    self.state = self.prev_state
-                    return
-            self.scan_active.set()
+            self._start_scanning()
         else:
-            self.scan_active.clear()
-            if self.pipeline_running:
-                self.pipeline.stop()
-                self.pipeline_running = False
-            self.queue.put(None)
+            self._stop_scanning()
 
         self.prev_state = new_state
 
-    def handle_reached(self, msg):
-        if self.last_wp != None and msg.wp_seq != self.last_wp:
+    def _on_waypoint_reached(self, msg: WaypointReached):
+        """
+        Handle waypoint reached notifications.
+        
+        Sets latest_wp to trigger frame capture in the fetch loop.
+        """
+        if self.last_wp is not None and msg.wp_seq != self.last_wp:
             self.get_logger().info("Made it to new waypoint")
             self.latest_wp = msg.wp_seq
-        
+
         self.last_wp = msg.wp_seq
-#
-    def frame_fetch_loop(self):
+
+    def _on_timer(self):
+        """
+        Publish queue state at 10Hz.
+        
+        Publishes 1 when queue is empty (all frames processed),
+        0 when frames are still pending.
+        """
+        empty_flag = 1 if self.queue.unfinished_tasks == 0 else 0
+
+        msg = Int8()
+        msg.data = empty_flag
+        self.queue_state_pub.publish(msg)
+
+    
+    # Scanning Control
+    
+
+    def _start_scanning(self):
+        """Start the camera pipeline and enable frame capture."""
+        if not self.pipeline_running:
+            try:
+                self.pipeline.start()
+                self.pipeline_running = True
+            except RuntimeError as exc:
+                self.get_logger().error(f"Failed to start vision pipeline: {exc}")
+                self.state = self.prev_state
+                return
+
+        self.scan_active.set()
+
+    def _stop_scanning(self):
+        """Stop the camera pipeline and disable frame capture."""
+        self.scan_active.clear()
+
+        if self.pipeline_running:
+            self.pipeline.stop()
+            self.pipeline_running = False
+
+        # Flush any blocking queue.get() calls
+        self.queue.put(None)
+
+    
+    # Frame Fetcher Thread
+    
+
+    def _frame_fetch_loop(self):
+        """
+        Background thread that captures frames from the camera pipeline.
+        
+        Only queues frames when:
+        - scan_active is set (we're in scan state)
+        - A new waypoint was just reached (latest_wp is set)
+        """
         while not self.shutdown_flag.is_set():
+            # Wait for scan state to be active
             if not self.scan_active.wait(timeout=0.1):
                 continue
 
@@ -177,33 +343,15 @@ class VisionNode(Node):
                 time.sleep(0.05)
                 continue
 
-            try:
-                frame = self.pipeline.get_frame(timeout=0.1)
-            except RuntimeError:
-                time.sleep(0.05)
-                continue
-
+            # Try to get a frame from the camera
+            frame = self._try_get_frame()
             if frame is None:
                 continue
 
-            try:
-                if frame.ndim == 3 and frame.shape[2] == 1:
-                    frame_to_publish = frame[:, :, 0]
-                    encoding = "mono8"
-                elif frame.ndim == 2:
-                    frame_to_publish = frame
-                    encoding = "mono8"
-                else:
-                    frame_to_publish = frame
-                    encoding = "bgr8"
+            # Publish live feed (currently disabled)
+            self._publish_live_feed(frame)
 
-                live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
-                live_msg.header.stamp = self.get_clock().now().to_msg()
-                live_msg.header.frame_id = self.pipeline_topic
-                #self.live_feed_pub.publish(live_msg)
-            except (CvBridgeError, ValueError) as exc:
-                self.get_logger().error(f"Failed to publish live feed frame: {exc}")
-
+            # Only queue frame if we're scanning and just reached a waypoint
             if self.state != 'scan' or self.latest_wp is None:
                 time.sleep(0.05)
                 continue
@@ -211,112 +359,182 @@ class VisionNode(Node):
             stamp = self.get_clock().now()
             self.get_logger().info("Adding to queue")
             self.queue.put((frame, stamp))
-            self.latest_wp = None
+            self.latest_wp = None  # Reset until next waypoint
 
-    def timer_cb(self):
-        # queue.unfinished_tasks is incremented on put(), 
-        # and decremented in task_done() (in your worker’s finally block).
-        # When it hits zero, you know there are no pending or in‐flight tasks.
-        empty_flag = 1 if self.queue.unfinished_tasks == 0 else 0
+    def _try_get_frame(self):
+        """Attempt to get a frame from the pipeline with error handling."""
+        try:
+            return self.pipeline.get_frame(timeout=0.1)
+        except RuntimeError:
+            time.sleep(0.05)
+            return None
 
-        msg = Int8()
-        msg.data = empty_flag
-        self.queue_state_pub.publish(msg)
+    def _publish_live_feed(self, frame):
+        """
+        Convert and publish frame to live feed topic.
+        
+        Currently disabled but kept for future use.
+        """
+        try:
+            if frame.ndim == 3 and frame.shape[2] == 1:
+                frame_to_publish = frame[:, :, 0]
+                encoding = "mono8"
+            elif frame.ndim == 2:
+                frame_to_publish = frame
+                encoding = "mono8"
+            else:
+                frame_to_publish = frame
+                encoding = "bgr8"
 
-    def worker_loop(self):
+            live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
+            live_msg.header.stamp = self.get_clock().now().to_msg()
+            live_msg.header.frame_id = self.pipeline_topic
+            # self.live_feed_pub.publish(live_msg)
+
+        except (CvBridgeError, ValueError) as exc:
+            self.get_logger().error(f"Failed to publish live feed frame: {exc}")
+
+    
+    # Detection Worker Thread
+    
+
+    def _detection_worker_loop(self):
+        """
+        Background thread that processes queued frames through object detection.
+        
+        For each frame:
+        1. Runs detection model
+        2. Annotates and saves the frame
+        3. Publishes compressed image and detection results
+        """
         while not self.shutdown_flag.is_set():
-            try:
-                item = self.queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
+            item = self._get_queue_item()
             if item is None:
-                self.queue.task_done()
-                continue
-
-            if self.state != 'scan':
-                self.queue.task_done()
                 continue
 
             frame, stamp = item
-            self.get_logger().info("Processsing frame from queue")
+
             try:
-                if frame.ndim == 2:
-                    frame = np.repeat(frame[:, :, None], 3, axis=2)
-
-                detections = self.detector.process_frame(frame=frame, threshold=self.det_thresh, overlap=self.overlap)
-
-                labels = [
-                   f"{COCO_CLASSES[class_id]} {confidence:.2f}"
-                    for class_id, confidence
-                    in zip(detections.class_id, detections.confidence)
-                ]
-
-                annotated_frame = self.detector.annotate_frame(frame, detections, labels)
-                self.detector.save_frame(annotated_frame, "annotated_frames")
-                
-
-                self.get_logger().info("Saved Frame")
-                msg = self.bridge.cv2_to_compressed_imgmsg(annotated_frame, dst_format='jpeg')
-                msg.header.stamp = self.get_clock().now().to_msg()
-                self.compressed_pub.publish(msg)
-                
-                detections_msg = ObjectDetections()
-                detections_msg.dets = []
-                detections_msg.header.stamp = stamp.to_msg()
-                detections_msg.header.frame_id = self.pipeline_topic
-
-                for (x1, y1, x2, y2), score, cls in zip(
-                        detections.xyxy,
-                        detections.confidence,
-                        detections.class_id,
-                ):
-                    if score > self.det_thresh:
-                        vec = Vector3()
-                        vec.x = float(x1 + x2) / 2.0
-                        vec.y = float(y1 + y2) / 2.0
-                        vec.z = float(cls)
-                        detections_msg.dets.append(vec)
-
-                self.obj_dets_pub.publish(detections_msg)
-                
+                self._process_frame(frame, stamp)
             except Exception as e:
                 tb = traceback.format_exc()
-                self.get_logger().error(
-                    f"Processing failed: {e}\n{tb}"
-                )
+                self.get_logger().error(f"Processing failed: {e}\n{tb}")
             finally:
                 self.queue.task_done()
 
+    def _get_queue_item(self):
+        """
+        Get next item from queue, handling empty queue and sentinel values.
+        
+        Returns None if item should be skipped.
+        """
+        try:
+            item = self.queue.get(timeout=0.1)
+        except queue.Empty:
+            return None
+
+        # Sentinel value for shutdown/state change
+        if item is None:
+            self.queue.task_done()
+            return None
+
+        # Skip if we're no longer in scan state
+        if self.state != 'scan':
+            self.queue.task_done()
+            return None
+
+        return item
+
+    def _process_frame(self, frame, stamp):
+        """Run detection on a frame and publish results."""
+        self.get_logger().info("Processing frame from queue")
+
+        # Convert grayscale to BGR if needed
+        if frame.ndim == 2:
+            frame = np.repeat(frame[:, :, None], 3, axis=2)
+
+        # Run detection
+        detections = self.detector.process_frame(
+            frame=frame,
+            threshold=self.det_thresh,
+            overlap=self.overlap
+        )
+
+        # Annotate and save
+        labels = [
+            f"{COCO_CLASSES[class_id]} {confidence:.2f}"
+            for class_id, confidence
+            in zip(detections.class_id, detections.confidence)
+        ]
+        annotated_frame = self.detector.annotate_frame(frame, detections, labels)
+        self.detector.save_frame(annotated_frame, "annotated_frames")
+        self.get_logger().info("Saved Frame")
+
+        # Publish compressed image
+        self._publish_compressed_image(annotated_frame)
+
+        # Publish detection results
+        self._publish_detections(detections, stamp)
+
+    def _publish_compressed_image(self, frame):
+        """Publish annotated frame as compressed JPEG."""
+        msg = self.bridge.cv2_to_compressed_imgmsg(frame, dst_format='jpeg')
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.compressed_pub.publish(msg)
+
+    def _publish_detections(self, detections, stamp):
+        """Publish object detections message."""
+        detections_msg = ObjectDetections()
+        detections_msg.dets = []
+        detections_msg.header.stamp = stamp.to_msg()
+        detections_msg.header.frame_id = self.pipeline_topic
+
+        for (x1, y1, x2, y2), score, cls in zip(
+            detections.xyxy,
+            detections.confidence,
+            detections.class_id,
+        ):
+            if score > self.det_thresh:
+                vec = Vector3()
+                vec.x = float(x1 + x2) / 2.0  # Center X
+                vec.y = float(y1 + y2) / 2.0  # Center Y
+                vec.z = float(cls)             # Class ID
+                detections_msg.dets.append(vec)
+
+        self.obj_dets_pub.publish(detections_msg)
+
+    
+    # Lifecycle
+    
+
     def destroy_node(self):
+        """Clean up resources before shutdown."""
         self.shutdown_flag.set()
-        self.scan_active.set()
+        self.scan_active.set()  # Unblock any waiting threads
+
         if self.pipeline_running:
             self.pipeline.stop()
             self.pipeline_running = False
+
         cv2.destroyAllWindows()
-        self.queue.put(None)
+        self.queue.put(None)  # Unblock worker thread
+
         return super().destroy_node()
 
+
+# Entry Point
+
 def main(args=None):
-    # Before running, ensure PX4’s yaw mode is set:
-    # ros2 param set /px4 MPC_YAW_MODE 0
+    """
+    Main entry point for the vision node.
+    
+    Note: Before running, ensure PX4's yaw mode is set:
+        ros2 param set /px4 MPC_YAW_MODE 0
+    """
     rclpy.init()
     node = VisionNode()
     rclpy.spin(node)
     rclpy.shutdown()
-
-# def main(args=None):
-#     # Before running, ensure PX4’s yaw mode is set:
-#     # ros2 param set /px4 MPC_YAW_MODE 0
-#     rclpy.init(args=args)
-#     node = VisionNode()
-
-#     executor = MultiThreadedExecutor(num_threads=4)
-#     executor.add_node(node)
-#     executor.spin()
-    
-#     rclpy.shutdown()
 
 
 if __name__ == '__main__':
