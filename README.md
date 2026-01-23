@@ -370,13 +370,13 @@ Notes:
 - We recommend checking out the `humble` branch of `ros_gz` because ROS 2 Humble-compatible changes live there.
 - If you prefer to keep the full `ros_gz` repo, you can; just ensure you use the `humble` branch and build only the packages you need.
 
-3) Start the PX4 SITL world with the down-facing monocular camera
+3) Start the PX4 SITL world with the gimbal and object
 
 From your PX4-Autopilot repository root (not the ROS workspace):
 
 ```bash
 export PX4_GZ_WORLD=bv_mission
-make px4_sitl gz_x500_mono_cam_down
+make px4_sitl gz_x500_gimbal_baylands
 ```
 
 This will launch PX4 with the `bv_mission` Gazebo world and the monocular down-facing camera model named `x500_mono_cam_down`.
