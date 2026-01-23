@@ -29,7 +29,6 @@ class MissionRunner(Node):
         self.transition_in_progress = False
         self.expected_final_wp = None
 
-        # Load all parameters from mission_params.yaml
         mission_yaml = os.path.join(
             get_package_share_directory('bv_core'),
             'config',
@@ -37,6 +36,7 @@ class MissionRunner(Node):
         )
         with open(mission_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
+
 
         self.points         = cfg.get('points', [])
         self.scan_points    = cfg.get('scan_points', [])
