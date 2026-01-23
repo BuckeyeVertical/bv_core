@@ -9,15 +9,11 @@ and detection processing.
 
 # Imports
 
-# Standard library
 import os
 import queue
 import threading
 import time
 import traceback
-
-# Third-party
-import cv2
 import numpy as np
 import yaml
 
@@ -33,13 +29,11 @@ from rclpy.qos import (
 
 # ROS2 messages
 from std_msgs.msg import String, Int8
-from sensor_msgs.msg import Image, CompressedImage
 from geometry_msgs.msg import Vector3
 from mavros_msgs.msg import WaypointReached
 from bv_msgs.msg import ObjectDetections
 
 # ROS2 utilities
-from cv_bridge import CvBridge, CvBridgeError
 from ament_index_python.packages import get_package_share_directory
 
 # Local
@@ -94,7 +88,7 @@ class VisionNode(Node):
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
-        # Load mission parameters (including pipeline config)
+        # Load mission parameters
         mission_yaml = os.path.join(
             get_package_share_directory('bv_core'),
             'config',
@@ -106,16 +100,18 @@ class VisionNode(Node):
 
         # Pipeline configuration
         self.pipeline_type = mission_cfg.get('pipeline_type', 'sim')
+        #Change this if drone/world changes
         self.gz_topic = mission_cfg.get(
             'gz_topic',
             '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
         )
         self.gst_pipeline_str = mission_cfg.get(
             'gst_pipeline',
-            'v4l2src device=/dev/video0 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! appsink'
+            'v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! queue max-size-buffers=1 leaky=downstream ! appsink drop=true sync=false'
         )
         self.camera_fps = mission_cfg.get('camera_fps', 30.0)
         self.record_video = mission_cfg.get('record_video', False)
+        self.ros_image_topic = mission_cfg.get('ros_image_topic', '/image_compressed')
 
     def _init_state(self):
         """Initialize state tracking variables."""
@@ -152,8 +148,20 @@ class VisionNode(Node):
             )
             self.get_logger().info(f"Initialized camera pipeline with GStreamer")
 
+        elif self.pipeline_type == 'ros':
+            # Import and use ROS topic subscription pipeline (e.g., for rosbag playback)
+            from .pipelines.ros_cam_pipeline import RosCamPipeline
+
+            self.pipeline_topic = self.ros_image_topic
+            self.pipeline = RosCamPipeline(
+                parent_node=self,
+                topic=self.pipeline_topic,
+                queue_size=5
+            )
+            self.get_logger().info(f"Initialized ROS pipeline on topic: {self.pipeline_topic}")
+
         else:
-            raise ValueError(f"Unknown pipeline_type: '{self.pipeline_type}'. Use 'sim' or 'real'.")
+            raise ValueError(f"Unknown pipeline_type: '{self.pipeline_type}'. Use 'sim', 'real', or 'ros'.")
 
         self.pipeline_running = False
 
@@ -162,7 +170,6 @@ class VisionNode(Node):
         self.scan_active = threading.Event()
         self.shutdown_flag = threading.Event()
         self.queue = queue.Queue()
-        self.bridge = CvBridge()
 
     def _init_subscribers(self):
         """Set up ROS2 subscriptions."""
@@ -193,13 +200,6 @@ class VisionNode(Node):
             ObjectDetections,
             '/obj_dets',
             qos_reliable
-        )
-
-        # Compressed image feed
-        self.compressed_pub = self.create_publisher(
-            CompressedImage,
-            '/image_compressed',
-            10
         )
 
         # Queue state (transient local so late subscribers get last value)
@@ -348,9 +348,6 @@ class VisionNode(Node):
             if frame is None:
                 continue
 
-            # Publish live feed (currently disabled)
-            self._publish_live_feed(frame)
-
             # Only queue frame if we're scanning and just reached a waypoint
             if self.state != 'scan' or self.latest_wp is None:
                 time.sleep(0.05)
@@ -368,31 +365,6 @@ class VisionNode(Node):
         except RuntimeError:
             time.sleep(0.05)
             return None
-
-    def _publish_live_feed(self, frame):
-        """
-        Convert and publish frame to live feed topic.
-        
-        Currently disabled but kept for future use.
-        """
-        try:
-            if frame.ndim == 3 and frame.shape[2] == 1:
-                frame_to_publish = frame[:, :, 0]
-                encoding = "mono8"
-            elif frame.ndim == 2:
-                frame_to_publish = frame
-                encoding = "mono8"
-            else:
-                frame_to_publish = frame
-                encoding = "bgr8"
-
-            live_msg = self.bridge.cv2_to_imgmsg(frame_to_publish, encoding=encoding)
-            live_msg.header.stamp = self.get_clock().now().to_msg()
-            live_msg.header.frame_id = self.pipeline_topic
-            # self.live_feed_pub.publish(live_msg)
-
-        except (CvBridgeError, ValueError) as exc:
-            self.get_logger().error(f"Failed to publish live feed frame: {exc}")
 
     
     # Detection Worker Thread
@@ -470,17 +442,8 @@ class VisionNode(Node):
         self.detector.save_frame(annotated_frame, "annotated_frames")
         self.get_logger().info("Saved Frame")
 
-        # Publish compressed image
-        self._publish_compressed_image(annotated_frame)
-
         # Publish detection results
         self._publish_detections(detections, stamp)
-
-    def _publish_compressed_image(self, frame):
-        """Publish annotated frame as compressed JPEG."""
-        msg = self.bridge.cv2_to_compressed_imgmsg(frame, dst_format='jpeg')
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.compressed_pub.publish(msg)
 
     def _publish_detections(self, detections, stamp):
         """Publish object detections message."""
@@ -505,8 +468,6 @@ class VisionNode(Node):
 
     
     # Lifecycle
-    
-
     def destroy_node(self):
         """Clean up resources before shutdown."""
         self.shutdown_flag.set()
@@ -516,7 +477,6 @@ class VisionNode(Node):
             self.pipeline.stop()
             self.pipeline_running = False
 
-        cv2.destroyAllWindows()
         self.queue.put(None)  # Unblock worker thread
 
         return super().destroy_node()

@@ -10,10 +10,11 @@
 
 # VISION PIPELINE CONFIGURATION
 
-# Pipeline type: 'sim' for Gazebo simulation, 'real' for physical drone camera
+# Pipeline type: 'sim', 'real', or 'ros'
 pipeline_type: 'sim'
 
 # Gazebo simulation settings (used when pipeline_type: 'sim')
+#change this if drone or world changes
 gz_topic: '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
 
 # Real camera settings (used when pipeline_type: 'real')
@@ -21,7 +22,8 @@ gst_pipeline: 'v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! video/x-
 camera_fps: 30.0
 record_video: false
 
-
+# ROS topic subscription (ros) - for rosbag playback
+ros_image_topic: '/image_compressed'
 
 # MISSION CONFIGURATION
 
