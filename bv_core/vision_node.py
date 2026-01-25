@@ -29,22 +29,23 @@ from rclpy.qos import (
 
 # ROS2 messages
 from std_msgs.msg import String, Int8
-from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
-from .detectors import create_detector
-import queue
-import threading
 from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import Vector3
 from mavros_msgs.msg import WaypointReached
-from bv_msgs.msg import ObjectDetections
+
+# Local
+from .detectors import create_detector
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
 
-# Local
-from .vision import Detector
+# Detection utilities
 from rfdetr.util.coco_classes import COCO_CLASSES
+import supervision as sv
+
+# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
+COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 
 
 # Vision Node
@@ -76,8 +77,7 @@ class VisionNode(Node):
         self._start_worker_threads()
 
     def _load_config(self):
-        """Load configuration from YAML files."""
-        # Load vision parameters
+        """Load configuration from vision_params.yaml."""
         vision_yaml = os.path.join(
             get_package_share_directory('bv_core'),
             'config',
@@ -87,39 +87,31 @@ class VisionNode(Node):
         with open(vision_yaml, 'r') as f:
             cfg = yaml.safe_load(f)
 
+        # Detection settings
         self.batch_size = cfg.get('batch_size', 4)
         self.det_thresh = cfg.get('detection_threshold', 0.5)
         self.resolution = cfg.get('resolution', 560)
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
+
+        # Detector configuration
         self.detector_type = cfg.get('detector_type', 'ml')
         self.gazebo_bbox_topic = cfg.get('gazebo_bbox_topic', '/camera/bounding_boxes')
 
-        # Load mission parameters
-        mission_yaml = os.path.join(
-            get_package_share_directory('bv_core'),
-            'config',
-            'mission_params.yaml'
-        )
-
-        with open(mission_yaml, 'r') as f:
-            mission_cfg = yaml.safe_load(f)
-
         # Pipeline configuration
-        self.pipeline_type = mission_cfg.get('pipeline_type', 'sim')
-        #Change this if drone/world changes
-        self.gz_topic = mission_cfg.get(
+        self.pipeline_type = cfg.get('pipeline_type', 'sim')
+        self.gz_topic = cfg.get(
             'gz_topic',
             '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
         )
-        self.gst_pipeline_str = mission_cfg.get(
+        self.gst_pipeline_str = cfg.get(
             'gst_pipeline',
             'v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! queue max-size-buffers=1 leaky=downstream ! appsink drop=true sync=false'
         )
-        self.camera_fps = mission_cfg.get('camera_fps', 30.0)
-        self.record_video = mission_cfg.get('record_video', False)
-        self.ros_image_topic = mission_cfg.get('ros_image_topic', '/image_compressed')
+        self.camera_fps = cfg.get('camera_fps', 30.0)
+        self.record_video = cfg.get('record_video', False)
+        self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
 
     def _init_state(self):
         """Initialize state tracking variables."""
@@ -228,11 +220,15 @@ class VisionNode(Node):
         self.timer = self.create_timer(0.1, self._on_timer)
 
     def _init_detector(self):
-        """Initialize the object detector."""
-        self.detector = Detector(
+        """Initialize the object detector based on config."""
+        self.detector = create_detector(
+            detector_type=self.detector_type,
             batch_size=self.batch_size,
-            resolution=self.resolution
+            resolution=self.resolution,
+            gazebo_bbox_topic=self.gazebo_bbox_topic,
         )
+        self.detector.start()
+        self.get_logger().info(f"Initialized detector: {self.detector_type}")
 
     def _start_worker_threads(self):
         """Start background worker threads."""
@@ -440,15 +436,16 @@ class VisionNode(Node):
             overlap=self.overlap
         )
 
-        # Annotate and save
+        # Annotate frame using supervision
         labels = [
-            f"{COCO_CLASSES[class_id]} {confidence:.2f}"
+            f"{COCO_CLASS_NAMES[int(class_id)]} {confidence:.2f}"
             for class_id, confidence
             in zip(detections.class_id, detections.confidence)
         ]
-        annotated_frame = self.detector.annotate_frame(frame, detections, labels)
-        self.detector.save_frame(annotated_frame, "annotated_frames")
-        self.get_logger().info("Saved Frame")
+        annotated_frame = frame.copy()
+        annotated_frame = sv.BoxAnnotator().annotate(annotated_frame, detections)
+        annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
+        self.get_logger().info(f"Detected {len(detections)} objects")
 
         # Publish detection results
         self._publish_detections(detections, stamp)
@@ -485,6 +482,7 @@ class VisionNode(Node):
             self.pipeline.stop()
             self.pipeline_running = False
 
+        self.detector.stop()
         self.queue.put(None)  # Unblock worker thread
 
         return super().destroy_node()

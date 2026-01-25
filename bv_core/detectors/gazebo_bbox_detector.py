@@ -81,8 +81,6 @@ class GazeboBBoxDetector(BaseDetector):
         Returns:
             supervision.Detections with bounding boxes from Gazebo.
         """
-        logging.debug("hello world")
-        logging.debug("hello world")
         if not self._running:
             rclpy.logging.get_logger("gazebo_bbox_detector").warning(
                 "Detector not started"
@@ -93,8 +91,6 @@ class GazeboBBoxDetector(BaseDetector):
         if bbox_msg is None:
             return sv.Detections.empty()
             
-        logging.debug(f"Detections: {bbox_msg}")
-
         return self._msg_to_detections(bbox_msg, frame.shape)
 
     def _handle_bbox_msg(self, msg: AnnotatedAxisAligned2DBox_V) -> None:

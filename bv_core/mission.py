@@ -868,7 +868,7 @@ class MissionRunner(Node):
         Immediately stops the drone and transitions to localization.
         """
         # Check if there are any detections in the message
-        if not msg.detections:
+        if not msg.dets:
             return
         
         if self.current_state != STATE_SCAN:
@@ -879,7 +879,7 @@ class MissionRunner(Node):
         
         self.get_logger().info(
             f"OBJECT DETECTED! (#{self.objects_delivered_count + 1}, "
-            f"{len(msg.detections)} detection(s)) - Stopping to localize..."
+            f"{len(msg.dets)} detection(s)) - Stopping to localize..."
         )
         
         # Save current scan progress for later resume
