@@ -6,12 +6,15 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Float64
-from .vision import Localizer
+from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import PoseStamped
 import numpy as np
 from rfdetr.util.coco_classes import COCO_CLASSES
+
+# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
+COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 from sensor_msgs.msg import NavSatFix
 
 from bv_msgs.srv import GetObjectLocations     # your custom srv
@@ -186,7 +189,7 @@ class FilteringNode(Node):
                 with open('finalized_object_locations.txt', 'w') as f:
                         print("Writing lat lon")
                         for lat, lon, cls in self.obj_locs:
-                            f.write(f"{lat:.6f},{lon:.6f},{COCO_CLASSES[cls]}\n")
+                            f.write(f"{lat:.6f},{lon:.6f},{COCO_CLASS_NAMES[int(cls)]}\n")
 
         self.prev_state = msg.data
 

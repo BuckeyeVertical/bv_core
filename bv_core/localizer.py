@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
 
-import sys
-
 import os
-import glob
-import supervision as sv
 import numpy as np
-from PIL import Image
-from rfdetr import RFDETRBase
-from rfdetr.util.coco_classes import COCO_CLASSES
-import torch
+import yaml
 
 import cv2
 from sklearn.cluster import DBSCAN
@@ -18,13 +11,14 @@ import math
 from scipy.spatial.transform import Rotation as R
 import rclpy
 import rclpy.logging
-import yaml
 from ament_index_python.packages import get_package_share_directory
 from collections import defaultdict, Counter
 
-# import matplotlib
-# matplotlib.use('Agg')
-# import matplotlib.pyplot as plt
+from rfdetr.util.coco_classes import COCO_CLASSES
+
+# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
+COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
+
 
 class Localizer:
     def __init__(self,
@@ -55,17 +49,6 @@ class Localizer:
             cfg = yaml.safe_load(f)
 
         self.camera_orientation = cfg.get('camera_orientation', [0.0]*4)
-
-        # self.debug = False
-
-        # if self.debug:
-        #     # 1) set up interactive figure + timer
-        #     plt.ion()
-        #     self.fig, self.ax = plt.subplots()
-            
-        #     # placeholders for latest DBSCAN debug
-        #     self._debug_coords = None
-        #     self._debug_labels = None
 
     def get_lat_lon(self,
                 pixel_centers: list,
@@ -99,7 +82,7 @@ class Localizer:
             # P=self.camera_matrix
         ).reshape(-1, 2)
 
-        # 2) Build camera‐frame rays (assuming z forward = optical axis)
+        # 2) Build camera-frame rays (assuming z forward = optical axis)
         dirs_cam = np.hstack([norm, np.ones((len(norm), 1), dtype=np.float32)])
         # (optionally normalize to unit length):
         dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
@@ -108,7 +91,7 @@ class Localizer:
         r_drone = R.from_quat(drone_orientation, scalar_first=False)
         r_total = r_drone * r_mount
 
-        # 3) Get rotation from camera → ENU
+        # 3) Get rotation from camera -> ENU
         #    Assumes quaternion is [qx, qy, qz, qw] in scipy convention
         R_cam2enu = r_total.as_matrix()
 
@@ -118,7 +101,7 @@ class Localizer:
         for dir_cam, (_, _, class_id) in zip(dirs_cam, pixel_centers):
             # rotate into ENU
             dir_enu = R_cam2enu.dot(dir_cam)          # [east, north, up]
-            # compute scale t such that drone_pos + t·dir_enu lies on z = 0
+            # compute scale t such that drone_pos + t*dir_enu lies on z = 0
             # (drone at altitude `alt` above ground)
             t = alt / -dir_enu[2]
             east_offset  = dir_enu[0] * t
@@ -136,13 +119,13 @@ class Localizer:
         rclpy.logging.get_logger("filtering_node").info(f"norm: {norm[i]}")
         rclpy.logging.get_logger("filtering_node").info(f"dir_cam: {dirs_cam[i]}")
         rclpy.logging.get_logger("filtering_node").info(f"dir_enu: {dir_enu}")
-        rclpy.logging.get_logger("filtering_node").info(f"t: {t}, → E,N: {east_offset}, {north_offset}")
+        rclpy.logging.get_logger("filtering_node").info(f"t: {t}, -> E,N: {east_offset}, {north_offset}")
 
         for res in results:
-            rclpy.logging.get_logger("filtering_node").info(f"Result: {res[0]}, {res[1]}, {COCO_CLASSES[int(res[2])]}")
+            rclpy.logging.get_logger("filtering_node").info(f"Result: {res[0]}, {res[1]}, {COCO_CLASS_NAMES[int(res[2])]}")
 
         return results
-    
+
     def estimate_locations_v2(self,
                               detections: list,
                               max_objects: int = 4) -> list:
@@ -217,11 +200,8 @@ class Localizer:
             center_lat, center_lon = pts.mean(axis=0)
             cluster_centers.append((center_lat, center_lon, class_id))
 
-        # if self.debug:
-        #     self.plot_clusters()
-
         return cluster_centers
-    
+
     def plot_clusters(self):
         if self._debug_coords is None:
             return
@@ -243,7 +223,7 @@ class Localizer:
             self.ax.scatter(lons[mask], lats[mask],
                             label=f'cluster {lbl}')
 
-        # plot cluster centers as red X’s
+        # plot cluster centers as red X's
         for lbl in set(self._debug_labels) - {-1}:
             mask = self._debug_labels == lbl
             center = self._debug_coords[mask].mean(axis=0)
@@ -267,159 +247,3 @@ class Localizer:
         self.ax.legend(loc='upper right', fontsize='small')
         self.fig.canvas.draw()
         self.fig.savefig('debug.png')
-
-class Detector():
-    def __init__(self, batch_size=16, resolution=728):
-        self.batch_size = batch_size
-        self.resolution = resolution
-        self.model = self.create_model()
-        self.frame_save_cnt = 0
-
-    def create_tiles(self, image, overlap=100):
-        """
-        Split an image into tiles with overlap.
-        
-        Args:
-            image: PIL Image to be tiled
-            tile_size: Size of each square tile
-            overlap: Overlap between adjacent tiles in pixels
-        
-        Returns:
-            List of (tile, (x_offset, y_offset)) where tile is a PIL Image and
-            (x_offset, y_offset) is the position of the tile in the original image
-        """
-        tile_size = self.resolution
-        width, height = image.shape[1], image.shape[0]
-        tiles = []
-        
-        # Calculate positions where tiles should start
-        x_positions = list(range(0, width - overlap, tile_size - overlap))
-        if width not in x_positions and x_positions:
-            x_positions.append(max(0, width - tile_size))
-        if not x_positions:  # Image is smaller than tile_size
-            x_positions = [0]
-            
-        y_positions = list(range(0, height - overlap, tile_size - overlap))
-        if height not in y_positions and y_positions:
-            y_positions.append(max(0, height - tile_size))
-        if not y_positions:  # Image is smaller than tile_size
-            y_positions = [0]
-        
-        # Create tiles
-        for y in y_positions:
-            for x in x_positions:
-                # Adjust position if we're at the edge of the image
-                x_end = min(x + tile_size, width)
-                y_end = min(y + tile_size, height)
-                x_start = max(0, x_end - tile_size)
-                y_start = max(0, y_end - tile_size)
-                
-                # Extract tile
-                tile = image[y_start:y_end, x_start:x_end, :]
-                tiles.append((tile, (x_start, y_start)))
-        
-        return tiles
-
-    def pad_and_predict(self, tiles, threshold):
-        # tiles: list of H×W×C numpy arrays (or torch tensors)
-        # model.predict wants exactly `batch_size` inputs.
-
-        # 1) prepare batch
-        B = len(tiles)
-        if B < self.batch_size:
-            # assume tiles[0] exists; make dummy using its shape
-            dummy = np.zeros_like(tiles[0])
-            tiles = tiles + [dummy] * (self.batch_size - B)
-            trim_to = B
-        else:
-            trim_to = None
-
-        # 2) run inference
-        outputs = self.model.predict(tiles, threshold=threshold)
-
-        # 3) if we padded, slice off the extra outputs
-        if trim_to is not None:
-            # assume outputs is a list of detections per‐tile
-            outputs = outputs[:trim_to]
-
-        return outputs
-
-    def process_frame(self, frame, overlap: int = 100, threshold: float = 0.5):
-        """
-        Process an image by tiling, using RF-DETR's batch API for inference,
-        then combine results and apply global NMS.
-        """
-        # 1) Tile the image and unzip into lists of tiles + offsets
-        tiles_with_positions = self.create_tiles(frame, overlap)
-        tiles, offsets = zip(*tiles_with_positions)
-
-        if self.model == None:
-            rclpy.logging.get_logger("filtering_node").info("Creating model")
-            self.model = self.create_model()
-
-        detections_list = []
-
-        for i in range(0, len(tiles), self.batch_size):
-            batch = list(tiles[i:i + self.batch_size])
-            dets = self.pad_and_predict(batch, threshold)
-            detections_list.extend(dets)
-
-        # 3) Adjust boxes back to full-image coords
-        all_dets = []
-        for dets, (x_off, y_off) in zip(detections_list, offsets):
-            if len(dets.xyxy) == 0:
-                continue
-
-            boxes = dets.xyxy.copy()               # NumPy array copy
-            boxes[:, [0, 2]] += x_off              # x_min, x_max
-            boxes[:, [1, 3]] += y_off              # y_min, y_max
-
-            all_dets.append(sv.Detections(
-                xyxy=boxes,
-                confidence=dets.confidence,
-                class_id=dets.class_id
-            ))
-
-        # 4) Merge & run global NMS
-        if not all_dets:
-            return sv.Detections.empty()
-
-        merged = sv.Detections.merge(all_dets)
-        return merged.with_nms(threshold=0.45)
-    
-    def annotate_frame(self, frame, detections, labels):
-        annotated_frame = frame.copy()
-        annotated_frame = sv.BoxAnnotator().annotate(annotated_frame, detections)
-        annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
-        return annotated_frame
-
-    def save_frame(self, frame, output_dir):
-        # Ensure output directory exists so saving doesn't fail at runtime
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{self.frame_save_cnt}_annotated.jpg")
-        Image.fromarray(frame).save(output_path)
-        self.frame_save_cnt += 1
-
-    def create_model(self, dtype=None):
-        # Prefer fp16 on GPU, fall back to fp32 elsewhere.
-        if dtype is None:
-            if torch.cuda.is_available():
-                dtype = torch.float16
-            else:
-                dtype = torch.float32
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            device_info = "cuda"
-        else:
-            device_info = "cpu"
-
-        model = RFDETRBase(resolution=self.resolution)
-
-        model.optimize_for_inference(batch_size=self.batch_size, dtype=dtype)
-
-        rclpy.logging.get_logger("vision_node").info(
-            f"Model created with batch size: {self.batch_size} (dtype={dtype}, device={device_info})"
-        )
-
-        return model
