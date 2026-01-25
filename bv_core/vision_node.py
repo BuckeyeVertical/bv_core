@@ -29,6 +29,12 @@ from rclpy.qos import (
 
 # ROS2 messages
 from std_msgs.msg import String, Int8
+from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
+from .detectors import create_detector
+import queue
+import threading
+from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import Vector3
 from mavros_msgs.msg import WaypointReached
 from bv_msgs.msg import ObjectDetections
@@ -87,6 +93,8 @@ class VisionNode(Node):
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
+        self.detector_type = cfg.get('detector_type', 'ml')
+        self.gazebo_bbox_topic = cfg.get('gazebo_bbox_topic', '/camera/bounding_boxes')
 
         # Load mission parameters
         mission_yaml = os.path.join(
