@@ -1,7 +1,35 @@
+# ============================================================
+# VISION PARAMETERS
+# ============================================================
+
+# Detection settings
 batch_size: 4
 detection_threshold: 0.5
 resolution: 560
 overlap: 100
 capture_interval: 1.5e9
-estimated_camera_latency: 0.5 # Determines how long you need to pause after stopping before capturing frame
+estimated_camera_latency: 0.5  # Seconds to pause after stopping before capturing frame
 num_scan_wp: 3
+
+# Detector configuration
+detector_type: "gazebo_bbox"  # Options: "ml" (RF-DETR), "gazebo_bbox" (Gazebo bounding box camera)
+gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
+
+# ============================================================
+# PIPELINE CONFIGURATION
+# ============================================================
+
+# Pipeline type: 'sim', 'real', or 'ros'
+pipeline_type: 'sim'
+
+# Gazebo simulation settings (used when pipeline_type: 'sim')
+# Change this if drone or world changes
+gz_topic: '/camera/bounding_boxes_image'
+
+# Real camera settings (used when pipeline_type: 'real')
+gst_pipeline: 'v4l2src device=/dev/video0 io-mode=2 do-timestamp=true ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! queue max-size-buffers=1 leaky=downstream ! appsink drop=true sync=false'
+camera_fps: 30.0
+record_video: false
+
+# ROS topic subscription (used when pipeline_type: 'ros') - for rosbag playback
+ros_image_topic: '/image_compressed'
