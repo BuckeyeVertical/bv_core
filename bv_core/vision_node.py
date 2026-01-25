@@ -34,8 +34,9 @@ from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import Vector3
 from mavros_msgs.msg import WaypointReached
 
-# Local
+# Local - using factory functions for lazy imports
 from .detectors import create_detector
+from .pipelines import create_pipeline
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -123,46 +124,18 @@ class VisionNode(Node):
 
     def _init_pipeline(self):
         """Initialize the camera pipeline based on configuration."""
-        if self.pipeline_type == 'sim':
-            # Import and use Gazebo transport pipeline for simulation
-            from .pipelines.gz_transport_pipeline import GzTransportPipeline
+        self.pipeline, self.pipeline_topic = create_pipeline(
+            self.pipeline_type,
+            gz_topic=self.gz_topic,
+            ros_topic=self.ros_image_topic,
+            node=self,
+            gst_pipeline=self.gst_pipeline_str,
+            record=self.record_video,
+            fps=self.camera_fps,
+            queue_size=5,
+        )
 
-            self.pipeline_topic = self.gz_topic
-            self.pipeline = GzTransportPipeline(
-                topic=self.pipeline_topic,
-                queue_size=5
-            )
-            self.get_logger().info(f"Initialized Gazebo pipeline on topic: {self.pipeline_topic}")
-
-        elif self.pipeline_type == 'real':
-            # Import and use camera pipeline for physical drone
-            from .pipelines.camera_pipeline import CameraPipeline
-
-            self.pipeline_topic = '/camera/image'
-            self.pipeline = CameraPipeline(
-                gst_pipeline=self.gst_pipeline_str,
-                record=self.record_video,
-                ros_context=self,
-                fps=self.camera_fps,
-                max_queue_size=5
-            )
-            self.get_logger().info(f"Initialized camera pipeline with GStreamer")
-
-        elif self.pipeline_type == 'ros':
-            # Import and use ROS topic subscription pipeline (e.g., for rosbag playback)
-            from .pipelines.ros_cam_pipeline import RosCamPipeline
-
-            self.pipeline_topic = self.ros_image_topic
-            self.pipeline = RosCamPipeline(
-                parent_node=self,
-                topic=self.pipeline_topic,
-                queue_size=5
-            )
-            self.get_logger().info(f"Initialized ROS pipeline on topic: {self.pipeline_topic}")
-
-        else:
-            raise ValueError(f"Unknown pipeline_type: '{self.pipeline_type}'. Use 'sim', 'real', or 'ros'.")
-
+        self.get_logger().info(f"Initialized {self.pipeline_type} pipeline on topic: {self.pipeline_topic}")
         self.pipeline_running = False
 
     def _init_threading(self):
