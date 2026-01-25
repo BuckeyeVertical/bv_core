@@ -5,3 +5,7 @@ overlap: 100
 capture_interval: 1.5e9
 estimated_camera_latency: 0.5 # Determines how long you need to pause after stopping before capturing frame
 num_scan_wp: 3
+
+# Detector configuration
+detector_type: "gazebo_bbox"  # Options: "ml" (RF-DETR), "gazebo_bbox" (Gazebo bounding box camera)
+gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")

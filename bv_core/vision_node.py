@@ -8,7 +8,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from std_msgs.msg import String, Int8
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
-from .vision import Detector
+from .detectors import create_detector
 import queue
 import threading
 from bv_msgs.msg import ObjectDetections
@@ -26,6 +26,7 @@ from cv_bridge import CvBridge, CvBridgeError
 from .pipelines.gz_transport_pipeline import GzTransportPipeline
 
 from bv_core.pipelines.camera_pipeline import CameraPipeline
+import supervision as sv
 
 class VisionNode(Node):
     def __init__(self):
@@ -34,7 +35,7 @@ class VisionNode(Node):
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
-        self.pipeline_topic = '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
+        self.pipeline_topic = '/camera/bounding_boxes_image'
         self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
         self.pipeline_running = False
 
@@ -112,10 +113,18 @@ class VisionNode(Node):
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
         self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
+        self.detector_type = cfg.get('detector_type', 'ml')
+        self.gazebo_bbox_topic = cfg.get('gazebo_bbox_topic', '/camera/bounding_boxes')
 
         self.obj_dets = []
 
-        self.detector = Detector(batch_size=self.batch_size, resolution=self.resolution)
+        self.detector = create_detector(
+            detector_type=self.detector_type,
+            batch_size=self.batch_size,
+            resolution=self.resolution,
+            gazebo_bbox_topic=self.gazebo_bbox_topic,
+        )
+        self.detector.start()
 
         self.queue = queue.Queue()
 
@@ -252,8 +261,9 @@ class VisionNode(Node):
                     in zip(detections.class_id, detections.confidence)
                 ]
 
-                annotated_frame = self.detector.annotate_frame(frame, detections, labels)
-                self.detector.save_frame(annotated_frame, "annotated_frames")
+                annotated_frame = frame.copy()
+                annotated_frame = sv.BoxAnnotator().annotate(annotated_frame, detections)
+                annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
                 
 
                 self.get_logger().info("Saved Frame")
@@ -294,6 +304,7 @@ class VisionNode(Node):
         if self.pipeline_running:
             self.pipeline.stop()
             self.pipeline_running = False
+        self.detector.stop()
         cv2.destroyAllWindows()
         self.queue.put(None)
         return super().destroy_node()
