@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Float64
+from std_msgs.msg import String, Float64, Bool
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
@@ -24,6 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 import os
 from collections import deque
 from rclpy.time import Time
+import math
 
 class FilteringNode(Node):
     def __init__(self):
@@ -80,6 +81,19 @@ class FilteringNode(Node):
         self.obj_locs = []      # list of clustered (lat, lon, class_id)
         self.prev_state = None
         self.state = None
+        
+        # === 3-frame confirmation tracking ===
+        self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
+        self.already_confirmed_classes = set()  # avoid re-triggering same object
+        
+        # === publisher for confirmed detections ===
+        reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', reliable_qos)
 
         # === service to expose the object locations ===
         self.get_obj_locs_srv = self.create_service(
@@ -176,11 +190,85 @@ class FilteringNode(Node):
 
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
+        
+        # === 3-frame confirmation logic ===
+        # Add current frame's detections to history
+        self.frame_history.append(detections_global)
+        if len(self.frame_history) > 3:
+            self.frame_history.pop(0)
+        
+        # Check for consistent detection across 3 frames
+        confirmed_class = self._check_3frame_confirmation()
+        if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
+            self.already_confirmed_classes.add(confirmed_class)
+            self.get_logger().info(f"Object confirmed in 3 frames! Class: {COCO_CLASS_NAMES[int(confirmed_class)]}")
+            self.confirmed_pub.publish(Bool(data=True))
+
+    def _check_3frame_confirmation(self):
+        """
+        Check if any class appears in all 3 recent frames within spatial proximity.
+        
+        Returns:
+            class_id if confirmed, None otherwise
+        """
+        if len(self.frame_history) < 3:
+            return None
+        
+        # Get classes present in each frame
+        frame_classes = []
+        for frame_dets in self.frame_history:
+            classes_in_frame = set(int(cls) for _, _, cls in frame_dets)
+            frame_classes.append(classes_in_frame)
+        
+        # Find classes present in all 3 frames
+        common_classes = frame_classes[0] & frame_classes[1] & frame_classes[2]
+        
+        if not common_classes:
+            return None
+        
+        # For each common class, check spatial proximity (~10m threshold)
+        PROXIMITY_THRESHOLD_DEG = 0.0001  # ~11m at equator
+        
+        for cls in common_classes:
+            # Get positions for this class in each frame
+            positions = []
+            for frame_dets in self.frame_history:
+                for lat, lon, c in frame_dets:
+                    if int(c) == cls:
+                        positions.append((lat, lon))
+                        break  # Take first detection of this class per frame
+            
+            if len(positions) < 3:
+                continue
+            
+            # Check if all positions are within proximity
+            # Compare each pair of positions
+            all_close = True
+            for i in range(len(positions)):
+                for j in range(i + 1, len(positions)):
+                    lat1, lon1 = positions[i]
+                    lat2, lon2 = positions[j]
+                    dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+                    if dist > PROXIMITY_THRESHOLD_DEG:
+                        all_close = False
+                        break
+                if not all_close:
+                    break
+            
+            if all_close:
+                return cls
+        
+        return None
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
             self.get_logger().info(f"Filtering node acknowledging state change: {self.state}")
+
+            # When entering scan state, clear frame history for fresh tracking
+            if msg.data == 'scan':
+                self.frame_history.clear()
+                self.get_logger().info("Cleared frame history for new scan segment")
 
             # once we leave the 'scan' state, cluster what we've seen
             if self.prev_state == 'scan':
