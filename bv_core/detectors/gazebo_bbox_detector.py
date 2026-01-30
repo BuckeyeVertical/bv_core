@@ -150,7 +150,11 @@ class GazeboBBoxDetector(BaseDetector):
         confidences = []
 
         for box in boxes:
-            label = box.label
+            # Note: box.label is Gazebo's entity ID, not a semantic class
+            # We use a fixed class ID (0) for all Gazebo detections since we
+            # don't have semantic class information from the bounding box camera
+            gazebo_class_id = 0  # Placeholder - all Gazebo objects treated as same class
+            #label = box.label
             bbox = box.box
 
             x_min = bbox.min_corner.x
@@ -167,7 +171,8 @@ class GazeboBBoxDetector(BaseDetector):
                 continue
 
             xyxy_list.append([x_min, y_min, x_max, y_max])
-            class_ids.append(label)
+            class_ids.append(gazebo_class_id)
+            #class_ids.append(label)
             confidences.append(1.0)
 
         if not xyxy_list:

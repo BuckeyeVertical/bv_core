@@ -31,46 +31,47 @@ class FilteringNode(Node):
         super().__init__('filtering_node')
 
         # === subscriptions ===
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5
-        )
+        # Match vision_node's qos_best_effort exactly
+        best_effort_qos = QoSProfile(depth=10)
+        best_effort_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        
+        # Match vision_node's qos_reliable exactly for /obj_dets
+        reliable_qos = QoSProfile(depth=10)
+        reliable_qos.reliability = ReliabilityPolicy.RELIABLE
 
         self.object_det_sub = self.create_subscription(
             ObjectDetections,
             '/obj_dets',
             self.handle_detections,
-            qos
+            reliable_qos
         )
         
         self.gps_sub = self.create_subscription(
             NavSatFix,
             '/mavros/global_position/global',
             self.handle_gps,
-            qos
+            best_effort_qos
         )
         
         self.rel_alt_sub = self.create_subscription(
             Float64,
             '/mavros/global_position/rel_alt',
             self.handle_rel_alt,
-            qos
+            best_effort_qos
         )
         
         self.pose_sub = self.create_subscription(
             PoseStamped,
             '/mavros/local_position/pose',
             self.handle_local_pose,
-            qos
+            best_effort_qos
         )
 
         self.mission_state_sub = self.create_subscription(
             String,
             '/mission_state',
             self.mission_state_callback,
-            qos
+            best_effort_qos
         )
 
         self.gps_buffer  = deque(maxlen=200)
@@ -87,13 +88,10 @@ class FilteringNode(Node):
         self.already_confirmed_classes = set()  # avoid re-triggering same object
         
         # === publisher for confirmed detections ===
-        reliable_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-        self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', reliable_qos)
+        # Use same reliable QoS pattern for /global_obj_dets
+        global_dets_qos = QoSProfile(depth=10)
+        global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', global_dets_qos)
 
         # === service to expose the object locations ===
         self.get_obj_locs_srv = self.create_service(
@@ -137,6 +135,10 @@ class FilteringNode(Node):
         self.pose_buffer.append(msg)
 
     def handle_detections(self, msg: ObjectDetections):
+        # Debug: Log incoming detections
+        num_dets = len(msg.dets) if msg.dets else 0
+        self.get_logger().info(f"[DEBUG] Received {num_dets} detections from /obj_dets")
+        
         if len(self.pose_buffer) == 0 or len(self.gps_buffer) == 0 or self.last_rel_alt == None:
             self.get_logger().info("Waiting for sensor data")
             return
@@ -197,8 +199,15 @@ class FilteringNode(Node):
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
         
+        # Debug: Log frame history state
+        self.get_logger().info(f"[DEBUG] Frame history: {len(self.frame_history)} frames, "
+                               f"detections per frame: {[len(f) for f in self.frame_history]}")
+        
         # Check for consistent detection across 3 frames
         confirmed_class = self._check_3frame_confirmation()
+        self.get_logger().info(f"[DEBUG] 3-frame check result: {confirmed_class}, "
+                               f"already confirmed: {self.already_confirmed_classes}")
+        
         if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
             self.already_confirmed_classes.add(confirmed_class)
             self.get_logger().info(f"Object confirmed in 3 frames! Class: {COCO_CLASS_NAMES[int(confirmed_class)]}")
@@ -212,6 +221,7 @@ class FilteringNode(Node):
             class_id if confirmed, None otherwise
         """
         if len(self.frame_history) < 3:
+            self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
             return None
         
         # Get classes present in each frame
@@ -220,8 +230,12 @@ class FilteringNode(Node):
             classes_in_frame = set(int(cls) for _, _, cls in frame_dets)
             frame_classes.append(classes_in_frame)
         
+        # Debug: Log classes in each frame
+        self.get_logger().info(f"[DEBUG] Classes per frame: {[list(c) for c in frame_classes]}")
+        
         # Find classes present in all 3 frames
         common_classes = frame_classes[0] & frame_classes[1] & frame_classes[2]
+        self.get_logger().info(f"[DEBUG] Common classes across all 3 frames: {list(common_classes)}")
         
         if not common_classes:
             return None
