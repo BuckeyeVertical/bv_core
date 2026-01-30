@@ -929,7 +929,14 @@ class MissionRunner(Node):
         self.set_flight_mode("AUTO.LOITER")
         
         # Wait 1 second for drone to stabilize, then transition to localize
-        self.create_timer(1.0, lambda: self.enter_localize_state())
+        # Use a one-shot timer pattern: store reference and cancel after firing
+        def localize_once():
+            if hasattr(self, '_localize_timer') and self._localize_timer is not None:
+                self._localize_timer.cancel()
+                self._localize_timer = None
+            self.enter_localize_state()
+        
+        self._localize_timer = self.create_timer(1.0, localize_once)
 
     # Main timer
     def main_timer_callback(self):

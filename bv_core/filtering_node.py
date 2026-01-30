@@ -240,8 +240,9 @@ class FilteringNode(Node):
         if not common_classes:
             return None
         
-        # For each common class, check spatial proximity (~10m threshold)
-        PROXIMITY_THRESHOLD_DEG = 0.0001  # ~11m at equator
+        # For each common class, check spatial proximity
+        # Threshold increased to accommodate drone movement between frames (~12-15m per frame)
+        PROXIMITY_THRESHOLD_DEG = 0.0002  # ~22m at equator
         
         for cls in common_classes:
             # Get positions for this class in each frame
@@ -255,18 +256,16 @@ class FilteringNode(Node):
             if len(positions) < 3:
                 continue
             
-            # Check if all positions are within proximity
-            # Compare each pair of positions
+            # Check if CONSECUTIVE positions are within proximity
+            # Only compare consecutive frames (0->1, 1->2) not all pairs
+            # This avoids cumulative drift from failing the check
             all_close = True
-            for i in range(len(positions)):
-                for j in range(i + 1, len(positions)):
-                    lat1, lon1 = positions[i]
-                    lat2, lon2 = positions[j]
-                    dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
-                    if dist > PROXIMITY_THRESHOLD_DEG:
-                        all_close = False
-                        break
-                if not all_close:
+            for i in range(len(positions) - 1):
+                lat1, lon1 = positions[i]
+                lat2, lon2 = positions[i + 1]
+                dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+                if dist > PROXIMITY_THRESHOLD_DEG:
+                    all_close = False
                     break
             
             if all_close:
