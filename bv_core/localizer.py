@@ -161,46 +161,75 @@ class Localizer:
 
         return results
 
-    def estimate_locations(self,
-                           detections: list) -> list:
+    def estimate_locations(self, detections: list) -> list:
         """
-        Cluster lat/lon detections and return unique object locations.
+        Cluster detections by class and spatial proximity, returning one location per cluster.
 
         Args:
-            detections: list of (lat, lon, class_id)
+            detections: List of (lat, lon, class_id) tuples
+
         Returns:
             List of (lat, lon, class_id) cluster centers
         """
-        print(f"detections: {detections}")
         if not detections:
             return []
 
-        coords = np.array([[lat, lon] for lat, lon, _ in detections])
-        classes = [cls for _, _, cls in detections]
+        # Clustering radius in meters
+        cluster_radius_m = 10.0
 
-        earth_radius = 6371000.0                          # meters
-        desired_radius_m = 10.0                           # e.g. 10 m clustering
-        eps = desired_radius_m / earth_radius             # in radians
+        # Group detections by class
+        detections_by_class = defaultdict(list)
+        for lat, lon, class_id in detections:
+            detections_by_class[class_id].append((lat, lon))
 
-        clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric='haversine').fit(coords)
-        labels = clustering.labels_
+        # Cluster each class separately
+        results = []
+        for class_id, coords in detections_by_class.items():
+            cluster_centers = self._cluster_coordinates(coords, cluster_radius_m)
+            for lat, lon in cluster_centers:
+                results.append((lat, lon, class_id))
 
-        print(f"Labels: {labels}")
+        return results
+    
+    def _cluster_coordinates(self, coords: list, radius_m: float) -> list:
+        """
+        Cluster a list of coordinates and return cluster centers.
 
-        self._debug_coords = coords
-        self._debug_labels = labels
+        Args:
+            coords: List of (lat, lon) tuples in degrees
+            radius_m: Clustering radius in meters
 
-        cluster_centers = []
-        for lbl in set(labels) - {-1}:
-            mask = labels == lbl
-            pts = coords[mask]
-            cls_ids = [classes[i] for i, m in enumerate(mask) if m]
-            # choose most frequent class in cluster
-            class_id = max(set(cls_ids), key=cls_ids.count)
-            center_lat, center_lon = pts.mean(axis=0)
-            cluster_centers.append((center_lat, center_lon, class_id))
+        Returns:
+            List of (lat, lon) cluster centers in degrees
+        """
+        if len(coords) == 1:
+            return coords
 
-        return cluster_centers
+        # Convert degrees to radians for haversine metric
+        coords_rad = np.radians(np.array(coords))
+
+        # Convert radius from meters to radians
+        earth_radius_m = 6371000.0
+        eps_rad = radius_m / earth_radius_m
+
+        # Cluster using haversine distance
+        clustering = DBSCAN(eps=eps_rad, min_samples=1, metric='haversine')
+        labels = clustering.fit_predict(coords_rad)
+
+        # Compute cluster centers in degrees
+        coords_arr = np.array(coords)
+        centers = []
+        for label in set(labels):
+            if label == -1:
+                continue
+            mask = labels == label
+            cluster_points = coords_arr[mask]
+            center_lat = cluster_points[:, 0].mean()
+            center_lon = cluster_points[:, 1].mean()
+            centers.append((center_lat, center_lon))
+
+        return centers
+
 
     def plot_clusters(self):
         if self._debug_coords is None:
