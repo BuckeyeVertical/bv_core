@@ -142,7 +142,7 @@ class VisionNode(Node):
             gst_pipeline=self.gst_pipeline_str,
             record=self.record_video,
             fps=self.camera_fps,
-            queue_size=5,
+            queue_size=1,
         )
 
         self.get_logger().info(f"Initialized {self.pipeline_type} pipeline on topic: {self.pipeline_topic}")
@@ -152,7 +152,7 @@ class VisionNode(Node):
         """Initialize threading primitives."""
         self.scan_active = threading.Event()
         self.shutdown_flag = threading.Event()
-        self.queue = queue.Queue()
+        self.queue = queue.Queue(maxsize=1)
 
     def _init_subscribers(self):
         """Set up ROS2 subscriptions."""
@@ -495,15 +495,20 @@ class VisionNode(Node):
             if frame is None:
                 continue
 
-            # Only queue frame if we're scanning and just reached a waypoint
-            if self.state != 'scan' or self.latest_wp is None:
+            # Only queue if we're in scan state (no waypoint gate)
+            if self.state != 'scan':
                 time.sleep(0.05)
                 continue
 
             stamp = self.get_clock().now()
             self.get_logger().info("Adding to queue")
-            self.queue.put((frame, stamp))
-            self.latest_wp = None  # Reset until next waypoint
+            # Discard stale frame if present ("latest wins")
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except queue.Empty:
+                pass
+            self.queue.put_nowait((frame, stamp))
 
     def _try_get_frame(self):
         """Attempt to get a frame from the pipeline with error handling."""

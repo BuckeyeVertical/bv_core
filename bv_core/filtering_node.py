@@ -241,8 +241,7 @@ class FilteringNode(Node):
             return None
         
         # For each common class, check spatial proximity
-        # Threshold increased to accommodate drone movement between frames (~12-15m per frame)
-        PROXIMITY_THRESHOLD_DEG = 0.0002  # ~22m at equator
+        PROXIMITY_THRESHOLD_DEG =  0.00005  #5.5 meters maybe can tighten
         
         for cls in common_classes:
             # Get positions for this class in each frame
@@ -281,6 +280,7 @@ class FilteringNode(Node):
             # When entering scan state, clear frame history for fresh tracking
             if msg.data == 'scan':
                 self.frame_history.clear()
+                self.already_confirmed_classes.clear()
                 self.get_logger().info("Cleared frame history for new scan segment")
 
             # once we leave the 'scan' state, cluster what we've seen
