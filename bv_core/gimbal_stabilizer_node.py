@@ -16,7 +16,7 @@ class GimbalStabilizerNode(Node):
 
         self.declare_parameter(
             'attitude_topic',
-            '/world/bv_mission/model/x500_gimbal_0/link/camera_link/sensor/camera_imu/imu'
+            '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera_imu/imu'
         )
         self.declare_parameter(
             'roll_cmd_topic',

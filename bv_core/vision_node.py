@@ -28,14 +28,18 @@ from rclpy.qos import (
 )
 
 # ROS2 messages
-from std_msgs.msg import String, Int8
-from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import String, Int8, Float64
+from sensor_msgs.msg import CompressedImage, NavSatFix
 from bv_msgs.msg import ObjectDetections
-from geometry_msgs.msg import Vector3
+from bv_msgs.srv import LocalizeObject
+from geometry_msgs.msg import Vector3, PoseStamped
 from mavros_msgs.msg import WaypointReached
+from collections import deque
 
-# Local
+# Local - using factory functions for lazy imports
 from .detectors import create_detector
+from .pipelines import create_pipeline
+from .localizer import Localizer
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -74,6 +78,8 @@ class VisionNode(Node):
         self._init_subscribers()
         self._init_publishers()
         self._init_detector()
+        self._init_localizer()
+        self._init_services()
         self._start_worker_threads()
 
     def _load_config(self):
@@ -120,56 +126,33 @@ class VisionNode(Node):
         self.latest_wp = None
         self.last_wp = None
         self.obj_dets = []
+        
+        # GPS/pose buffers for localization
+        self.gps_buffer = deque(maxlen=200)
+        self.pose_buffer = deque(maxlen=200)
+        self.last_rel_alt = None
 
     def _init_pipeline(self):
         """Initialize the camera pipeline based on configuration."""
-        if self.pipeline_type == 'sim':
-            # Import and use Gazebo transport pipeline for simulation
-            from .pipelines.gz_transport_pipeline import GzTransportPipeline
+        self.pipeline, self.pipeline_topic = create_pipeline(
+            self.pipeline_type,
+            gz_topic=self.gz_topic,
+            ros_topic=self.ros_image_topic,
+            node=self,
+            gst_pipeline=self.gst_pipeline_str,
+            record=self.record_video,
+            fps=self.camera_fps,
+            queue_size=1,
+        )
 
-            self.pipeline_topic = self.gz_topic
-            self.pipeline = GzTransportPipeline(
-                topic=self.pipeline_topic,
-                queue_size=5
-            )
-            self.get_logger().info(f"Initialized Gazebo pipeline on topic: {self.pipeline_topic}")
-
-        elif self.pipeline_type == 'real':
-            # Import and use camera pipeline for physical drone
-            from .pipelines.camera_pipeline import CameraPipeline
-
-            self.pipeline_topic = '/camera/image'
-            self.pipeline = CameraPipeline(
-                gst_pipeline=self.gst_pipeline_str,
-                record=self.record_video,
-                ros_context=self,
-                fps=self.camera_fps,
-                max_queue_size=5
-            )
-            self.get_logger().info(f"Initialized camera pipeline with GStreamer")
-
-        elif self.pipeline_type == 'ros':
-            # Import and use ROS topic subscription pipeline (e.g., for rosbag playback)
-            from .pipelines.ros_cam_pipeline import RosCamPipeline
-
-            self.pipeline_topic = self.ros_image_topic
-            self.pipeline = RosCamPipeline(
-                parent_node=self,
-                topic=self.pipeline_topic,
-                queue_size=5
-            )
-            self.get_logger().info(f"Initialized ROS pipeline on topic: {self.pipeline_topic}")
-
-        else:
-            raise ValueError(f"Unknown pipeline_type: '{self.pipeline_type}'. Use 'sim', 'real', or 'ros'.")
-
+        self.get_logger().info(f"Initialized {self.pipeline_type} pipeline on topic: {self.pipeline_topic}")
         self.pipeline_running = False
 
     def _init_threading(self):
         """Initialize threading primitives."""
         self.scan_active = threading.Event()
         self.shutdown_flag = threading.Event()
-        self.queue = queue.Queue()
+        self.queue = queue.Queue(maxsize=1)
 
     def _init_subscribers(self):
         """Set up ROS2 subscriptions."""
@@ -187,6 +170,28 @@ class VisionNode(Node):
             String,
             '/mission_state',
             self._on_mission_state_changed,
+            qos_best_effort
+        )
+        
+        # GPS/pose subscriptions for localization service
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            '/mavros/global_position/global',
+            self._on_gps,
+            qos_best_effort
+        )
+        
+        self.pose_sub = self.create_subscription(
+            PoseStamped,
+            '/mavros/local_position/pose',
+            self._on_pose,
+            qos_best_effort
+        )
+        
+        self.rel_alt_sub = self.create_subscription(
+            Float64,
+            '/mavros/global_position/rel_alt',
+            self._on_rel_alt,
             qos_best_effort
         )
 
@@ -230,6 +235,39 @@ class VisionNode(Node):
         self.detector.start()
         self.get_logger().info(f"Initialized detector: {self.detector_type}")
 
+    def _init_localizer(self):
+        """Initialize the localizer for GPS coordinate conversion."""
+        # Load camera intrinsics from filtering_params.yaml
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+
+        with open(filtering_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+
+        c_mat_list = cfg.get('c_matrix', [1.0]*9)
+        dist_coeff_list = cfg.get('dist_coefficients', [0.0]*5)
+
+        camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
+        dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
+
+        self.localizer = Localizer(
+            camera_matrix=camera_matrix,
+            dist_coeffs=dist_coeffs
+        )
+        self.get_logger().info("Initialized localizer for GPS conversion")
+
+    def _init_services(self):
+        """Initialize ROS2 services."""
+        self.localize_srv = self.create_service(
+            LocalizeObject,
+            'localize_object',
+            self._handle_localize_request
+        )
+        self.get_logger().info("Localize object service ready")
+
     def _start_worker_threads(self):
         """Start background worker threads."""
         self.frame_fetcher = threading.Thread(
@@ -253,7 +291,7 @@ class VisionNode(Node):
         Handle mission state transitions.
         
         Starts/stops the camera pipeline and frame capture based on
-        whether we're in 'scan' state.
+        whether we're in 'scan' or 'localize' state.
         """
         new_state = msg.data
 
@@ -263,7 +301,8 @@ class VisionNode(Node):
         self.state = new_state
         self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
 
-        if new_state == 'scan':
+        # Keep pipeline running in both scan and localize states
+        if new_state in ('scan', 'localize'):
             self._start_scanning()
         else:
             self._stop_scanning()
@@ -294,6 +333,110 @@ class VisionNode(Node):
         msg = Int8()
         msg.data = empty_flag
         self.queue_state_pub.publish(msg)
+
+    def _on_gps(self, msg: NavSatFix):
+        """Buffer GPS messages for localization."""
+        self.gps_buffer.append(msg)
+
+    def _on_pose(self, msg: PoseStamped):
+        """Buffer pose messages for localization."""
+        self.pose_buffer.append(msg)
+
+    def _on_rel_alt(self, msg: Float64):
+        """Store latest relative altitude for localization."""
+        self.last_rel_alt = msg
+
+    def _handle_localize_request(self, request, response):
+        """
+        Handle localize_object service request.
+        
+        Captures a fresh frame, runs detection, and localizes to GPS coordinates.
+        """
+        response.success = False
+        response.latitude = 0.0
+        response.longitude = 0.0
+        response.altitude = 0.0
+        response.class_id = -1
+        
+        self.get_logger().info("Localize request received - processing...")
+        
+        # Ensure pipeline is running
+        if not self.pipeline_running:
+            try:
+                self.pipeline.start()
+                self.pipeline_running = True
+            except RuntimeError as exc:
+                self.get_logger().error(f"Failed to start pipeline for localization: {exc}")
+                return response
+        
+        # Capture frame
+        try:
+            frame = self.pipeline.get_frame(timeout=1.0)
+        except RuntimeError:
+            self.get_logger().error("Failed to capture frame for localization")
+            return response
+        
+        if frame is None:
+            self.get_logger().error("No frame captured for localization")
+            return response
+        
+        # Convert grayscale to BGR if needed
+        if frame.ndim == 2:
+            frame = np.repeat(frame[:, :, None], 3, axis=2)
+        
+        # Run detection
+        detections = self.detector.process_frame(
+            frame=frame,
+            threshold=self.det_thresh,
+            overlap=self.overlap
+        )
+        
+        if len(detections) == 0:
+            self.get_logger().warn("No detections found during localization")
+            return response
+        
+        self.get_logger().info(f"Localization detected {len(detections)} objects")
+        
+        # Get pixel centers: (center_x, center_y, class_id)
+        pixel_centers = [
+            ((x1 + x2) / 2, (y1 + y2) / 2, int(cls))
+            for (x1, y1, x2, y2), cls in zip(detections.xyxy, detections.class_id)
+        ]
+        
+        # Check for sensor data
+        if len(self.gps_buffer) == 0 or len(self.pose_buffer) == 0 or self.last_rel_alt is None:
+            self.get_logger().error("Missing sensor data for localization")
+            return response
+        
+        # Get latest drone pose
+        best_gps = self.gps_buffer[-1]
+        best_pose = self.pose_buffer[-1]
+        
+        drone_pose = (best_gps.latitude, best_gps.longitude, self.last_rel_alt.data)
+        drone_orientation = (
+            best_pose.pose.orientation.x,
+            best_pose.pose.orientation.y,
+            best_pose.pose.orientation.z,
+            best_pose.pose.orientation.w
+        )
+        
+        # Localize
+        coords = self.localizer.get_lat_lon(pixel_centers, drone_pose, drone_orientation)
+        
+        if coords:
+            response.success = True
+            response.latitude = coords[0][0]
+            response.longitude = coords[0][1]
+            response.altitude = drone_pose[2]  # Use current altitude for delivery
+            response.class_id = int(coords[0][2])
+            self.get_logger().info(
+                f"Localization successful: lat={response.latitude:.6f}, "
+                f"lon={response.longitude:.6f}, class={COCO_CLASS_NAMES[response.class_id]}"
+            )
+        else:
+            self.get_logger().warn("Localization conversion failed")
+        
+        return response
 
     
     # Scanning Control
@@ -352,15 +495,20 @@ class VisionNode(Node):
             if frame is None:
                 continue
 
-            # Only queue frame if we're scanning and just reached a waypoint
-            if self.state != 'scan' or self.latest_wp is None:
+            # Only queue if we're in scan state (no waypoint gate)
+            if self.state != 'scan':
                 time.sleep(0.05)
                 continue
 
             stamp = self.get_clock().now()
             self.get_logger().info("Adding to queue")
-            self.queue.put((frame, stamp))
-            self.latest_wp = None  # Reset until next waypoint
+            # Discard stale frame if present ("latest wins")
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except queue.Empty:
+                pass
+            self.queue.put_nowait((frame, stamp))
 
     def _try_get_frame(self):
         """Attempt to get a frame from the pipeline with error handling."""

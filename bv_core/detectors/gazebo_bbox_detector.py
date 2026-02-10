@@ -13,6 +13,19 @@ from .base_detector import BaseDetector
 import logging
 
 
+# Mapping from Gazebo label IDs (set via gz-sim-label-system plugin) to COCO class IDs
+# This mapping should match the <label> tags in your world SDF file
+GAZEBO_LABEL_TO_COCO = {
+    0: 2,    # hatchback_red (car) -> COCO "car" (class 2)
+    1: 32,   # ball -> COCO "sports ball" (class 32)
+    2: 4,    # rc_cessna (airplane) -> COCO "airplane" (class 4)
+    3: 0,    # person -> COCO "person" (class 0)
+    4: 5,    # bus -> COCO "bus" (class 5)
+    5: 11,   # stop_sign -> COCO "stop sign" (class 11)
+    6: 28,   # suitcase -> COCO "suitcase" (class 28)
+}
+
+
 class GazeboBBoxDetector(BaseDetector):
     """Detector that receives bounding boxes from Gazebo's bounding box camera sensor.
 
@@ -150,7 +163,11 @@ class GazeboBBoxDetector(BaseDetector):
         confidences = []
 
         for box in boxes:
-            label = box.label
+            # box.label contains the numeric label from gz-sim-label-system plugin
+            # Map it to COCO class ID using our mapping table
+            gazebo_label = box.label
+            coco_class_id = GAZEBO_LABEL_TO_COCO.get(gazebo_label, 0)  # Default to person (0) if unknown
+            
             bbox = box.box
 
             x_min = bbox.min_corner.x
@@ -167,7 +184,7 @@ class GazeboBBoxDetector(BaseDetector):
                 continue
 
             xyxy_list.append([x_min, y_min, x_max, y_max])
-            class_ids.append(label)
+            class_ids.append(coco_class_id)
             confidences.append(1.0)
 
         if not xyxy_list:

@@ -3,8 +3,6 @@ from cv_bridge import CvBridge, CvBridgeError
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.node import Node
 from .Vision_Pipeline import VisionPipeline
-import numpy as np
-import cv2
 
 class RosCamPipeline(VisionPipeline):
     """
@@ -12,16 +10,17 @@ class RosCamPipeline(VisionPipeline):
     and feeds decoded frames into the standardized processing queue.
     """
 
-    def __init__(self, parent_node: Node, topic: str, *, queue_size: int = 2, qos_profile: QoSProfile = None):
+    def __init__(self, node: Node, topic: str, *, queue_size: int = 2, qos_profile: QoSProfile = None):
         """
         Args:
-            parent_node: The existing VisionNode.
+            node: The ROS2 node instance.
             topic: The ROS topic string 
             queue_size: Max frames to buffer.
+            qos_profile: Optional QoS profile for subscription.
         """
         super().__init__(max_queue_size=queue_size)
 
-        self._node = parent_node
+        self._node = node
         self._topic = topic
         self._bridge = CvBridge()
         self._sub = None

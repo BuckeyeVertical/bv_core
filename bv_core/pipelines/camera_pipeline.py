@@ -15,12 +15,13 @@ class CameraPipeline(VisionPipeline):
     and optionally publishes compressed images to a ROS topic.
     """
 
-    def __init__(self, gst_pipeline: str, *, max_queue_size: int = 2, record: bool = False, ros_context=None, fps: float = 30.0):
+    def __init__(self, gst_pipeline: str, *, max_queue_size: int = 2, record: bool = False, node=None, fps: float = 30.0):
         """
         Args:
             gst_pipeline: GStreamer pipeline string or camera index.
+            max_queue_size: Max frames to buffer.
             record: If True, publish JPEG frames to /image_compressed.
-            ros_context: rclpy.Node or object with create_publisher() method (required if record=True).
+            node: ROS2 node instance (required if record=True).
             fps: Target frame rate for capture loop.
         """
         super().__init__(max_queue_size=max_queue_size)
@@ -37,12 +38,12 @@ class CameraPipeline(VisionPipeline):
 
         # Optional ROS compressed image publisher to publish to /image_compressed topic
         self._bridge = CvBridge()
-        self._ros_context = ros_context
+        self._node = node
         self._publisher = None
         if self._record:
-            if self._ros_context is None:
-                raise ValueError("record=True requires a valid ROS context (Node).")
-            self._publisher = self._ros_context.create_publisher(
+            if self._node is None:
+                raise ValueError("record=True requires a valid ROS node.")
+            self._publisher = self._node.create_publisher(
                 CompressedImage, '/image_compressed', 10
             )
 
@@ -92,5 +93,5 @@ class CameraPipeline(VisionPipeline):
     def _publish_compressed(self, frame: np.ndarray):
         """Convert and publish a compressed JPEG frame to /image_compressed."""
         msg = self._bridge.cv2_to_compressed_imgmsg(frame, dst_format='jpeg')
-        msg.header.stamp = self._ros_context.get_clock().now().to_msg()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
         self._publisher.publish(msg)

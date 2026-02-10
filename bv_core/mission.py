@@ -34,12 +34,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
-from std_msgs.msg import String, Int8
+from std_msgs.msg import String, Int8, Bool
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
-from bv_msgs.srv import GetObjectLocations
-from bv_msgs.msg import ObjectDetections
+from bv_msgs.srv import GetObjectLocations, LocalizeObject
 
 
 # Mission configuration
@@ -228,10 +227,10 @@ class MissionRunner(Node):
             qos_profile=reliable_qos
         )
         
-        # Object detection trigger from filtering_node
+        # Object detection trigger from filtering_node (confirmed 3-frame detection)
         self.object_detected_sub = self.create_subscription(
-            ObjectDetections,
-            '/obj_dets',
+            Bool,
+            '/global_obj_dets',
             self.on_object_detected,
             qos_profile=reliable_qos
         )
@@ -263,6 +262,10 @@ class MissionRunner(Node):
             GetObjectLocations,
             'get_object_locations'
         )
+        self.localize_object_client = self.create_client(
+            LocalizeObject,
+            'localize_object'
+        )
 
     def wait_for_gps_fix(self):
         """Block until we receive a GPS fix for the home position."""
@@ -287,7 +290,7 @@ class MissionRunner(Node):
             (self.set_mode_client, '/mavros/set_mode'),
             (self.command_client, '/mavros/cmd/command'),
             (self.param_set_client, '/mavros/param/set'),
-            (self.get_object_locations_client, 'get_object_locations'),
+            (self.localize_object_client, 'localize_object'),
         ]
         
         for client, name in services:
@@ -442,8 +445,11 @@ class MissionRunner(Node):
         self.get_logger().info("ENTERING STATE: LOCALIZE")
         self.get_logger().info("-" * 40)
         
-        # Request object location from filtering_node
-        self.request_object_location()
+        # Publish state so vision node knows to keep pipeline running
+        self.publish_mission_state()
+        
+        # Request object location from vision_node via localize_object service
+        self.request_localization_from_vision()
 
     def enter_deliver_state(self):
         """
@@ -647,13 +653,22 @@ class MissionRunner(Node):
             self.set_servo_pwm(channel, pwm)
 
     def request_object_location(self):
-        """Request object GPS location from the filtering node."""
+        """Request object GPS location from the filtering node (legacy method)."""
         request = GetObjectLocations.Request()
         
         self.get_logger().info("Requesting object location from filtering node...")
         
         future = self.get_object_locations_client.call_async(request)
         future.add_done_callback(self.on_object_location_received)
+
+    def request_localization_from_vision(self):
+        """Request object localization from vision node."""
+        request = LocalizeObject.Request()
+        
+        self.get_logger().info("Requesting localization from vision node...")
+        
+        future = self.localize_object_client.call_async(request)
+        future.add_done_callback(self.on_vision_localization_complete)
 
     # Deploy servo logic
     def execute_deploy_servo_step(self):
@@ -786,7 +801,7 @@ class MissionRunner(Node):
             self.get_logger().warn("Failed to set velocity parameter")
 
     def on_object_location_received(self, future):
-        """Callback when object location service returns."""
+        """Callback when object location service returns (legacy method)."""
         if self.current_state != STATE_LOCALIZE:
             return
         
@@ -805,6 +820,28 @@ class MissionRunner(Node):
         self.get_logger().info(
             f"Object localized at: lat={loc.latitude:.6f}, lon={loc.longitude:.6f}, "
             f"alt={loc.altitude:.2f}m"
+        )
+        
+        # Proceed to delivery
+        self.enter_deliver_state()
+
+    def on_vision_localization_complete(self, future):
+        """Callback when vision node localization service returns."""
+        if self.current_state != STATE_LOCALIZE:
+            return
+        
+        response = future.result()
+        
+        if not response.success:
+            self.get_logger().warn("Localization failed - retrying in 1s...")
+            self.create_timer(1.0, lambda: self.request_localization_from_vision())
+            return
+        
+        self.current_target_coords = (response.latitude, response.longitude, response.altitude)
+        
+        self.get_logger().info(
+            f"Object localized at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
+            f"alt={response.altitude:.2f}m (class_id={response.class_id})"
         )
         
         # Proceed to delivery
@@ -862,13 +899,13 @@ class MissionRunner(Node):
             self.in_auto_mission = False
             self.handle_state_completion()
 
-    def on_object_detected(self, msg):
+    def on_object_detected(self, msg: Bool):
         """
-        Callback when filtering_node publishes detections during scan.
-        Immediately stops the drone and transitions to localization.
+        Callback when filtering_node confirms object detection (3 frames).
+        Stops the drone, waits for stabilization, then transitions to localization.
         """
-        # Check if there are any detections in the message
-        if not msg.dets:
+        # Check if this is a positive confirmation
+        if not msg.data:
             return
         
         if self.current_state != STATE_SCAN:
@@ -878,9 +915,12 @@ class MissionRunner(Node):
             return  # Already handling a transition
         
         self.get_logger().info(
-            f"OBJECT DETECTED! (#{self.objects_delivered_count + 1}, "
-            f"{len(msg.dets)} detection(s)) - Stopping to localize..."
+            f"OBJECT CONFIRMED! (#{self.objects_delivered_count + 1}) "
+            "- 3-frame detection confirmed. Stopping to localize..."
         )
+        
+        # Mark as transitioning to prevent duplicate triggers
+        self.is_transitioning = True
         
         # Save current scan progress for later resume
         # (last_reached_scan_waypoint is updated by on_waypoint_reached)
@@ -888,8 +928,20 @@ class MissionRunner(Node):
         # Command drone to hold position
         self.set_flight_mode("AUTO.LOITER")
         
-        # Brief delay to ensure loiter is set, then transition
-        self.create_timer(0.5, lambda: self.enter_localize_state())
+        # Wait 1 second for drone to stabilize, then transition to localize
+        # Use a one-shot timer pattern: store reference and cancel after firing
+        def localize_once():
+            if hasattr(self, '_localize_timer') and self._localize_timer is not None:
+                self._localize_timer.cancel()
+                self._localize_timer = None
+            else:
+                return  # Timer was already consumed/cancelled — orphan fire, skip
+            self.enter_localize_state()
+        
+        # Cancel any existing localize timer to prevent orphaned timers
+        if hasattr(self, '_localize_timer') and self._localize_timer is not None:
+            self._localize_timer.cancel()
+        self._localize_timer = self.create_timer(1.0, localize_once)
 
     # Main timer
     def main_timer_callback(self):
