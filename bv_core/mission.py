@@ -39,6 +39,7 @@ from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
 from bv_msgs.srv import GetObjectLocations, LocalizeObject
+from bv_msgs.msg import ObjectLocations
 
 
 # Mission configuration
@@ -161,6 +162,7 @@ class MissionRunner(Node):
         
         # Current target for delivery (set by localization)
         self.current_target_coords = None  # (lat, lon, alt)
+        self.current_target_class_id = None
         
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
@@ -198,6 +200,11 @@ class MissionRunner(Node):
             String,
             '/mission_state',
             qos_profile=transient_local_qos
+        )
+        self.deployed_object_pub = self.create_publisher(
+            ObjectLocations,
+            '/deployed_object_locations',
+            qos_profile=reliable_qos
         )
         
         
@@ -701,6 +708,18 @@ class MissionRunner(Node):
 
     def on_deploy_complete(self):
         """Called when the servo deploy sequence finishes."""
+        if self.current_target_coords is not None:
+            lat, lon, _ = self.current_target_coords
+            deployed_msg = ObjectLocations()
+            deployed_msg.latitude = float(lat)
+            deployed_msg.longitude = float(lon)
+            deployed_msg.class_id = int(self.current_target_class_id) if self.current_target_class_id is not None else -1
+            self.deployed_object_pub.publish(deployed_msg)
+            self.get_logger().info(
+                f"Published deployed object location: lat={lat:.6f}, lon={lon:.6f}, "
+                f"class_id={deployed_msg.class_id}"
+            )
+
         self.objects_delivered_count += 1
         
         self.get_logger().info(
@@ -709,6 +728,7 @@ class MissionRunner(Node):
         
         # Clear current target
         self.current_target_coords = None
+        self.current_target_class_id = None
         
         if self.objects_delivered_count >= self.num_objects_to_find:
             # All objects delivered - mission complete
@@ -838,6 +858,7 @@ class MissionRunner(Node):
             return
         
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
+        self.current_target_class_id = int(response.class_id)
         
         self.get_logger().info(
             f"Object localized at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "

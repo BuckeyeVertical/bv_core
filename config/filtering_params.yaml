@@ -11,6 +11,12 @@ dist_coefficients: [0.08818061, -0.20127641, -0.00475798, -0.00295535,  0.015592
 
 #camera_orientation: [0.0, 0.0, 0.0]
 camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
+
+
+# Ignore detections within this radius of previously deployed targets.
+# Units are degrees latitude/longitude (~5.5m at equator for 0.00005).
+deployed_ignore_radius_deg: 0.00005
+
 # ============================================================
 # SIMULATION CAMERA INTRINSICS (Gazebo 1280x720)
 # Uncomment these and comment out the real camera values for sim

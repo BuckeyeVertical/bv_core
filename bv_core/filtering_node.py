@@ -73,6 +73,12 @@ class FilteringNode(Node):
             self.mission_state_callback,
             best_effort_qos
         )
+        self.deployed_location_sub = self.create_subscription(
+            ObjectLocations,
+            '/deployed_object_locations',
+            self.deployed_location_callback,
+            reliable_qos
+        )
 
         self.gps_buffer  = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
@@ -82,6 +88,7 @@ class FilteringNode(Node):
         self.obj_locs = []      # list of clustered (lat, lon, class_id)
         self.prev_state = None
         self.state = None
+        self.deployed_locations = []  # list of (lat, lon, class_id) for completed deployments
         
         # === 3-frame confirmation tracking ===
         self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
@@ -111,11 +118,13 @@ class FilteringNode(Node):
 
         c_mat_list = cfg.get('c_matrix', [1.0]*9)
         dist_coeff_list = cfg.get('dist_coefficients', [0.0]*5)
+        self.deployed_ignore_radius_deg = float(cfg.get('deployed_ignore_radius_deg', 0.00005))
 
         camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
         dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
 
         self.get_logger().info(f"Camera Matrix: {camera_matrix}\nDist Coefficients: {dist_coeffs}")
+        self.get_logger().info(f"Deployed detection ignore radius (deg): {self.deployed_ignore_radius_deg}")
 
         self.localizer = Localizer(
             camera_matrix=camera_matrix,
@@ -190,12 +199,23 @@ class FilteringNode(Node):
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
+        filtered_detections = [
+            (lat, lon, cls)
+            for lat, lon, cls in detections_global
+            if not self._is_near_deployed_location(lat, lon)
+        ]
+        ignored_count = len(detections_global) - len(filtered_detections)
+        if ignored_count > 0:
+            self.get_logger().info(
+                f"[DEBUG] Ignored {ignored_count} detections near deployed locations"
+            )
+
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
         
         # === 3-frame confirmation logic ===
         # Add current frame's detections to history
-        self.frame_history.append(detections_global)
+        self.frame_history.append(filtered_detections)
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
         
@@ -271,6 +291,20 @@ class FilteringNode(Node):
                 return cls
         
         return None
+
+    def deployed_location_callback(self, msg: ObjectLocations):
+        self.deployed_locations.append((msg.latitude, msg.longitude, msg.class_id))
+        self.get_logger().info(
+            f"Recorded deployed location: lat={msg.latitude:.6f}, lon={msg.longitude:.6f}, "
+            f"class_id={msg.class_id}. Total deployed markers: {len(self.deployed_locations)}"
+        )
+
+    def _is_near_deployed_location(self, lat: float, lon: float) -> bool:
+        for deployed_lat, deployed_lon, _ in self.deployed_locations:
+            distance = math.sqrt((lat - deployed_lat) ** 2 + (lon - deployed_lon) ** 2)
+            if distance <= self.deployed_ignore_radius_deg:
+                return True
+        return False
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
