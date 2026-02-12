@@ -2,9 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from sensor_msgs.msg import Image
 from std_msgs.msg import String, Float64, Bool
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
@@ -17,7 +16,6 @@ from rfdetr.util.coco_classes import COCO_CLASSES
 COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 from sensor_msgs.msg import NavSatFix
 
-from bv_msgs.srv import GetObjectLocations     # your custom srv
 from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -85,7 +83,6 @@ class FilteringNode(Node):
 
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
-        self.obj_locs = []      # list of clustered (lat, lon, class_id)
         self.prev_state = None
         self.state = None
         self.deployed_locations = []  # list of (lat, lon, class_id) for completed deployments
@@ -99,13 +96,6 @@ class FilteringNode(Node):
         global_dets_qos = QoSProfile(depth=10)
         global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
         self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', global_dets_qos)
-
-        # === service to expose the object locations ===
-        self.get_obj_locs_srv = self.create_service(
-            GetObjectLocations,
-            'get_object_locations',
-            self.handle_get_object_locations
-        )
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -131,7 +121,6 @@ class FilteringNode(Node):
             dist_coeffs=dist_coeffs
         )
 
-        self.last_gps = None
         self.last_rel_alt = None
 
     def handle_gps(self, msg: NavSatFix):
@@ -317,26 +306,15 @@ class FilteringNode(Node):
                 self.already_confirmed_classes.clear()
                 self.get_logger().info("Cleared frame history for new scan segment")
 
-            # once we leave the 'scan' state, cluster what we've seen
+            # once we leave the 'scan' state, write deployed locations
             if self.prev_state == 'scan':
-                self.obj_locs = self.localizer.estimate_locations_v2(self.global_dets)
-
                 with open('finalized_object_locations.txt', 'w') as f:
                         print("Writing lat lon")
-                        for lat, lon, cls in self.obj_locs:
-                            f.write(f"{lat:.6f},{lon:.6f},{COCO_CLASS_NAMES[int(cls)]}\n")
+                        for lat, lon, cls in self.deployed_locations:
+                            class_name = COCO_CLASS_NAMES[int(cls)] if int(cls) >= 0 else "unknown"
+                            f.write(f"{lat:.6f},{lon:.6f},{class_name}\n")
 
         self.prev_state = msg.data
-
-    def handle_get_object_locations(self, request, response):
-        # populate service response with our clustered locations
-        for lat, lon, cls_id in self.obj_locs:
-            loc = ObjectLocations()
-            loc.latitude = float(lat)
-            loc.longitude = float(lon)
-            loc.class_id = int(cls_id)
-            response.locations.append(loc)
-        return response
 
 def main(args=None):
     # Before running, ensure PX4’s yaw mode is set:

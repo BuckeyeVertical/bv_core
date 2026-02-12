@@ -38,7 +38,7 @@ from std_msgs.msg import String, Int8, Bool
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
-from bv_msgs.srv import GetObjectLocations, LocalizeObject
+from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 
 
@@ -264,10 +264,6 @@ class MissionRunner(Node):
         self.param_set_client = self.create_client(
             ParamSetV2, 
             '/mavros/param/set'
-        )
-        self.get_object_locations_client = self.create_client(
-            GetObjectLocations,
-            'get_object_locations'
         )
         self.localize_object_client = self.create_client(
             LocalizeObject,
@@ -659,15 +655,6 @@ class MissionRunner(Node):
         for channel, pwm in enumerate(self.default_servo_pwms, start=1):
             self.set_servo_pwm(channel, pwm)
 
-    def request_object_location(self):
-        """Request object GPS location from the filtering node (legacy method)."""
-        request = GetObjectLocations.Request()
-        
-        self.get_logger().info("Requesting object location from filtering node...")
-        
-        future = self.get_object_locations_client.call_async(request)
-        future.add_done_callback(self.on_object_location_received)
-
     def request_localization_from_vision(self):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
@@ -819,31 +806,6 @@ class MissionRunner(Node):
             )
         else:
             self.get_logger().warn("Failed to set velocity parameter")
-
-    def on_object_location_received(self, future):
-        """Callback when object location service returns (legacy method)."""
-        if self.current_state != STATE_LOCALIZE:
-            return
-        
-        response = future.result()
-        locations = response.locations
-        
-        if not locations:
-            self.get_logger().warn("No object location returned - retrying in 1s...")
-            self.create_timer(1.0, lambda: self.request_object_location())
-            return
-        
-        # Take the first (most recent) localized object
-        loc = locations[0]
-        self.current_target_coords = (loc.latitude, loc.longitude, loc.altitude)
-        
-        self.get_logger().info(
-            f"Object localized at: lat={loc.latitude:.6f}, lon={loc.longitude:.6f}, "
-            f"alt={loc.altitude:.2f}m"
-        )
-        
-        # Proceed to delivery
-        self.enter_deliver_state()
 
     def on_vision_localization_complete(self, future):
         """Callback when vision node localization service returns."""
