@@ -2,20 +2,26 @@
 # [ fx,  0, cx,
 #    0, fy, cy,
 #    0,  0,  1 ]
-c_matrix: [3.59974687e+03, 0.0, 2.27926351e+03,
-            0.0, 3.60267921e+03, 1.67845481e+03,
-            0.0,   0.0,   1.00000000e+00]
+# c_matrix: [3.59974687e+03, 0.0, 2.27926351e+03,
+#             0.0, 3.60267921e+03, 1.67845481e+03,
+#             0.0,   0.0,   1.00000000e+00]
 
-# distortion coefficients [k1, k2, p1, p2, k3]
-dist_coefficients: [0.08818061, -0.20127641, -0.00475798, -0.00295535,  0.01559265]
+# # distortion coefficients [k1, k2, p1, p2, k3]
+# dist_coefficients: [0.08818061, -0.20127641, -0.00475798, -0.00295535,  0.01559265]
 
 #camera_orientation: [0.0, 0.0, 0.0]
 camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
+
+
+# Ignore detections within this radius of previously deployed targets.
+# Units are degrees latitude/longitude (~5.5m at equator for 0.00005).
+deployed_ignore_radius_deg: 0.00008
+
 # ============================================================
 # SIMULATION CAMERA INTRINSICS (Gazebo 1280x720)
 # Uncomment these and comment out the real camera values for sim
 # ============================================================
-# c_matrix: [410.93927419797154, 0.0, 640.0,
-#            0.0, 410.9392741979716, 360.0,
-#            0.0, 0.0, 1.0]
-# dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+c_matrix: [410.93927419797154, 0.0, 640.0,
+           0.0, 410.9392741979716, 360.0,
+           0.0, 0.0, 1.0]
+dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]

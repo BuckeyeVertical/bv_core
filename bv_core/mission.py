@@ -38,8 +38,8 @@ from std_msgs.msg import String, Int8, Bool
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from ament_index_python.packages import get_package_share_directory
 
-from bv_msgs.srv import GetObjectLocations, LocalizeObject
-
+from bv_msgs.srv import LocalizeObject
+from bv_msgs.msg import ObjectLocations
 
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
@@ -161,6 +161,10 @@ class MissionRunner(Node):
         
         # Current target for delivery (set by localization)
         self.current_target_coords = None  # (lat, lon, alt)
+        self.current_target_class_id = None
+        
+        # Confirmed detection class from filtering_node (set on object detection)
+        self.confirmed_detection_class_id = -1
         
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
@@ -199,6 +203,11 @@ class MissionRunner(Node):
             '/mission_state',
             qos_profile=transient_local_qos
         )
+        self.deployed_object_pub = self.create_publisher(
+            ObjectLocations,
+            '/deployed_object_locations',
+            qos_profile=reliable_qos
+        )
         
         
         # Subscribers
@@ -228,8 +237,9 @@ class MissionRunner(Node):
         )
         
         # Object detection trigger from filtering_node (confirmed 3-frame detection)
+        # Int8 carries the confirmed COCO class_id
         self.object_detected_sub = self.create_subscription(
-            Bool,
+            Int8,
             '/global_obj_dets',
             self.on_object_detected,
             qos_profile=reliable_qos
@@ -257,10 +267,6 @@ class MissionRunner(Node):
         self.param_set_client = self.create_client(
             ParamSetV2, 
             '/mavros/param/set'
-        )
-        self.get_object_locations_client = self.create_client(
-            GetObjectLocations,
-            'get_object_locations'
         )
         self.localize_object_client = self.create_client(
             LocalizeObject,
@@ -402,6 +408,7 @@ class MissionRunner(Node):
         Will be interrupted by on_object_detected() callback.
         """
         self.current_state = STATE_SCAN
+        self.publish_mission_state()
         self.is_transitioning = True
         self.desired_velocity = self.scan_velocity
         
@@ -456,6 +463,7 @@ class MissionRunner(Node):
         Fly to the localized object position for payload delivery.
         """
         self.current_state = STATE_DELIVER
+        self.publish_mission_state()
         self.is_transitioning = True
         self.desired_velocity = self.deliver_velocity
         
@@ -488,6 +496,7 @@ class MissionRunner(Node):
         Controlled by timer, not waypoints.
         """
         self.current_state = STATE_DEPLOY
+        self.publish_mission_state()
         self.is_transitioning = False  # No waypoint transition for deploy
         
         self.get_logger().info("-" * 40)
@@ -509,6 +518,7 @@ class MissionRunner(Node):
         Return to launch and land.
         """
         self.current_state = STATE_RTL
+        self.publish_mission_state()
         self.is_transitioning = True
         
         self.get_logger().info("-" * 40)
@@ -652,20 +662,14 @@ class MissionRunner(Node):
         for channel, pwm in enumerate(self.default_servo_pwms, start=1):
             self.set_servo_pwm(channel, pwm)
 
-    def request_object_location(self):
-        """Request object GPS location from the filtering node (legacy method)."""
-        request = GetObjectLocations.Request()
-        
-        self.get_logger().info("Requesting object location from filtering node...")
-        
-        future = self.get_object_locations_client.call_async(request)
-        future.add_done_callback(self.on_object_location_received)
-
     def request_localization_from_vision(self):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
+        request.target_class_id = self.confirmed_detection_class_id
         
-        self.get_logger().info("Requesting localization from vision node...")
+        self.get_logger().info(
+            f"Requesting localization from vision node (target_class_id={request.target_class_id})..."
+        )
         
         future = self.localize_object_client.call_async(request)
         future.add_done_callback(self.on_vision_localization_complete)
@@ -701,6 +705,18 @@ class MissionRunner(Node):
 
     def on_deploy_complete(self):
         """Called when the servo deploy sequence finishes."""
+        if self.current_target_coords is not None:
+            lat, lon, _ = self.current_target_coords
+            deployed_msg = ObjectLocations()
+            deployed_msg.latitude = float(lat)
+            deployed_msg.longitude = float(lon)
+            deployed_msg.class_id = int(self.current_target_class_id) if self.current_target_class_id is not None else -1
+            self.deployed_object_pub.publish(deployed_msg)
+            self.get_logger().info(
+                f"Published deployed object location: lat={lat:.6f}, lon={lon:.6f}, "
+                f"class_id={deployed_msg.class_id}"
+            )
+
         self.objects_delivered_count += 1
         
         self.get_logger().info(
@@ -709,6 +725,7 @@ class MissionRunner(Node):
         
         # Clear current target
         self.current_target_coords = None
+        self.current_target_class_id = None
         
         if self.objects_delivered_count >= self.num_objects_to_find:
             # All objects delivered - mission complete
@@ -800,31 +817,6 @@ class MissionRunner(Node):
         else:
             self.get_logger().warn("Failed to set velocity parameter")
 
-    def on_object_location_received(self, future):
-        """Callback when object location service returns (legacy method)."""
-        if self.current_state != STATE_LOCALIZE:
-            return
-        
-        response = future.result()
-        locations = response.locations
-        
-        if not locations:
-            self.get_logger().warn("No object location returned - retrying in 1s...")
-            self.create_timer(1.0, lambda: self.request_object_location())
-            return
-        
-        # Take the first (most recent) localized object
-        loc = locations[0]
-        self.current_target_coords = (loc.latitude, loc.longitude, loc.altitude)
-        
-        self.get_logger().info(
-            f"Object localized at: lat={loc.latitude:.6f}, lon={loc.longitude:.6f}, "
-            f"alt={loc.altitude:.2f}m"
-        )
-        
-        # Proceed to delivery
-        self.enter_deliver_state()
-
     def on_vision_localization_complete(self, future):
         """Callback when vision node localization service returns."""
         if self.current_state != STATE_LOCALIZE:
@@ -838,6 +830,7 @@ class MissionRunner(Node):
             return
         
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
+        self.current_target_class_id = int(response.class_id)
         
         self.get_logger().info(
             f"Object localized at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
@@ -899,13 +892,13 @@ class MissionRunner(Node):
             self.in_auto_mission = False
             self.handle_state_completion()
 
-    def on_object_detected(self, msg: Bool):
+    def on_object_detected(self, msg: Int8):
         """
         Callback when filtering_node confirms object detection (3 frames).
+        msg.data contains the confirmed COCO class_id.
         Stops the drone, waits for stabilization, then transitions to localization.
         """
-        # Check if this is a positive confirmation
-        if not msg.data:
+        if msg.data < 0:
             return
         
         if self.current_state != STATE_SCAN:
@@ -918,6 +911,9 @@ class MissionRunner(Node):
             f"OBJECT CONFIRMED! (#{self.objects_delivered_count + 1}) "
             "- 3-frame detection confirmed. Stopping to localize..."
         )
+        
+        # Store which class was confirmed so we can tell the localizer
+        self.confirmed_detection_class_id = int(msg.data)
         
         # Mark as transitioning to prevent duplicate triggers
         self.is_transitioning = True

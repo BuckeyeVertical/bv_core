@@ -2,10 +2,9 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from sensor_msgs.msg import Image
-from std_msgs.msg import String, Float64, Bool
+from std_msgs.msg import String, Float64, Bool, Int8
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
@@ -17,7 +16,6 @@ from rfdetr.util.coco_classes import COCO_CLASSES
 COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 from sensor_msgs.msg import NavSatFix
 
-from bv_msgs.srv import GetObjectLocations     # your custom srv
 from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -73,15 +71,21 @@ class FilteringNode(Node):
             self.mission_state_callback,
             best_effort_qos
         )
+        self.deployed_location_sub = self.create_subscription(
+            ObjectLocations,
+            '/deployed_object_locations',
+            self.deployed_location_callback,
+            reliable_qos
+        )
 
         self.gps_buffer  = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
 
         # === internal state ===
         self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
-        self.obj_locs = []      # list of clustered (lat, lon, class_id)
         self.prev_state = None
         self.state = None
+        self.deployed_locations = []  # list of (lat, lon, class_id) for completed deployments
         
         # === 3-frame confirmation tracking ===
         self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
@@ -91,14 +95,7 @@ class FilteringNode(Node):
         # Use same reliable QoS pattern for /global_obj_dets
         global_dets_qos = QoSProfile(depth=10)
         global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
-        self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', global_dets_qos)
-
-        # === service to expose the object locations ===
-        self.get_obj_locs_srv = self.create_service(
-            GetObjectLocations,
-            'get_object_locations',
-            self.handle_get_object_locations
-        )
+        self.confirmed_pub = self.create_publisher(Int8, '/global_obj_dets', global_dets_qos)
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -111,18 +108,19 @@ class FilteringNode(Node):
 
         c_mat_list = cfg.get('c_matrix', [1.0]*9)
         dist_coeff_list = cfg.get('dist_coefficients', [0.0]*5)
+        self.deployed_ignore_radius_deg = float(cfg.get('deployed_ignore_radius_deg', 0.00005))
 
         camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
         dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
 
         self.get_logger().info(f"Camera Matrix: {camera_matrix}\nDist Coefficients: {dist_coeffs}")
+        self.get_logger().info(f"Deployed detection ignore radius (deg): {self.deployed_ignore_radius_deg}")
 
         self.localizer = Localizer(
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs
         )
 
-        self.last_gps = None
         self.last_rel_alt = None
 
     def handle_gps(self, msg: NavSatFix):
@@ -190,12 +188,27 @@ class FilteringNode(Node):
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
+        filtered_detections = [
+            (lat, lon, cls)
+            for lat, lon, cls in detections_global
+            if not self._is_near_deployed_location(lat, lon)
+        ]
+        ignored_count = len(detections_global) - len(filtered_detections)
+        if ignored_count > 0:
+            self.get_logger().info(
+                f"[DEBUG] Ignored {ignored_count} detections near deployed locations"
+            )
+
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
         
+        # Only run 3-frame confirmation during scan state
+        if self.state != 'scan':
+            return
+
         # === 3-frame confirmation logic ===
         # Add current frame's detections to history
-        self.frame_history.append(detections_global)
+        self.frame_history.append(filtered_detections)
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
         
@@ -211,7 +224,7 @@ class FilteringNode(Node):
         if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
             self.already_confirmed_classes.add(confirmed_class)
             self.get_logger().info(f"Object confirmed in 3 frames! Class: {COCO_CLASS_NAMES[int(confirmed_class)]}")
-            self.confirmed_pub.publish(Bool(data=True))
+            self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
 
     def _check_3frame_confirmation(self):
         """
@@ -272,37 +285,43 @@ class FilteringNode(Node):
         
         return None
 
+    def deployed_location_callback(self, msg: ObjectLocations):
+        self.deployed_locations.append((msg.latitude, msg.longitude, msg.class_id))
+        self.get_logger().info(
+            f"Recorded deployed location: lat={msg.latitude:.6f}, lon={msg.longitude:.6f}, "
+            f"class_id={msg.class_id}. Total deployed markers: {len(self.deployed_locations)}"
+        )
+
+    def _is_near_deployed_location(self, lat: float, lon: float) -> bool:
+        for deployed_lat, deployed_lon, _ in self.deployed_locations:
+            distance = math.sqrt((lat - deployed_lat) ** 2 + (lon - deployed_lon) ** 2)
+            if distance <= self.deployed_ignore_radius_deg:
+                return True
+        return False
+
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
             self.get_logger().info(f"Filtering node acknowledging state change: {self.state}")
 
-            # When entering scan state, clear frame history for fresh tracking
-            if msg.data == 'scan':
+            # Clear frame history on any state transition to prevent
+            # detections from deliver/deploy phases carrying into scan
+            if msg.data in ('localize', 'deliver', 'deploy', 'scan'):
                 self.frame_history.clear()
+
+            if msg.data == 'scan':
                 self.already_confirmed_classes.clear()
-                self.get_logger().info("Cleared frame history for new scan segment")
+                self.get_logger().info("Cleared frame history and confirmations for new scan segment")
 
-            # once we leave the 'scan' state, cluster what we've seen
+            # once we leave the 'scan' state, write deployed locations
             if self.prev_state == 'scan':
-                self.obj_locs = self.localizer.estimate_locations_v2(self.global_dets)
-
                 with open('finalized_object_locations.txt', 'w') as f:
                         print("Writing lat lon")
-                        for lat, lon, cls in self.obj_locs:
-                            f.write(f"{lat:.6f},{lon:.6f},{COCO_CLASS_NAMES[int(cls)]}\n")
+                        for lat, lon, cls in self.deployed_locations:
+                            class_name = COCO_CLASS_NAMES[int(cls)] if int(cls) >= 0 else "unknown"
+                            f.write(f"{lat:.6f},{lon:.6f},{class_name}\n")
 
         self.prev_state = msg.data
-
-    def handle_get_object_locations(self, request, response):
-        # populate service response with our clustered locations
-        for lat, lon, cls_id in self.obj_locs:
-            loc = ObjectLocations()
-            loc.latitude = float(lat)
-            loc.longitude = float(lon)
-            loc.class_id = int(cls_id)
-            response.locations.append(loc)
-        return response
 
 def main(args=None):
     # Before running, ensure PX4’s yaw mode is set:
