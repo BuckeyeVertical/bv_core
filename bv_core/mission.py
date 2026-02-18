@@ -41,7 +41,6 @@ from ament_index_python.packages import get_package_share_directory
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 
-
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
 DEPLOY_SERVO_CYCLE_TIME = 5.0    # Seconds per servo state during payload deploy
@@ -164,6 +163,9 @@ class MissionRunner(Node):
         self.current_target_coords = None  # (lat, lon, alt)
         self.current_target_class_id = None
         
+        # Confirmed detection class from filtering_node (set on object detection)
+        self.confirmed_detection_class_id = -1
+        
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
         self.deploy_state_start_time = 0.0
@@ -235,8 +237,9 @@ class MissionRunner(Node):
         )
         
         # Object detection trigger from filtering_node (confirmed 3-frame detection)
+        # Int8 carries the confirmed COCO class_id
         self.object_detected_sub = self.create_subscription(
-            Bool,
+            Int8,
             '/global_obj_dets',
             self.on_object_detected,
             qos_profile=reliable_qos
@@ -405,6 +408,7 @@ class MissionRunner(Node):
         Will be interrupted by on_object_detected() callback.
         """
         self.current_state = STATE_SCAN
+        self.publish_mission_state()
         self.is_transitioning = True
         self.desired_velocity = self.scan_velocity
         
@@ -459,6 +463,7 @@ class MissionRunner(Node):
         Fly to the localized object position for payload delivery.
         """
         self.current_state = STATE_DELIVER
+        self.publish_mission_state()
         self.is_transitioning = True
         self.desired_velocity = self.deliver_velocity
         
@@ -491,6 +496,7 @@ class MissionRunner(Node):
         Controlled by timer, not waypoints.
         """
         self.current_state = STATE_DEPLOY
+        self.publish_mission_state()
         self.is_transitioning = False  # No waypoint transition for deploy
         
         self.get_logger().info("-" * 40)
@@ -512,6 +518,7 @@ class MissionRunner(Node):
         Return to launch and land.
         """
         self.current_state = STATE_RTL
+        self.publish_mission_state()
         self.is_transitioning = True
         
         self.get_logger().info("-" * 40)
@@ -658,8 +665,11 @@ class MissionRunner(Node):
     def request_localization_from_vision(self):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
+        request.target_class_id = self.confirmed_detection_class_id
         
-        self.get_logger().info("Requesting localization from vision node...")
+        self.get_logger().info(
+            f"Requesting localization from vision node (target_class_id={request.target_class_id})..."
+        )
         
         future = self.localize_object_client.call_async(request)
         future.add_done_callback(self.on_vision_localization_complete)
@@ -882,13 +892,13 @@ class MissionRunner(Node):
             self.in_auto_mission = False
             self.handle_state_completion()
 
-    def on_object_detected(self, msg: Bool):
+    def on_object_detected(self, msg: Int8):
         """
         Callback when filtering_node confirms object detection (3 frames).
+        msg.data contains the confirmed COCO class_id.
         Stops the drone, waits for stabilization, then transitions to localization.
         """
-        # Check if this is a positive confirmation
-        if not msg.data:
+        if msg.data < 0:
             return
         
         if self.current_state != STATE_SCAN:
@@ -901,6 +911,9 @@ class MissionRunner(Node):
             f"OBJECT CONFIRMED! (#{self.objects_delivered_count + 1}) "
             "- 3-frame detection confirmed. Stopping to localize..."
         )
+        
+        # Store which class was confirmed so we can tell the localizer
+        self.confirmed_detection_class_id = int(msg.data)
         
         # Mark as transitioning to prevent duplicate triggers
         self.is_transitioning = True

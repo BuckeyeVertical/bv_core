@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from std_msgs.msg import String, Float64, Bool
+from std_msgs.msg import String, Float64, Bool, Int8
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
@@ -95,7 +95,7 @@ class FilteringNode(Node):
         # Use same reliable QoS pattern for /global_obj_dets
         global_dets_qos = QoSProfile(depth=10)
         global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
-        self.confirmed_pub = self.create_publisher(Bool, '/global_obj_dets', global_dets_qos)
+        self.confirmed_pub = self.create_publisher(Int8, '/global_obj_dets', global_dets_qos)
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -202,6 +202,10 @@ class FilteringNode(Node):
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
         
+        # Only run 3-frame confirmation during scan state
+        if self.state != 'scan':
+            return
+
         # === 3-frame confirmation logic ===
         # Add current frame's detections to history
         self.frame_history.append(filtered_detections)
@@ -220,7 +224,7 @@ class FilteringNode(Node):
         if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
             self.already_confirmed_classes.add(confirmed_class)
             self.get_logger().info(f"Object confirmed in 3 frames! Class: {COCO_CLASS_NAMES[int(confirmed_class)]}")
-            self.confirmed_pub.publish(Bool(data=True))
+            self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
 
     def _check_3frame_confirmation(self):
         """
@@ -300,11 +304,14 @@ class FilteringNode(Node):
             self.state = msg.data
             self.get_logger().info(f"Filtering node acknowledging state change: {self.state}")
 
-            # When entering scan state, clear frame history for fresh tracking
-            if msg.data == 'scan':
+            # Clear frame history on any state transition to prevent
+            # detections from deliver/deploy phases carrying into scan
+            if msg.data in ('localize', 'deliver', 'deploy', 'scan'):
                 self.frame_history.clear()
+
+            if msg.data == 'scan':
                 self.already_confirmed_classes.clear()
-                self.get_logger().info("Cleared frame history for new scan segment")
+                self.get_logger().info("Cleared frame history and confirmations for new scan segment")
 
             # once we leave the 'scan' state, write deployed locations
             if self.prev_state == 'scan':

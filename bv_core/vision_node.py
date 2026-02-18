@@ -423,18 +423,32 @@ class VisionNode(Node):
         # Localize
         coords = self.localizer.get_lat_lon(pixel_centers, drone_pose, drone_orientation)
         
-        if coords:
-            response.success = True
-            response.latitude = coords[0][0]
-            response.longitude = coords[0][1]
-            response.altitude = drone_pose[2]  # Use current altitude for delivery
-            response.class_id = int(coords[0][2])
-            self.get_logger().info(
-                f"Localization successful: lat={response.latitude:.6f}, "
-                f"lon={response.longitude:.6f}, class={COCO_CLASS_NAMES[response.class_id]}"
-            )
-        else:
+        if not coords:
             self.get_logger().warn("Localization conversion failed")
+            return response
+
+        target_cls = request.target_class_id
+        # Filter for the requested class if specified
+        if target_cls >= 0:
+            matched = [c for c in coords if int(c[2]) == target_cls]
+            if matched:
+                coords = matched
+            else:
+                self.get_logger().warn(
+                    f"Requested class {target_cls} not found in frame, "
+                    f"available: {[int(c[2]) for c in coords]}"
+                )
+
+        response.success = True
+        response.latitude = coords[0][0]
+        response.longitude = coords[0][1]
+        response.altitude = drone_pose[2]
+        response.class_id = int(coords[0][2])
+        self.get_logger().info(
+            f"Localization successful: lat={response.latitude:.6f}, "
+            f"lon={response.longitude:.6f}, class={COCO_CLASS_NAMES[response.class_id]} "
+            f"(requested={target_cls})"
+        )
         
         return response
 
