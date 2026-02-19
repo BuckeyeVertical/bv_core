@@ -49,5 +49,5 @@ def generate_launch_description():
         vision_node,
         filter_node,
         # stitching_node,
-        # bv_viz_node,
+        bv_viz_node,
     ])

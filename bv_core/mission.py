@@ -43,7 +43,7 @@ from bv_msgs.msg import ObjectLocations
 
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
-DEPLOY_SERVO_CYCLE_TIME = 5.0    # Seconds per servo state during payload deploy
+DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
 
 
 # State constants
@@ -166,6 +166,7 @@ class MissionRunner(Node):
         # Confirmed detection class from filtering_node (set on object detection)
         self.confirmed_detection_class_id = -1
         self._localize_retry_timer = None
+        self.localization_retry_count = 0
         
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
@@ -450,6 +451,7 @@ class MissionRunner(Node):
         """
         self.current_state = STATE_LOCALIZE
         self.is_transitioning = True
+        self.localization_retry_count = 0
         
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: LOCALIZE")
@@ -845,7 +847,26 @@ class MissionRunner(Node):
         response = future.result()
         
         if not response.success:
-            self.get_logger().warn("Localization failed - retrying in 1s...")
+            # Increment retry counter and decide whether to continue or abandon
+            self.localization_retry_count += 1
+            if self.localization_retry_count >= 5:
+                self.get_logger().warn(
+                    "Localization failed 5 times - abandoning this object and resuming scan"
+                )
+                # Stop any pending retry timer
+                if self._localize_retry_timer is not None:
+                    self._localize_retry_timer.cancel()
+                    self._localize_retry_timer = None
+                # Clear current target/confirmation and resume scanning
+                self.current_target_coords = None
+                self.current_target_class_id = None
+                self.confirmed_detection_class_id = -1
+                self.enter_scan_state()
+                return
+
+            self.get_logger().warn(
+                f"Localization failed (attempt {self.localization_retry_count}/5) - retrying in 1s..."
+            )
             # Cancel any existing retry timer before creating a new one
             if self._localize_retry_timer is not None:
                 self._localize_retry_timer.cancel()
@@ -858,6 +879,12 @@ class MissionRunner(Node):
             self._localize_retry_timer = self.create_timer(1.0, retry_once)
             return
         
+        # Successful localization - reset retry counter and clean up any retry timer
+        self.localization_retry_count = 0
+        if self._localize_retry_timer is not None:
+            self._localize_retry_timer.cancel()
+            self._localize_retry_timer = None
+
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
         self.current_target_class_id = int(response.class_id)
         

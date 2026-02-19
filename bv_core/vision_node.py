@@ -411,7 +411,7 @@ class VisionNode(Node):
             best_pose.pose.orientation.w
         )
         
-        # Localize
+        # Localize to global coordinates
         coords = self.localizer.get_lat_lon(pixel_centers, drone_pose, drone_orientation)
         
         if not coords:
@@ -434,7 +434,12 @@ class VisionNode(Node):
                     f"Requested class {target_cls} not found in frame, "
                     f"available: {[int(c[2]) for c in coords]}"
                 )
+                # Treat this as a localization failure so the mission
+                # can retry or abandon the object instead of flying to
+                # the wrong target.
+                return response
 
+        # At this point we have at least one coordinate to return
         response.success = True
         response.latitude = coords[0][0]
         response.longitude = coords[0][1]
