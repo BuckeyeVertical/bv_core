@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-drone_viz_node.py  (Aligned with your Vision & Mission topics)
-
-Subscribes (from your repo):
-  • /mavros/local_position/pose   (geometry_msgs/PoseStamped)        [filtering_node]
-  • /obj_dets                     (bv_msgs/ObjectDetections)         [vision_node publishes]
-  • /mission_state                (std_msgs/String)                  [mission publishes]
-  • /queue_state                  (std_msgs/Int8)                    [vision publishes]
-  • /mavros/mission/reached       (mavros_msgs/WaypointReached)      [vision subscribes, mission publishes events]
-
-Publishes for Foxglove/RViz:
-  • /viz/markers (visualization_msgs/MarkerArray)
-      - Drone arrow + HUD text (yaw/alt)
-      - Accumulated path line with start/end dots
-      - Detections as text labels (from ObjectDetections.dets Vector3: x,y = px, z = class id)
-      - Mission/Queue HUD text
-      - Waypoint reached spheres + labels (accumulated)
-
-Notes:
-  • QoS for markers uses BEST_EFFORT so they persist in Foxglove/RViz.
-  • All topic/frame names and sizes are configurable via parameters.
-"""
 
 from typing import Optional, List, Tuple
 import math
@@ -36,8 +14,8 @@ from std_msgs.msg import String, Int8
 from geometry_msgs.msg import PoseStamped, Point, Vector3
 from visualization_msgs.msg import Marker, MarkerArray
 from mavros_msgs.msg import WaypointReached
-from mavros_msgs.msg import Waypoint
-
+from mavros_msgs.msg import Waypoint, WaypointList
+from sensor_msgs.msg import NavSatFix  # NEW IMPORT
 
 
 def yaw_from_quaternion(x, y, z, w) -> float:
@@ -52,6 +30,7 @@ class DroneVizNode(Node):
 
         # ---------- Parameters ----------
         self.declare_parameter('pose_topic', '/mavros/local_position/pose')
+        self.declare_parameter('global_topic', '/mavros/global_position/global') # NEW PARAM
         self.declare_parameter('dets_topic', '/obj_dets')
         self.declare_parameter('mission_state_topic', '/mission_state')
         self.declare_parameter('queue_state_topic', '/queue_state')
@@ -61,29 +40,28 @@ class DroneVizNode(Node):
         self.declare_parameter('fixed_frame', 'map')
         self.declare_parameter('drone_scale', 0.6)
         self.declare_parameter('text_scale', 0.35)
-        self.declare_parameter('line_width', 0.07)
+        self.declare_parameter('line_width', 0.15)
         self.declare_parameter('accumulate_path', True)
         self.declare_parameter('max_path_pts', 2000)
-        self.declare_parameter('dets_z', 0.0)  # z-height for 2D det labels (pixels -> world placeholder)
-        self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  # where to place mission/queue HUD text
+        self.declare_parameter('dets_z', 0.0)  
+        self.declare_parameter('hud_anchor', [0.0, 0.0, 2.0])  
         
         self.declare_parameter('mesh_uri', 'package://bv_core/meshes/Render_CAD.STL')
         self.declare_parameter('mesh_scale', 0.001) 
-        self.declare_parameter('offsetX', 0.9)
-        self.declare_parameter('offsetY', -0.1)
-        self.declare_parameter('offsetZ', -0.3)
+        self.declare_parameter('offsetX', -0.8)
+        self.declare_parameter('offsetY', 0.6)
+        self.declare_parameter('offsetZ', -0.2)
         
-
         self.offsetX = float(self.get_parameter('offsetX').value)
         self.offsetY = float(self.get_parameter('offsetY').value)
         self.offsetZ = float(self.get_parameter('offsetZ').value)
         self.mesh_scale = float(self.get_parameter('mesh_scale').value)
         self.mesh_uri = self.get_parameter('mesh_uri').value
 
-
         self.frame_id = self.get_parameter('fixed_frame').value
         
         pose_topic = self.get_parameter('pose_topic').value
+        global_topic = self.get_parameter('global_topic').value
         dets_topic = self.get_parameter('dets_topic').value
         mission_state_topic = self.get_parameter('mission_state_topic').value
         queue_state_topic = self.get_parameter('queue_state_topic').value
@@ -93,7 +71,7 @@ class DroneVizNode(Node):
         # ---------- Publishers ----------
         marker_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,  # RViz/Foxglove-friendly persistence
+            durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=5
         )
@@ -101,16 +79,20 @@ class DroneVizNode(Node):
 
         # ---------- State ----------
         self._last_pose: Optional[PoseStamped] = None
+        self._last_global: Optional[NavSatFix] = None # Tracks live GPS
+        self._raw_waypoints: List[Waypoint] = []
+        self._mission_anchored = False # Ensures we only calculate offset once per mission
+
         self._path_pts: List[Point] = []
-        self._reached_markers_count = 0  # to assign unique IDs and accumulate
-        self._mission_state = None  # String
-        self._queue_state = None    # Int8 (0=processing, 1=empty)
+        self._reached_markers_count = 0  
+        self._last_reached_seq = -1  
+        self._mission_state = None  
+        self._queue_state = None    
 
         self._last_markers_pose: List[Marker] = []
         self._last_markers_path: List[Marker] = []
         self._last_markers_dets: List[Marker] = []
         self._last_markers_hud: List[Marker] = []
-        # Waypoint markers accumulate; we store them separately to append over time
         self._accum_wp_markers: List[Marker] = []
         self._last_markers_planned_wp: List[Marker] = []
 
@@ -122,14 +104,12 @@ class DroneVizNode(Node):
             depth=5
         )
         self.create_subscription(PoseStamped, pose_topic, self.on_pose, qos_profile=pose_qos)
-
+        self.create_subscription(NavSatFix, global_topic, self.on_global, qos_profile=pose_qos) # NEW SUB
         self.create_subscription(String, mission_state_topic, self.on_mission_state, 10)
         self.create_subscription(Int8, queue_state_topic, self.on_queue_state, 10)
         self.create_subscription(WaypointReached, wp_reached_topic, self.on_wp_reached, 10)
-        self.create_subscription(Waypoint, wp_waypoints_traj_topic, self.on_wp, 10)
+        self.create_subscription(WaypointList, wp_waypoints_traj_topic, self.on_wp, 10)
 
-
-        # Publish at a steady rate so Foxglove receives updates even without new messages
         self.timer = self.create_timer(0.2, self.publish_all)
 
     # ---------- Marker builders ----------
@@ -137,7 +117,6 @@ class DroneVizNode(Node):
         frame_id = self.frame_id
         markers: List[Marker] = []
 
-        # Clear existing "drone" namespace
         del_all = Marker()
         del_all.header.frame_id = frame_id
         del_all.header.stamp = self.get_clock().now().to_msg()
@@ -146,50 +125,6 @@ class DroneVizNode(Node):
         del_all.action = Marker.DELETEALL
         markers.append(del_all)
 
-        # Arrow
-        # arrow = Marker()
-        # arrow.header.frame_id = frame_id
-        # arrow.header.stamp = self.get_clock().now().to_msg()
-        # arrow.ns = 'drone'
-        # arrow.id = 1
-        # arrow.type = Marker.ARROW
-        # arrow.action = Marker.ADD
-        # arrow.pose = pose_msg.pose
-        # scale = float(self.get_parameter('drone_scale').value)
-        # arrow.scale.x = scale * 1.5
-        # arrow.scale.y = scale * 0.3
-        # arrow.scale.z = scale * 0.3
-        # arrow.color.r = 0.0
-        # arrow.color.g = 0.8
-        # arrow.color.b = 0.7
-        # arrow.color.a = 1.0
-
-        # Text (yaw/alt)
-        # text = Marker()
-        # text.header.frame_id = frame_id
-        # text.header.stamp = del_all.header.stamp
-        # text.ns = 'drone'
-        # text.id = 2
-        # text.type = Marker.TEXT_VIEW_FACING
-        # text.action = Marker.ADD
-        # text.pose.position.x = pose_msg.pose.position.x
-        # text.pose.position.y = pose_msg.pose.position.y
-        # text.pose.position.z = pose_msg.pose.position.z + scale * 1.0
-        # text.scale.z = float(self.get_parameter('text_scale').value)
-        # yaw = yaw_from_quaternion(
-        #     pose_msg.pose.orientation.x,
-        #     pose_msg.pose.orientation.y,
-        #     pose_msg.pose.orientation.z,
-        #     pose_msg.pose.orientation.w
-        # )
-        # text.text = f"Yaw {math.degrees(yaw):.1f}° | Alt {pose_msg.pose.position.z:.1f} m"
-        # text.color.r = 1.0
-        # text.color.g = 1.0
-        # text.color.b = 1.0
-        # text.color.a = 0.95
-        #
-
-        #Drone Mesh Marker
         drone_mesh = Marker()
         drone_mesh.header.frame_id = frame_id
         drone_mesh.header.stamp = self.get_clock().now().to_msg()
@@ -197,29 +132,22 @@ class DroneVizNode(Node):
         drone_mesh.id = 3
         drone_mesh.type = Marker.MESH_RESOURCE
         drone_mesh.action = Marker.ADD
-
         drone_mesh.pose = pose_msg.pose
-
 
         drone_mesh.pose.position.x += self.offsetX
         drone_mesh.pose.position.y += self.offsetY
         drone_mesh.pose.position.z += self.offsetZ
 
-
         s = self.mesh_scale
         drone_mesh.scale.x = drone_mesh.scale.y = drone_mesh.scale.z = s
-
         drone_mesh.color.r = 1.0
         drone_mesh.color.g = 1.0
         drone_mesh.color.b = 1.0
         drone_mesh.color.a = 1.0
-
         drone_mesh.mesh_resource = self.mesh_uri
         drone_mesh.mesh_use_embedded_materials = False
 
         markers.extend([drone_mesh])
-        
-        # markers.append(arrow)
         return markers
 
     def _path_markers(self, frame_id: str) -> List[Marker]:
@@ -276,12 +204,9 @@ class DroneVizNode(Node):
             end.color.a = 0.9
 
             markers.extend([start])
-
         return markers
 
     def _detection_markers_bv(self, dets_msg) -> List[Marker]:
-        """Render 2D detections as text labels in fixed_frame at z=dets_z.
-        (No camera projection; uses scaled pixel coords.)"""
         frame_id = self.get_parameter('fixed_frame').value
         z0 = float(self.get_parameter('dets_z').value)
 
@@ -295,34 +220,54 @@ class DroneVizNode(Node):
         markers: List[Marker] = [del_all]
         m_id = 1
         for vec in getattr(dets_msg, 'dets', []):
+            cls_id = int(vec.z)
+            x_pos = float(vec.x) * 0.01
+            y_pos = float(vec.y) * 0.01
+
+            cube = Marker()
+            cube.header.frame_id = frame_id
+            cube.header.stamp = del_all.header.stamp
+            cube.ns = 'detections'
+            cube.id = m_id
+            cube.type = Marker.CUBE
+            cube.action = Marker.ADD
+            cube.pose.position.x = x_pos
+            cube.pose.position.y = y_pos
+            cube.pose.position.z = z0 + 0.25 
+            cube.scale.x = cube.scale.y = cube.scale.z = 0.5
+            
+            cube.color.a = 0.85
+            if cls_id == 0:
+                cube.color.r, cube.color.g, cube.color.b = 1.0, 0.2, 0.2 
+            elif cls_id == 1:
+                cube.color.r, cube.color.g, cube.color.b = 0.2, 1.0, 0.2 
+            else:
+                cube.color.r, cube.color.g, cube.color.b = 0.2, 0.5, 1.0 
+
             label = Marker()
-            label.header.frame_id = frame_id
-            label.header.stamp = del_all.header.stamp
+            label.header = cube.header
             label.ns = 'detections'
-            label.id = m_id
-            m_id += 1
+            label.id = m_id + 1000 
             label.type = Marker.TEXT_VIEW_FACING
             label.action = Marker.ADD
-            label.pose.position.x = float(vec.x) * 0.01
-            label.pose.position.y = float(vec.y) * 0.01
-            label.pose.position.z = z0
+            label.pose.position.x = x_pos
+            label.pose.position.y = y_pos
+            label.pose.position.z = z0 + 0.8 
             label.scale.z = float(self.get_parameter('text_scale').value)
-            cls_id = int(vec.z)
-            label.text = f"cls {cls_id}"
-            label.color.r = 1.0
-            label.color.g = 1.0
-            label.color.b = 0.0
-            label.color.a = 0.95
-            markers.append(label)
+            label.text = f"Class {cls_id}"
+            label.color.r = label.color.g = label.color.b = 1.0
+            label.color.a = 1.0
+
+            markers.extend([cube, label])
+            m_id += 1
+
         return markers
 
     def _hud_markers(self) -> List[Marker]:
-        """Mission/Queue text in a fixed position (HUD)."""
         frame_id = self.get_parameter('fixed_frame').value
         ax, ay, az = self.get_parameter('hud_anchor').value
         text_scale = float(self.get_parameter('text_scale').value)
 
-        # Clear existing "hud" namespace
         del_all = Marker()
         del_all.header.frame_id = frame_id
         del_all.header.stamp = self.get_clock().now().to_msg()
@@ -372,13 +317,11 @@ class DroneVizNode(Node):
         return [del_all, m_state, q_state]
 
     def _wp_markers_add(self, seq: int):
-        """Add a sphere + label at the last known drone position when a waypoint is reached."""
         if self._last_pose is None:
             return
         frame_id = self.frame_id
         pos = self._last_pose.pose.position
 
-        # Sphere
         self._reached_markers_count += 1
         sid = 1000 + self._reached_markers_count
         s = Marker()
@@ -397,7 +340,6 @@ class DroneVizNode(Node):
         s.color.b = 1.0
         s.color.a = 0.9
 
-        # Label
         self._reached_markers_count += 1
         tid = 1000 + self._reached_markers_count
         t = Marker()
@@ -419,7 +361,7 @@ class DroneVizNode(Node):
 
         self._accum_wp_markers.extend([s, t])
 
-    def _marker_from_waypoint(self, wp: Waypoint, marker_id: int) -> Marker:
+    def _marker_from_waypoint(self, x_m: float, y_m: float, z_m: float, marker_id: int) -> Marker:
         m = Marker()
         m.header.frame_id = self.frame_id
         m.header.stamp = self.get_clock().now().to_msg()
@@ -427,30 +369,75 @@ class DroneVizNode(Node):
         m.id = marker_id
         m.type = Marker.SPHERE
         m.action = Marker.ADD
-        m.pose.position.x = wp.x_lat   # convert if using local coords
-        m.pose.position.y = wp.y_long
-        m.pose.position.z = wp.z_alt
-        m.scale.x = m.scale.y = m.scale.z = 0.25
+        m.pose.position.x = x_m
+        m.pose.position.y = y_m
+        m.pose.position.z = z_m
+        m.scale.x = m.scale.y = m.scale.z = 0.5 
         m.color.r = 0.9
         m.color.g = 0.9
         m.color.b = 0.1
         m.color.a = 1.0
         return m
 
+    def _build_planned_wp_markers(self):
+        """Calculates exact offset between GPS and Local to anchor waypoints perfectly"""
+        del_all = Marker()
+        del_all.header.frame_id = self.frame_id
+        del_all.header.stamp = self.get_clock().now().to_msg()
+        del_all.ns = 'planned_wp'
+        del_all.id = 0
+        del_all.action = Marker.DELETEALL
+        
+        new_markers = [del_all]
+
+        # Use drone's current live location as the universal translation anchor
+        anchor_lat = self._last_global.latitude
+        anchor_lon = self._last_global.longitude
+        anchor_local_x = self._last_pose.pose.position.x
+        anchor_local_y = self._last_pose.pose.position.y
+
+        for i, wp in enumerate(self._raw_waypoints):
+            # 1. Delta in degrees from the anchor
+            delta_lat = wp.x_lat - anchor_lat
+            delta_lon = wp.y_long - anchor_lon
+
+            # 2. Convert to meters (ROS ENU: X is East/Lon, Y is North/Lat)
+            dist_x = delta_lon * 111319.9 * math.cos(math.radians(anchor_lat))
+            dist_y = delta_lat * 111319.9
+
+            # 3. Apply offset to local coordinate system
+            local_x = anchor_local_x + dist_x
+            local_y = anchor_local_y + dist_y
+
+            m = self._marker_from_waypoint(local_x, local_y, wp.z_alt, marker_id=i+1)
+            new_markers.append(m)
+
+        self._last_markers_planned_wp = new_markers
+        self._mission_anchored = True
 
     # ---------- Callbacks ----------
 
-    def on_wp(self, msg: Waypoint):
-        marker_id = len(self._last_markers_planned_wp)
-        m = self._marker_from_waypoint(msg, marker_id)
-        self._last_markers_planned_wp.append(m)
+    def on_global(self, msg: NavSatFix):
+        self._last_global = msg
+        # If we received a mission before GPS lock, draw it now
+        if self._raw_waypoints and not self._mission_anchored and self._last_pose:
+            self._build_planned_wp_markers()
 
+    def on_wp(self, msg: WaypointList):
+        if not msg.waypoints:
+            return
+        
+        self._raw_waypoints = msg.waypoints
+        self._mission_anchored = False # Reset flag for new mission
+        
+        # Draw immediately if we already have GPS lock
+        if self._last_global and self._last_pose:
+            self._build_planned_wp_markers()
 
     def on_pose(self, msg: PoseStamped):
         self._last_pose = msg
         frame_id = self.frame_id
 
-        # update path accumulator
         if bool(self.get_parameter('accumulate_path').value):
             pt = Point()
             pt.x = msg.pose.position.x
@@ -478,17 +465,18 @@ class DroneVizNode(Node):
     def on_wp_reached(self, msg: WaypointReached):
         try:
             seq = int(msg.wp_seq)
-            self.get_logger().info(f"Waypoint reached callback: seq={seq}")
         except Exception:
             seq = 0
-        self._wp_markers_add(seq)
+            
+        if seq != getattr(self, '_last_reached_seq', -1):
+            self.get_logger().info(f"New Waypoint reached: seq={seq}")
+            self._wp_markers_add(seq)
+            self._last_reached_seq = seq
 
     # ---------- Publishing ----------
     def publish_all(self):
         ma = MarkerArray()
        
-        # DO NOT clear 'wp' namespace; we accumulate it over time.
-        # For other namespaces we already include DELETEALL on each group build.
         for group in (
             self._last_markers_pose,
             self._last_markers_path,
