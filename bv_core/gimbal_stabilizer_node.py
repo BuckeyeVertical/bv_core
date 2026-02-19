@@ -36,9 +36,14 @@ class GimbalStabilizerNode(Node):
         self._ensure_gz_publisher(self.roll_topic)
         self._ensure_gz_publisher(self.pitch_topic)
 
+        self._roll_cmd = 0.0
+        self._pitch_cmd = 0.0
+
         subscribed = self._gz_node.subscribe(GzImuMsg, attitude_topic, self._handle_gz_imu)
         if not subscribed:
             raise RuntimeError(f"Failed to subscribe to Gazebo IMU topic '{attitude_topic}'")
+
+        self._control_timer = self.create_timer(1.0 / 30.0, self._control_loop)
 
         self.get_logger().info(
             f"Gimbal stabilizer listening to {attitude_topic} and publishing roll"
@@ -55,12 +60,13 @@ class GimbalStabilizerNode(Node):
             self.get_logger().warn('Received invalid orientation quaternion; skipping command.')
             return
 
-        roll_cmd = 0.0
+        self._roll_cmd = 0.0
         # Target joint angle = negative of measured pitch to compensate and point down
-        pitch_cmd = pitch
+        self._pitch_cmd = pitch
 
-        self._publish_gz(self.roll_topic, roll_cmd)
-        self._publish_gz(self.pitch_topic, pitch_cmd)
+    def _control_loop(self):
+        self._publish_gz(self.roll_topic, self._roll_cmd)
+        self._publish_gz(self.pitch_topic, self._pitch_cmd)
 
     @staticmethod
     def _quaternion_to_roll_pitch(x, y, z, w):

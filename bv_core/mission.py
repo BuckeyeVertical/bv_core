@@ -165,6 +165,7 @@ class MissionRunner(Node):
         
         # Confirmed detection class from filtering_node (set on object detection)
         self.confirmed_detection_class_id = -1
+        self._localize_retry_timer = None
         
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
@@ -174,6 +175,8 @@ class MissionRunner(Node):
         self.home_lat = None
         self.home_lon = None
         self.home_alt = None
+
+        self.has_armed = False
 
     def setup_ros_interfaces(self):
         """Set up all ROS publishers, subscribers, and service clients."""
@@ -462,6 +465,11 @@ class MissionRunner(Node):
         """
         Fly to the localized object position for payload delivery.
         """
+        # Cancel any pending localization retry timer
+        if self._localize_retry_timer is not None:
+            self._localize_retry_timer.cancel()
+            self._localize_retry_timer = None
+
         self.current_state = STATE_DELIVER
         self.publish_mission_state()
         self.is_transitioning = True
@@ -654,8 +662,8 @@ class MissionRunner(Node):
         pv_max.integer_value = pwm_value + 1
         req_max.value = pv_max
         
-        self.param_set_client.call_async(req_min)
-        self.param_set_client.call_async(req_max)
+        #self.param_set_client.call_async(req_min)
+        #self.param_set_client.call_async(req_max)
 
     def reset_all_servos_to_default(self):
         """Reset all servos to their default PWM positions."""
@@ -726,6 +734,7 @@ class MissionRunner(Node):
         # Clear current target
         self.current_target_coords = None
         self.current_target_class_id = None
+        self.confirmed_detection_class_id = -1
         
         if self.objects_delivered_count >= self.num_objects_to_find:
             # All objects delivered - mission complete
@@ -759,7 +768,11 @@ class MissionRunner(Node):
             return
         
         self.get_logger().info("Waypoints uploaded successfully")
-        self.arm_vehicle()
+        if not self.has_armed:
+            self.arm_vehicle()
+            self.has_armed = True
+        else:
+            self.set_flight_mode("AUTO.MISSION")
 
     def on_arm_complete(self, future):
         """Callback when arming completes."""
@@ -786,9 +799,16 @@ class MissionRunner(Node):
         self.in_auto_mission = True
         self.is_transitioning = False
         
-        # Reset servos and set velocity
+        # Reset servos and set velocity (delay velocity set to let mode change settle)
         self.reset_all_servos_to_default()
-        self.set_velocity(self.desired_velocity)
+        def set_velocity_once():
+            if hasattr(self, '_velocity_delay_timer') and self._velocity_delay_timer is not None:
+                self._velocity_delay_timer.cancel()
+                self._velocity_delay_timer = None
+            self.set_velocity(self.desired_velocity)
+        if hasattr(self, '_velocity_delay_timer') and self._velocity_delay_timer is not None:
+            self._velocity_delay_timer.cancel()
+        self._velocity_delay_timer = self.create_timer(1.0, set_velocity_once)
         
         # Check if we missed a waypoint completion during transition
         # (This can happen if waypoints are very close together)
@@ -826,7 +846,16 @@ class MissionRunner(Node):
         
         if not response.success:
             self.get_logger().warn("Localization failed - retrying in 1s...")
-            self.create_timer(1.0, lambda: self.request_localization_from_vision())
+            # Cancel any existing retry timer before creating a new one
+            if self._localize_retry_timer is not None:
+                self._localize_retry_timer.cancel()
+            def retry_once():
+                if self._localize_retry_timer is not None:
+                    self._localize_retry_timer.cancel()
+                    self._localize_retry_timer = None
+                if self.current_state == STATE_LOCALIZE:
+                    self.request_localization_from_vision()
+            self._localize_retry_timer = self.create_timer(1.0, retry_once)
             return
         
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)

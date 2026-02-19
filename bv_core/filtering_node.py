@@ -20,6 +20,7 @@ from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
+import time
 from collections import deque
 from rclpy.time import Time
 import math
@@ -113,15 +114,13 @@ class FilteringNode(Node):
         camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
         dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
 
-        self.get_logger().info(f"Camera Matrix: {camera_matrix}\nDist Coefficients: {dist_coeffs}")
-        self.get_logger().info(f"Deployed detection ignore radius (deg): {self.deployed_ignore_radius_deg}")
-
         self.localizer = Localizer(
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs
         )
 
         self.last_rel_alt = None
+        self._last_window_print_time = 0.0
 
     def handle_gps(self, msg: NavSatFix):
         self.gps_buffer.append(msg)
@@ -135,10 +134,9 @@ class FilteringNode(Node):
     def handle_detections(self, msg: ObjectDetections):
         # Debug: Log incoming detections
         num_dets = len(msg.dets) if msg.dets else 0
-        self.get_logger().info(f"[DEBUG] Received {num_dets} detections from /obj_dets")
+        # self.get_logger().info(f"[DEBUG] Received {num_dets} detections from /obj_dets")
         
         if len(self.pose_buffer) == 0 or len(self.gps_buffer) == 0 or self.last_rel_alt == None:
-            self.get_logger().info("Waiting for sensor data")
             return
         
         # convert detection stamp into a float or ns
@@ -158,7 +156,6 @@ class FilteringNode(Node):
         )
 
         if not best_gps or not best_pose:
-            self.get_logger().warn("No matching GPS or Pose yet.")
             return
         
         drone_pose = (
@@ -194,10 +191,10 @@ class FilteringNode(Node):
             if not self._is_near_deployed_location(lat, lon)
         ]
         ignored_count = len(detections_global) - len(filtered_detections)
-        if ignored_count > 0:
-            self.get_logger().info(
-                f"[DEBUG] Ignored {ignored_count} detections near deployed locations"
-            )
+        # if ignored_count > 0:
+            # self.get_logger().info(
+                # f"[DEBUG] Ignored {ignored_count} detections near deployed locations"
+            # )
 
         # store for later clustering once mission state changes
         self.global_dets.extend(detections_global)
@@ -211,19 +208,22 @@ class FilteringNode(Node):
         self.frame_history.append(filtered_detections)
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
-        
-        # Debug: Log frame history state
-        self.get_logger().info(f"[DEBUG] Frame history: {len(self.frame_history)} frames, "
-                               f"detections per frame: {[len(f) for f in self.frame_history]}")
-        
+
+        # Rate-limited print of class names in frame window (1/sec)
+        now = time.time()
+        if now - self._last_window_print_time >= 1.0:
+            self._last_window_print_time = now
+            for i, frame_dets in enumerate(self.frame_history):
+                class_names = set(COCO_CLASS_NAMES[int(cls)] for _, _, cls in frame_dets)
+                self.get_logger().info(f"Frame {i}: {class_names}")
+
         # Check for consistent detection across 3 frames
         confirmed_class = self._check_3frame_confirmation()
-        self.get_logger().info(f"[DEBUG] 3-frame check result: {confirmed_class}, "
-                               f"already confirmed: {self.already_confirmed_classes}")
+        # self.get_logger().info(f"[DEBUG] 3-frame check result: {confirmed_class}, "
+                            #    f"already confirmed: {self.already_confirmed_classes}")
         
         if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
             self.already_confirmed_classes.add(confirmed_class)
-            self.get_logger().info(f"Object confirmed in 3 frames! Class: {COCO_CLASS_NAMES[int(confirmed_class)]}")
             self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
 
     def _check_3frame_confirmation(self):
@@ -233,9 +233,9 @@ class FilteringNode(Node):
         Returns:
             class_id if confirmed, None otherwise
         """
-        if len(self.frame_history) < 3:
-            self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
-            return None
+        # if len(self.frame_history) < 3:
+            # self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
+            # return None
         
         # Get classes present in each frame
         frame_classes = []
@@ -244,11 +244,14 @@ class FilteringNode(Node):
             frame_classes.append(classes_in_frame)
         
         # Debug: Log classes in each frame
-        self.get_logger().info(f"[DEBUG] Classes per frame: {[list(c) for c in frame_classes]}")
+        # self.get_logger().info(f"[DEBUG] Classes per frame: {[list(c) for c in frame_classes]}")
+
+        if len(frame_classes) < 3:
+            return
         
         # Find classes present in all 3 frames
         common_classes = frame_classes[0] & frame_classes[1] & frame_classes[2]
-        self.get_logger().info(f"[DEBUG] Common classes across all 3 frames: {list(common_classes)}")
+        # self.get_logger().info(f"[DEBUG] Common classes across all 3 frames: {list(common_classes)}")
         
         if not common_classes:
             return None
@@ -287,10 +290,6 @@ class FilteringNode(Node):
 
     def deployed_location_callback(self, msg: ObjectLocations):
         self.deployed_locations.append((msg.latitude, msg.longitude, msg.class_id))
-        self.get_logger().info(
-            f"Recorded deployed location: lat={msg.latitude:.6f}, lon={msg.longitude:.6f}, "
-            f"class_id={msg.class_id}. Total deployed markers: {len(self.deployed_locations)}"
-        )
 
     def _is_near_deployed_location(self, lat: float, lon: float) -> bool:
         for deployed_lat, deployed_lon, _ in self.deployed_locations:
@@ -302,8 +301,6 @@ class FilteringNode(Node):
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
             self.state = msg.data
-            self.get_logger().info(f"Filtering node acknowledging state change: {self.state}")
-
             # Clear frame history on any state transition to prevent
             # detections from deliver/deploy phases carrying into scan
             if msg.data in ('localize', 'deliver', 'deploy', 'scan'):
@@ -311,12 +308,10 @@ class FilteringNode(Node):
 
             if msg.data == 'scan':
                 self.already_confirmed_classes.clear()
-                self.get_logger().info("Cleared frame history and confirmations for new scan segment")
 
             # once we leave the 'scan' state, write deployed locations
             if self.prev_state == 'scan':
                 with open('finalized_object_locations.txt', 'w') as f:
-                        print("Writing lat lon")
                         for lat, lon, cls in self.deployed_locations:
                             class_name = COCO_CLASS_NAMES[int(cls)] if int(cls) >= 0 else "unknown"
                             f.write(f"{lat:.6f},{lon:.6f},{class_name}\n")

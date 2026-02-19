@@ -145,7 +145,6 @@ class VisionNode(Node):
             queue_size=1,
         )
 
-        self.get_logger().info(f"Initialized {self.pipeline_type} pipeline on topic: {self.pipeline_topic}")
         self.pipeline_running = False
 
     def _init_threading(self):
@@ -233,7 +232,6 @@ class VisionNode(Node):
             gazebo_bbox_topic=self.gazebo_bbox_topic,
         )
         self.detector.start()
-        self.get_logger().info(f"Initialized detector: {self.detector_type}")
 
     def _init_localizer(self):
         """Initialize the localizer for GPS coordinate conversion."""
@@ -257,7 +255,6 @@ class VisionNode(Node):
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs
         )
-        self.get_logger().info("Initialized localizer for GPS conversion")
 
     def _init_services(self):
         """Initialize ROS2 services."""
@@ -266,7 +263,7 @@ class VisionNode(Node):
             'localize_object',
             self._handle_localize_request
         )
-        self.get_logger().info("Localize object service ready")
+        pass  # service ready
 
     def _start_worker_threads(self):
         """Start background worker threads."""
@@ -299,7 +296,6 @@ class VisionNode(Node):
             return
 
         self.state = new_state
-        self.get_logger().info(f"Vision node acknowledging state change: {self.state}")
 
         # Keep pipeline running in both scan and localize states
         if new_state in ('scan', 'localize'):
@@ -316,7 +312,6 @@ class VisionNode(Node):
         Sets latest_wp to trigger frame capture in the fetch loop.
         """
         if self.last_wp is not None and msg.wp_seq != self.last_wp:
-            self.get_logger().info("Made it to new waypoint")
             self.latest_wp = msg.wp_seq
 
         self.last_wp = msg.wp_seq
@@ -358,8 +353,6 @@ class VisionNode(Node):
         response.altitude = 0.0
         response.class_id = -1
         
-        self.get_logger().info("Localize request received - processing...")
-        
         # Ensure pipeline is running
         if not self.pipeline_running:
             try:
@@ -395,8 +388,6 @@ class VisionNode(Node):
             self.get_logger().warn("No detections found during localization")
             return response
         
-        self.get_logger().info(f"Localization detected {len(detections)} objects")
-        
         # Get pixel centers: (center_x, center_y, class_id)
         pixel_centers = [
             ((x1 + x2) / 2, (y1 + y2) / 2, int(cls))
@@ -428,6 +419,11 @@ class VisionNode(Node):
             return response
 
         target_cls = request.target_class_id
+        if target_cls >= 0:
+            self.get_logger().info(f"Localizing object: {COCO_CLASS_NAMES[target_cls]}")
+        else:
+            self.get_logger().info("Localizing: any detected object")
+
         # Filter for the requested class if specified
         if target_cls >= 0:
             matched = [c for c in coords if int(c[2]) == target_cls]
@@ -444,11 +440,6 @@ class VisionNode(Node):
         response.longitude = coords[0][1]
         response.altitude = drone_pose[2]
         response.class_id = int(coords[0][2])
-        self.get_logger().info(
-            f"Localization successful: lat={response.latitude:.6f}, "
-            f"lon={response.longitude:.6f}, class={COCO_CLASS_NAMES[response.class_id]} "
-            f"(requested={target_cls})"
-        )
         
         return response
 
@@ -515,7 +506,6 @@ class VisionNode(Node):
                 continue
 
             stamp = self.get_clock().now()
-            self.get_logger().info("Adding to queue")
             # Discard stale frame if present ("latest wins")
             try:
                 self.queue.get_nowait()
@@ -585,7 +575,6 @@ class VisionNode(Node):
 
     def _process_frame(self, frame, stamp):
         """Run detection on a frame and publish results."""
-        self.get_logger().info("Processing frame from queue")
 
         # Convert grayscale to BGR if needed
         if frame.ndim == 2:
@@ -607,7 +596,6 @@ class VisionNode(Node):
         annotated_frame = frame.copy()
         annotated_frame = sv.BoxAnnotator().annotate(annotated_frame, detections)
         annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
-        self.get_logger().info(f"Detected {len(detections)} objects")
 
         # Publish detection results
         self._publish_detections(detections, stamp)

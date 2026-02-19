@@ -9,7 +9,6 @@ from sklearn.cluster import DBSCAN
 from geographiclib.geodesic import Geodesic
 import math
 from scipy.spatial.transform import Rotation as R
-import rclpy
 import rclpy.logging
 from ament_index_python.packages import get_package_share_directory
 from collections import defaultdict, Counter
@@ -70,6 +69,7 @@ class Localizer:
         """
 
         if not pixel_centers:
+            rclpy.logging.get_logger("localizer").warn("No pixel centers provided, returning empty list")
             return []
 
         # 1) Undistort to normalized image plane
@@ -113,16 +113,6 @@ class Localizer:
             geo  = self.geod.Direct(lat0, lon0, az, dist)
 
             results.append((geo['lat2'], geo['lon2'], class_id))
-
-        i = 0  # or any index
-        rclpy.logging.get_logger("filtering_node").info(f"pixel: {pixel_centers[i]}")
-        rclpy.logging.get_logger("filtering_node").info(f"norm: {norm[i]}")
-        rclpy.logging.get_logger("filtering_node").info(f"dir_cam: {dirs_cam[i]}")
-        rclpy.logging.get_logger("filtering_node").info(f"dir_enu: {dir_enu}")
-        rclpy.logging.get_logger("filtering_node").info(f"t: {t}, -> E,N: {east_offset}, {north_offset}")
-
-        for res in results:
-            rclpy.logging.get_logger("filtering_node").info(f"Result: {res[0]}, {res[1]}, {COCO_CLASS_NAMES[int(res[2])]}")
 
         return results
 
@@ -171,7 +161,6 @@ class Localizer:
         Returns:
             List of (lat, lon, class_id) cluster centers
         """
-        print(f"detections: {detections}")
         if not detections:
             return []
 
@@ -185,7 +174,6 @@ class Localizer:
         clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric='haversine').fit(coords)
         labels = clustering.labels_
 
-        print(f"Labels: {labels}")
 
         self._debug_coords = coords
         self._debug_labels = labels

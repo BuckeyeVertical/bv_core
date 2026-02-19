@@ -44,11 +44,17 @@ def generate_launch_description():
         name='bv_viz_node',
         output='both',
     )
-
+    gimabl_stabilizer = Node(
+        package='bv_core',
+        executable='gimbal_stabilizer_node',
+        name='gimbal_stab_node',
+        output='both',
+    )
     return LaunchDescription([
         mission_node,
         vision_node,
         filter_node,
-        stitching_node,
-        bv_viz_node,
+        gimabl_stabilizer
+        # stitching_node,
+        # bv_viz_node,
     ])
