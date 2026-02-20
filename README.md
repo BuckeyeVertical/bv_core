@@ -284,7 +284,7 @@ colcon build
 
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
-make px4_sitl gz_x500
+make px4_sitl gz_x500_gimbal PX4_WORLD=baylands
 
 # once px4 is running
 # in the same terminal
