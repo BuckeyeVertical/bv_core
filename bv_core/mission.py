@@ -439,6 +439,7 @@ class MissionRunner(Node):
         if self.loiter_resume_coords is not None:
             self.get_logger().info(
                 f"Prepending loiter return point: "
+                f"lat={self.loiter_resume_coords[0]:.6f}, lon={self.loiter_resume_coords[1]:.6f}"
             )
             remaining_scan_points = [self.loiter_resume_coords] + remaining_scan_points
             self.scan_resume_waypoint_offset = 1
