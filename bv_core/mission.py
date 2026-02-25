@@ -158,6 +158,12 @@ class MissionRunner(Node):
         # Scan resume tracking
         self.scan_waypoint_index_on_detection = 0
         self.last_reached_scan_waypoint = 0
+        self.loiter_resume_coords = None  # (lat, lon, alt) to return to after delivery
+        self.scan_resume_waypoint_offset = 0  # Offset when loiter point is prepended
+
+        # Continuous GPS tracking
+        self.current_lat = None
+        self.current_lon = None
         
         # Current target for delivery (set by localization)
         self.current_target_coords = None  # (lat, lon, alt)
@@ -284,8 +290,7 @@ class MissionRunner(Node):
         while rclpy.ok() and self.home_lat is None:
             rclpy.spin_once(self, timeout_sec=0.1)
         
-        # Unsubscribe from GPS after getting home position
-        self.destroy_subscription(self.gps_sub)
+        # Keep GPS subscription alive for continuous position tracking
         
         self.get_logger().info(
             f"Home position set: lat={self.home_lat:.6f}, "
@@ -429,12 +434,23 @@ class MissionRunner(Node):
         
         # Get remaining scan waypoints from where we left off
         remaining_scan_points = self.scan_waypoints[self.scan_waypoint_index_on_detection:]
-        
+
+        # If resuming after delivery, fly back to loiter position first
+        if self.loiter_resume_coords is not None:
+            self.get_logger().info(
+                f"Prepending loiter return point: "
+            )
+            remaining_scan_points = [self.loiter_resume_coords] + remaining_scan_points
+            self.scan_resume_waypoint_offset = 1
+            self.loiter_resume_coords = None  # Clear after use
+        else:
+            self.scan_resume_waypoint_offset = 0
+
         if not remaining_scan_points:
             self.get_logger().info("No remaining scan waypoints")
             self.handle_state_completion()
             return
-        
+
         self.active_waypoint_list = self.build_waypoint_list(
             remaining_scan_points,
             self.scan_tolerance,
@@ -898,7 +914,9 @@ class MissionRunner(Node):
 
     # Callbacks - topic subscriptions
     def on_gps_received(self, msg):
-        """Callback for GPS position - used only for initial home position."""
+        """Callback for GPS position - tracks current position continuously."""
+        self.current_lat = msg.latitude
+        self.current_lon = msg.longitude
         if self.home_lat is None:
             self.home_lat = msg.latitude
             self.home_lon = msg.longitude
@@ -916,9 +934,10 @@ class MissionRunner(Node):
         self.last_waypoint_reached = waypoint_index
         
         # Track scan progress for resume functionality
+        # Subtract offset if loiter return point was prepended to the waypoint list
         if self.current_state == STATE_SCAN:
-            self.last_reached_scan_waypoint = waypoint_index
-        
+            self.last_reached_scan_waypoint = waypoint_index - self.scan_resume_waypoint_offset
+
         # Don't process completion if we're mid-transition
         if self.is_transitioning:
             self.get_logger().debug(
@@ -976,7 +995,15 @@ class MissionRunner(Node):
         
         # Save current scan progress for later resume
         # (last_reached_scan_waypoint is updated by on_waypoint_reached)
-        
+
+        # Save drone's current position so we can return here after delivery
+        if self.current_lat is not None and self.current_lon is not None:
+            scan_alt = self.scan_waypoints[0][2]  # Use scan altitude
+            self.loiter_resume_coords = (self.current_lat, self.current_lon, scan_alt)
+            self.get_logger().info(
+                f"Saved loiter position: lat={self.current_lat:.6f}, lon={self.current_lon:.6f}"
+            )
+
         # Command drone to hold position
         self.set_flight_mode("AUTO.LOITER")
         
