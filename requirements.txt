@@ -1,9 +1,38 @@
-supervision
+# =============================================================================
+# bv_core Python dependencies
+# =============================================================================
+#
+# Install everything in one step:
+#   pip install -r requirements.txt
+#
+# =============================================================================
+
+# -- rf-detr (installed from BuckeyeVertical fork) --
+# This pulls in the rfdetr package + all its transitive deps (torch, torchvision, etc.)
+rfdetr @ git+https://github.com/BuckeyeVertical/rf-detr.git
+
+# -- rf-detr compatibility pins --
+# Required to avoid import errors with rf-detr <= 1.3.x.
+# If you update your rf-detr fork to v1.4.1+, these pins may no longer be needed.
+transformers<5
+tokenizers<0.22
+
+
+pydantic
+pycocotools
+
+
 empy==3.3.4
-pyros-genmsg 
+pyros-genmsg
 setuptools==65.5.1
 catkin_pkg
 lark
 colcon-common-extensions
-geographiclib
+
 numpy<2,>=1.23
+
+supervision
+scikit-learn
+opencv-python
+
+geographiclib
