@@ -156,6 +156,12 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 Install python deps (setup a venv... I recommend uv):
 ```bash
 pip install -r requirements.txt
+
+sudo apt install -y \
+  libgz-transport13-dev \
+  libgz-msgs10-dev \
+  python3-gz-transport13 \
+  python3-gz-msgs10
 ```
 In the root of your ROS workspace (~/bv_ws) run:
 ```bash
