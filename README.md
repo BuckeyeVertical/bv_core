@@ -166,8 +166,6 @@ sudo apt install -y \
 In the root of your ROS workspace (~/bv_ws) run:
 ```bash
 git clone https://github.com/BuckeyeVertical/rf-detr.git
-cd rf-detr
-pip install -e .
 ```
 
 Install mavros:
