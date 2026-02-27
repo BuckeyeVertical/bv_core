@@ -162,7 +162,11 @@ sudo apt install -y \
   libgz-msgs10-dev \
   python3-gz-transport13 \
   python3-gz-msgs10
+sudo apt install ros-humble-cv-bridge ros-humble-foxglove-bridge
+bash bv_ws/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 ```
+Read file src/bv_core/meshes/ and replace it with the stl
+
 In the root of your ROS workspace (~/bv_ws) run:
 ```bash
 git clone https://github.com/BuckeyeVertical/rf-detr.git
@@ -174,11 +178,13 @@ sudo apt install ros-humble-mavros
 ```
 *Note: If MAVROS installation doesn't work, you can build it from source by cloning the MAVROS package into your ros workspace.*
 
-*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+
 ```bash
 sudo apt install geographiclib-tools
 sudo /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
-
+```
+*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+```bash
 # Then copy the geoid file to the correct location
 sudo mkdir -p /usr/share/GeographicLib/geoids
 sudo cp /usr/local/share/GeographicLib/geoids/egm96-5.pgm    /usr/share/GeographicLib/geoids/
@@ -191,6 +197,13 @@ Build and install:
 
 Typical commands (adjust distro/paths as needed):
 ```bash
+cd ~/bv_ws
+mkdir src
+cd src
+# clone the two repos into src
+git clone https://github.com/BuckeyeVertical/bv_core.git
+git clone https://github.com/BuckeyeVertical/bv_msgs.git
+cd ..
 # From your ROS 2 workspace root (one above src/)
 colcon build
 source install/setup.bash
