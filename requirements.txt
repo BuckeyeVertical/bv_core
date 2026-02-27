@@ -34,5 +34,4 @@ numpy<2,>=1.23
 supervision
 scikit-learn
 opencv-python
-gz-transport13
 geographiclib
