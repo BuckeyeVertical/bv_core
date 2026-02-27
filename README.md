@@ -153,16 +153,36 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
+Make sure you have followed the instructions in the linked pre-req websites
+Clone PX4 in bv_ws
+```bash
+touch ~/bv_ws/PX4-Autopilot/COLCON_IGNORE
+```
+Clone the repos:
+```bash
+cd ~/bv_ws
+mkdir src
+cd src
+# clone the two repos into src
+git clone https://github.com/BuckeyeVertical/bv_core.git
+git clone https://github.com/BuckeyeVertical/bv_msgs.git
+cd ..
+```
+
 Install python deps (setup a venv... I recommend uv):
 ```bash
+cd src/bv_core
 pip install -r requirements.txt
+
+sudo apt install -y \
+  libgz-transport13-dev \
+  libgz-msgs10-dev \
+  python3-gz-transport13 \
+  python3-gz-msgs10
+sudo apt install ros-humble-cv-bridge ros-humble-foxglove-bridge
+bash ~/bv_ws/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 ```
-In the root of your ROS workspace (~/bv_ws) run:
-```bash
-git clone https://github.com/BuckeyeVertical/rf-detr.git
-cd rf-detr
-pip install -e .
-```
+Read file src/bv_core/meshes/ and replace it with the stl
 
 Install mavros:
 ```bash
@@ -170,11 +190,13 @@ sudo apt install ros-humble-mavros
 ```
 *Note: If MAVROS installation doesn't work, you can build it from source by cloning the MAVROS package into your ros workspace.*
 
-*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+
 ```bash
 sudo apt install geographiclib-tools
 sudo /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
-
+```
+*Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
+```bash
 # Then copy the geoid file to the correct location
 sudo mkdir -p /usr/share/GeographicLib/geoids
 sudo cp /usr/local/share/GeographicLib/geoids/egm96-5.pgm    /usr/share/GeographicLib/geoids/
@@ -187,9 +209,11 @@ Build and install:
 
 Typical commands (adjust distro/paths as needed):
 ```bash
+
 # From your ROS 2 workspace root (one above src/)
-colcon build --packages-select bv_core
-source install/setup.bash
+source /opt/ros/humble/setup.bash
+colcon build
+source install/local_setup.bash
 ```
 
 Configuration files:
@@ -284,13 +308,21 @@ colcon build
 
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
-make px4_sitl gz_x500_gimbal PX4_WORLD=baylands
+# Gazebo plugin path (adjust to your PX4-Autopilot location)
+export GZ_SIM_SYSTEM_PLUGIN_PATH=$GZ_SIM_SYSTEM_PLUGIN_PATH:~/workspace/PX4-Autopilot/Tools/simulation/gz/plugins/build/gimbal_stabilizer
+
+# PX4 simulation defaults
+export PX4_GZ_WORLD=baylands
+export PX4_HOME_LAT=38.3876112
+export PX4_HOME_LON=-76.4190542
+export PX4_HOME_ALT=0
+export PX4_GZ_MODEL_POSE=0,0,0,0,0,0
 
 # once px4 is running
 # in the same terminal
 param set NAV_DLL_ACT 0
 ```
-
+Note: If you get ModuleNotFoundError: No module named 'menuconfig', run python3 -m pip install -r Tools/setup/requirements.txt from the PX4-Autopilot directory.
 
 More on Gazebo (gz) simulation configuration and usage:
 - https://docs.px4.io/main/en/sim_gazebo_gz/
@@ -362,7 +394,7 @@ mv ros_gz/ros_gz_bridge ../
 rm -rf ros_gz
 
 cd ~/bv_ws
-colcon build --packages-select ros_gz_bridge
+colcon build
 source install/setup.bash
 ```
 
