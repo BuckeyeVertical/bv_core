@@ -153,8 +153,25 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
+Make sure you have followed the instructions in the linked pre-req websites
+Clone PX4 in bv_ws
+```bash
+touch ~/bv_ws/PX4-Autopilot/COLCON_IGNORE
+```
+Clone the repos:
+```bash
+cd ~/bv_ws
+mkdir src
+cd src
+# clone the two repos into src
+git clone https://github.com/BuckeyeVertical/bv_core.git
+git clone https://github.com/BuckeyeVertical/bv_msgs.git
+cd ..
+```
+
 Install python deps (setup a venv... I recommend uv):
 ```bash
+cd src/bv_core
 pip install -r requirements.txt
 
 sudo apt install -y \
@@ -163,14 +180,9 @@ sudo apt install -y \
   python3-gz-transport13 \
   python3-gz-msgs10
 sudo apt install ros-humble-cv-bridge ros-humble-foxglove-bridge
-bash bv_ws/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
+bash ~/bv_ws/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 ```
 Read file src/bv_core/meshes/ and replace it with the stl
-
-In the root of your ROS workspace (~/bv_ws) run:
-```bash
-git clone https://github.com/BuckeyeVertical/rf-detr.git
-```
 
 Install mavros:
 ```bash
@@ -197,16 +209,11 @@ Build and install:
 
 Typical commands (adjust distro/paths as needed):
 ```bash
-cd ~/bv_ws
-mkdir src
-cd src
-# clone the two repos into src
-git clone https://github.com/BuckeyeVertical/bv_core.git
-git clone https://github.com/BuckeyeVertical/bv_msgs.git
-cd ..
+
 # From your ROS 2 workspace root (one above src/)
+source /opt/ros/humble/setup.bash
 colcon build
-source install/setup.bash
+source install/local_setup.bash
 ```
 
 Configuration files:
