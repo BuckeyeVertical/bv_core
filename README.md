@@ -188,7 +188,7 @@ Build and install:
 Typical commands (adjust distro/paths as needed):
 ```bash
 # From your ROS 2 workspace root (one above src/)
-colcon build --packages-select bv_core
+colcon build
 source install/setup.bash
 ```
 
@@ -284,13 +284,21 @@ colcon build
 
 PX4 SITL (from PX4-Autopilot repo root):
 ```bash
-make px4_sitl gz_x500_gimbal PX4_WORLD=baylands
+# Gazebo plugin path (adjust to your PX4-Autopilot location)
+export GZ_SIM_SYSTEM_PLUGIN_PATH=$GZ_SIM_SYSTEM_PLUGIN_PATH:~/workspace/PX4-Autopilot/Tools/simulation/gz/plugins/build/gimbal_stabilizer
+
+# PX4 simulation defaults
+export PX4_GZ_WORLD=baylands
+export PX4_HOME_LAT=38.3876112
+export PX4_HOME_LON=-76.4190542
+export PX4_HOME_ALT=0
+export PX4_GZ_MODEL_POSE=0,0,0,0,0,0
 
 # once px4 is running
 # in the same terminal
 param set NAV_DLL_ACT 0
 ```
-
+Note: If you get ModuleNotFoundError: No module named 'menuconfig', run python3 -m pip install -r Tools/setup/requirements.txt from the PX4-Autopilot directory.
 
 More on Gazebo (gz) simulation configuration and usage:
 - https://docs.px4.io/main/en/sim_gazebo_gz/
