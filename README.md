@@ -161,7 +161,6 @@ sequenceDiagram
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-- [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
 - [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html) use --no-nuttx when running the script
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
@@ -239,6 +238,7 @@ export PX4_HOME_LAT=38.3876112
 export PX4_HOME_LON=-76.4190542
 export PX4_HOME_ALT=0
 export PX4_GZ_MODEL_POSE=0,0,0,0,0,0
+make px4_sitl gz_x500_gimbal_baylands
 ```
 If you are on Apple Sillicon mac and using a vm you may need to run:
 ```bash
