@@ -12,15 +12,16 @@ This package orchestrates an autonomous mission with PX4:
 
 ## Project Structure
 
-Below is the project structure. Here we have everything in the ROS workspace directory which we named bv_ws. In ROS this is the common paradigm. The ROS packages should be housed in the src directory. You can name this directory whatever you want.
+Below is the project structure for the ROS workspace directory (e.g. bv_ws). In ROS the common paradigm is to house all packages under `src`. bv_core (this repo) and [bv_msgs](https://github.com/BuckeyeVertical/bv_msgs) are cloned in `src`.
 
-Note that bv_core (this repo), and [bv_msgs](https://github.com/BuckeyeVertical/bv_msgs) are cloned in the source directory!
 ```
 bv_ws
 ├── annotated_frames
 ├── build
 ├── install
 ├── log
+├── logs
+├── PX4-Autopilot
 ├── rf-detr-base.pth
 └── src
     ├── bv_core
@@ -159,9 +160,9 @@ sequenceDiagram
 ### Option 1: Linux Method
 
 Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
-- [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html)
+- [ROS 2 Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
 - [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
-- [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
+- [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html) use --no-nuttx when running the script
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
 - Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
 
@@ -185,14 +186,15 @@ Install python deps (setup a venv... I recommend uv):
 ```bash
 cd src/bv_core
 pip install -r requirements.txt
-
+```
+```bash
 sudo apt install -y \
   libgz-transport13-dev \
   libgz-msgs10-dev \
   python3-gz-transport13 \
   python3-gz-msgs10
 sudo apt install ros-humble-cv-bridge ros-humble-foxglove-bridge
-bash ~/bv_ws/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
+sudo apt install python3-colcon-common-extensions -y
 ```
 Read file src/bv_core/meshes/ and replace it with the stl
 
@@ -204,7 +206,7 @@ sudo apt install ros-humble-mavros
 
 
 ```bash
-sudo apt install geographiclib-tools
+sudo apt install geographiclib-tools libgeographic-dev
 sudo /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
 ```
 *Note2: If you are facing issues with being told to run `install_geographiclib_dataset.sh`:*
@@ -228,18 +230,6 @@ colcon build
 source install/local_setup.bash
 ```
 
-Configuration files:
-- `config/mission_params.yaml`
-	- Waypoint lists: `points` (lap), `scan_points`, `stitch_points`, `deliver_points`
-	- Velocities/tolerances: `Lap_velocity`, `Scan_velocity`, `Stitch_velocity`, `*_tolerance`
-- `config/vision_params.yaml`
-	- `batch_size`, `detection_threshold`, `resolution`, `overlap`, `capture_interval`, `num_scan_wp`
-- `config/filtering_params.yaml`
-	- `c_matrix` (intrinsics 3x3), `dist_coefficients` (k1…k5), `camera_orientation` (mount euler xyz in radians)
-
-PX4 parameters touched by Mission:
-- MPC_XY_VEL_ALL (set via `/mavros/param/set`)
-- PWM_MAIN_MIN{n} / PWM_MAIN_MAX{n} (used to drive servos to specific PWMs during deploy)
 
 ### Option 2: Docker Method
 
