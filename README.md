@@ -230,6 +230,41 @@ colcon build
 source install/local_setup.bash
 ```
 
+Test PX4
+Add the following to your .bashrc as needed
+```bash
+# PX4 simulation defaults
+export PX4_GZ_WORLD=baylands
+export PX4_HOME_LAT=38.3876112
+export PX4_HOME_LON=-76.4190542
+export PX4_HOME_ALT=0
+export PX4_GZ_MODEL_POSE=0,0,0,0,0,0
+```
+If you are on Apple Sillicon mac and using a vm you may need to run:
+```bash
+# ARM VM rendering fix
+export PX4_GZ_SIM_RENDER_ENGINE=ogre2
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+```
+Another thing to consider adding to bashrc
+```bash
+source /opt/ros/humble/setup.bash
+
+# BV workspace overlay
+if [ -f ~/bv_ws/install/local_setup.bash ]; then
+    source ~/bv_ws/install/local_setup.bash
+fi
+```
+
+Test ROS
+```bash
+cd ~/bv_ws
+source /opt/ros/humble/setup.bash
+colcon build
+source install/local_setup.bash
+ros2 launch bv_core mission.launch.py
+```
 
 ### Option 2: Docker Method
 
