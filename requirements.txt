@@ -20,7 +20,7 @@ tokenizers<0.22
 
 pydantic
 pycocotools
-
+peft
 
 empy==3.3.4
 pyros-genmsg
