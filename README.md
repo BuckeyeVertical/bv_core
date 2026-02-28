@@ -52,31 +52,41 @@ bv_ws
 
 High-level services (“microservices”) and data flow:
 
-- mission_node (bv_core.mission.MissionRunner)
-	- Publishes: `/mission_state` (std_msgs/String)
-	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/queue_state` (std_msgs/Int8)
-	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `get_object_locations` (bv_msgs/srv/GetObjectLocations)
-	- Role: Mission FSM (lap → stitching → scan → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params.
+- **mission_node** (bv_core.mission.MissionRunner)
+	- Publishes: `/mission_state` (std_msgs/String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
+	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/global_obj_dets` (std_msgs/Int8)
+	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `localize_object` (bv_msgs/srv/LocalizeObject) on vision_node
+	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params. On confirmed detections from `/global_obj_dets`, calls `localize_object` to get GPS, then flies to object and deploys payload.
 
-- vision_node (bv_core.vision_node.VisionNode)
+- **vision_node** (bv_core.vision_node.VisionNode)
 	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
-	- Subscribes: `/image_raw` (sensor_msgs/Image), `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
-	- Role: On scan state, enqueue frames at each reach event, infer with RF-DETR in batches, annotate/save frames, publish detections.
+	- Subscribes: `/mission_state` (String), `/mavros/mission/reached` (WaypointReached), `/mavros/global_position/global` (NavSatFix), `/mavros/local_position/pose` (PoseStamped), `/mavros/global_position/rel_alt` (Float64)
+	- Provides: `localize_object` (bv_msgs/srv/LocalizeObject) — captures a frame, runs detection, returns lat/lon and class for the requested object
+	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs RF-DETR in batches, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
 
-- filtering_node (bv_core.filtering_node.FilteringNode)
-	- Provides: `get_object_locations` (bv_msgs/srv/GetObjectLocations)
-	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String)
-	- Role: Time-align detections with pose/GPS, project detections to lat/lon using camera intrinsics/orientation, and estimate object locations.
+- **filtering_node** (bv_core.filtering_node.FilteringNode)
+	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after 3-frame consistency, excluding areas near already-deployed locations
+	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
+	- Role: Time-aligns detections with pose/GPS, projects to lat/lon using camera intrinsics/orientation from `filtering_params.yaml`. Confirms detections in scan state and publishes `/global_obj_dets`; does not provide a service — mission uses `localize_object` on vision_node for per-object GPS.
 
-- stitching_node (bv_core.stitching.ImageStitcherNode)
-	- Subscribes: `/image_raw`, `/mission_state`, `/mavros/mission/reached`
-	- Role: Capture at waypoints (e.g., during stitching state), run OpenCV stitcher, save output panoramas.
+- **stitching_node** (bv_core.stitching.ImageStitcherNode)
+	- Subscribes (ROS): `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
+	- Image input: Gazebo transport topic via `GzTransportPipeline` (param `image_topic`, default `/world/baylands/.../camera/image`), not `/image_raw`
+	- Role: Captures at waypoints during stitching state, runs OpenCV stitcher, saves panoramas to disk (no ROS image subscription).
 
-- test_servo (bv_core.test_servo.ServoTester)
-	- Calls: `/mavros/cmd/command` (CommandLong CMD_DO_SET_SERVO)
-	- Role: Quick servo PWM test.
+- **bv_viz_node** (bv_core.bv_viz_node.DroneVizNode)
+	- Publishes: `/viz/markers` (visualization_msgs/MarkerArray) — drone pose, path, waypoints, HUD (mission state, queue state)
+	- Subscribes (params): `/mavros/local_position/pose`, `/mavros/global_position/global`, `/mission_state`, `/queue_state`, `/mavros/mission/reached`, `/mavros/mission/waypoints`
+	- Note: `dets_topic` is declared for `/obj_dets` but no subscription is created in the current implementation, so detection markers are not updated.
 
-Launch file: `launch/mission.launch.py` starts mission, vision, filtering, and stitching together.
+Launch file: `launch/mission.launch.py` starts mission_node, vision_node, filtering_node, and bv_viz_node; stitching_node is present in the file but commented out.
+
+#### Test and utility nodes
+
+- **camera_pipeline_test_node** — Publishes `/image_raw` (sensor_msgs/Image) from a GStreamer pipeline for debugging; not part of the main mission flow.
+- **test_obj_loc** — Provides `get_object_locations` (bv_msgs/srv/GetObjectLocations) with canned locations from `config/test_obj_loc.yaml`; legacy/test only, not used by mission_node (mission uses `localize_object` on vision_node).
+- **test_servo** — Calls `/mavros/cmd/command` (CommandLong CMD_DO_SET_SERVO) for quick servo PWM tests.
+- **gimbal_stabilizer_node** — Simulation-only helper: uses Gazebo transport (IMU → gimbal roll/pitch commands), no ROS 2 topics; run manually if needed for SITL gimbal stabilization.
 
 ### Operating modes overview
 
@@ -139,7 +149,9 @@ sequenceDiagram
 	Mission-->>Filtering: /mission_state
 	Mission-->>Stitching: /mission_state
 		Note over MAVROS,Filtering: Proprioception (global/local position, altitude)
-	Filtering-->>Mission: get_object_locations (service)
+	Filtering-->>Mission: /global_obj_dets (confirmed class_id)
+	Mission->>Vision: localize_object (service)
+	Vision-->>Mission: lat/lon, class_id
 ```
 
 ## Setup
@@ -471,9 +483,10 @@ You can now proceed to run the BV stack (`ros2 launch bv_core mission.launch.py`
 ## Topics, services, and states (quick reference)
 
 - Mission publishes state machine updates on `/mission_state` with values:
-	- `lap` → `stitching` → `scan` → `deliver` → `deploy` → `return`
-- Vision publishes `/obj_dets` and queue emptiness on `/queue_state` (1=empty/ready, 0=busy)
-- Filtering provides `get_object_locations` populated after leaving `scan`
+	- `takeoff` → `lap` → `stitching` → `scan` → `localize` → `deliver` → `deploy` → `return`
+- Mission publishes `/deployed_object_locations` (bv_msgs/ObjectLocations) after each successful payload deployment; filtering_node uses this to ignore detections near serviced locations.
+- Vision publishes `/obj_dets` and queue state on `/queue_state` (1=empty/ready, 0=busy). Vision provides `localize_object` (bv_msgs/srv/LocalizeObject) for mission_node to get object GPS during localize state.
+- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (3-frame consistency) during scan; mission_node subscribes and triggers localize/deliver/deploy per detection.
 - MAVROS bridges:
 	- Topics: `/mavros/mission/reached`, `/mavros/state`, `/mavros/global_position/global`, `/mavros/global_position/rel_alt`, `/mavros/local_position/pose`
 	- Services: `/mavros/mission/push`, `/mavros/cmd/arming`, `/mavros/set_mode`, `/mavros/cmd/command`, `/mavros/param/set`
