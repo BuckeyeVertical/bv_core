@@ -56,6 +56,9 @@ qtcreator-*
 # Emacs
 .#*
 
+#Agents
+.cursor
+
 # Catkin custom files
 CATKIN_IGNORE
 rf-detr-large.pth
