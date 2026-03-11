@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-from std_srvs.srv import Trigger
+from std_msgs.msg import String
 
 import cv2
 import numpy as np
@@ -11,7 +11,6 @@ import glob
 import os
 import re
 import shutil
-import threading
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -29,23 +28,39 @@ class StitchingNode(Node):
         self.declare_parameter('save_intermediate_rows', False)
         self.declare_parameter('feature_count', 5000)
         self.declare_parameter('match_confidence', 0.7)  # lowe's ratio threshold
+        self.declare_parameter('gap_width', 50)
+        self.declare_parameter('save_failed_frames', True)
+        self._has_stitched = False # stops from stitching on every return publish
 
-        # lock so only one stitch can run at a time
-        self._stitch_lock = threading.Lock()
 
-        # register the service that triggers stitching
-        self.stitch_srv = self.create_service(
-            Trigger,
-            'trigger_stitching',
-            self.handle_trigger_stitching
+        # subscribe to mission_state
+        self.subscription = self.create_subscription(
+            String,                      
+            '/mission_state',            
+            self.mission_state_callback, 
+            10                           
         )
 
         self.get_logger().info(
-            "Stitching Service Node Ready (homography pipeline). "
-            "Waiting for requests on 'trigger_stitching'..."
+            "Stitching Service Node Ready. "
+            "Waiting for return state..."
         )
 
         self._log_hardware_info()
+
+    def mission_state_callback(self, msg):
+        if msg.data == "return" and not self._has_stitched:
+            self._has_stitched = True
+            self.get_logger().info("Mission state is 'return'. Starting stitch...")
+        
+            try:
+                success, message = self._perform_stitching()
+                if success:
+                    self.get_logger().info(f"Stitching complete: {message}")
+                else:
+                    self.get_logger().error(f"Stitching failed: {message}")
+            except Exception as e:
+                self.get_logger().error(f"Unexpected error: {e}")
 
     def _log_hardware_info(self):
         try:
@@ -63,39 +78,6 @@ class StitchingNode(Node):
                 "OpenCV CUDA module not available. Using CPU."
             )
 
-    def handle_trigger_stitching(self, request, response):
-        # reject if a stitch is already running
-        if not self._stitch_lock.acquire(blocking=False):
-            response.success = False
-            response.message = (
-                "Stitching already in progress. Please wait."
-            )
-            self.get_logger().warning(response.message)
-            return response
-
-        try:
-            self.get_logger().info("Received stitching request. Processing...")
-            success, message = self._perform_stitching()
-            response.success = success
-            response.message = message
-
-            if success:
-                self.get_logger().info(f"Stitching complete: {message}")
-            else:
-                self.get_logger().error(f"Stitching failed: {message}")
-
-        except Exception as e:
-            self.get_logger().error(
-                f"Unexpected error during stitching: {e}"
-            )
-            response.success = False
-            response.message = f"Unexpected error: {str(e)}"
-
-        finally:
-            # always release the lock, even if we crashed
-            self._stitch_lock.release()
-
-        return response
 
     def _parse_row_col(self, filepath):
         # "row3_7.jpg" -> (3, 7)
@@ -322,6 +304,153 @@ class StitchingNode(Node):
 
         return result
 
+    def _concatenate_segments(self, segments):
+        # join multiple mosaic segments horizontally with red gap bars
+        gap_width = self.get_parameter('gap_width').value
+        max_h = max(seg.shape[0] for seg in segments)
+
+        # calculate total canvas width including gaps
+        total_w = (
+            sum(seg.shape[1] for seg in segments)
+            + (len(segments) - 1) * gap_width
+        )
+
+        canvas = np.zeros((max_h, total_w, 3), dtype=np.uint8)
+        x_offset = 0
+
+        for i, seg in enumerate(segments):
+            h, w = seg.shape[:2]
+            y_offset = (max_h - h) // 2  # vertically center if heights differ
+            canvas[y_offset:y_offset + h, x_offset:x_offset + w] = seg
+            x_offset += w
+
+            # draw red gap bar between segments
+            if i < len(segments) - 1:
+                canvas[:, x_offset:x_offset + gap_width] = (0, 0, 255)
+                x_offset += gap_width
+
+        return canvas
+
+    def _stitch_row_with_fallback(self, images, label=""):
+        # stitch images with skip-and-continue fallback for bad frames
+        feature_count = self.get_parameter('feature_count').value
+        match_confidence = self.get_parameter('match_confidence').value
+
+        if len(images) == 0:
+            return False, f"No images for {label}", {}
+        if len(images) == 1:
+            return True, images[0], {
+                'segments': [(0, 0)],
+                'failed_frames': [],
+                'gap_count': 0,
+            }
+
+        segments = []
+        failed_frames = []
+        current_indices = []
+        current_mosaic = None
+
+        i = 0
+        while i < len(images):
+            # start a new segment
+            if not current_indices:
+                current_indices = [i]
+                current_mosaic = images[i]
+                i += 1
+                continue
+
+            self.get_logger().info(
+                f"  {label}: Stitching image {i+1}/{len(images)}..."
+            )
+
+            # try to stitch frame i to the current mosaic
+            success, result = self._find_homography(
+                current_mosaic, images[i], feature_count, match_confidence
+            )
+
+            if success:
+                current_mosaic = self._stitch_pair(
+                    current_mosaic, images[i], result
+                )
+                current_indices.append(i)
+                self.get_logger().info(
+                    f"  {label}: Mosaic now "
+                    f"{current_mosaic.shape[1]}x{current_mosaic.shape[0]}px"
+                )
+                i += 1
+                continue
+
+            self.get_logger().warning(
+                f"  {label}: Frame {i+1} failed: {result}"
+            )
+
+            # frame i failed, try skipping to i+1
+            if i + 1 < len(images):
+                self.get_logger().info(
+                    f"  {label}: Trying frame {i+2} instead..."
+                )
+                skip_ok, skip_res = self._find_homography(
+                    current_mosaic, images[i + 1],
+                    feature_count, match_confidence
+                )
+
+                if skip_ok:
+                    # skip worked, continue from i+1
+                    current_mosaic = self._stitch_pair(
+                        current_mosaic, images[i + 1], skip_res
+                    )
+                    failed_frames.append(i)
+                    current_indices.append(i + 1)
+                    self.get_logger().info(
+                        f"  {label}: Skipped frame {i+1}, "
+                        f"continued with {i+2}. "
+                        f"Mosaic now "
+                        f"{current_mosaic.shape[1]}x"
+                        f"{current_mosaic.shape[0]}px"
+                    )
+                    i += 2
+                    continue
+
+            # both i and i+1 failed, save segment and start new one
+            segments.append((current_mosaic, list(current_indices)))
+            failed_frames.append(i)
+            self.get_logger().info(
+                f"  {label}: Segment break after frame {i}. "
+                f"Saved segment [{current_indices[0]+1}..{current_indices[-1]+1}]"
+            )
+            current_indices = []
+            current_mosaic = None
+            i += 1
+
+        # save final segment
+        if current_indices:
+            segments.append((current_mosaic, list(current_indices)))
+
+        if not segments:
+            return False, f"{label}: All frames failed to stitch", {}
+
+        metadata = {
+            'segments': [
+                (idxs[0], idxs[-1]) for _, idxs in segments
+            ],
+            'failed_frames': failed_frames,
+            'gap_count': len(segments) - 1,
+        }
+
+        # single segment means no gaps, multiple means we need to concatenate
+        if len(segments) == 1:
+            mosaic = segments[0][0]
+        else:
+            self.get_logger().info(
+                f"  {label}: Concatenating {len(segments)} segments "
+                f"with {len(segments)-1} gap(s)"
+            )
+            mosaic = self._concatenate_segments(
+                [seg for seg, _ in segments]
+            )
+
+        return True, mosaic, metadata
+
     def _stitch_sequential(self, images, label=""):
         # stitch images one at a time
         feature_count = self.get_parameter('feature_count').value
@@ -458,7 +587,7 @@ class StitchingNode(Node):
                 failed_rows.append((row_num, "No valid images loaded"))
                 continue
 
-            success, result = self._stitch_sequential(
+            success, result, metadata = self._stitch_row_with_fallback(
                 images, label=f"Row {row_num}"
             )
 
@@ -467,10 +596,27 @@ class StitchingNode(Node):
             if success:
                 result = self._crop_black_borders(result)
                 row_strips[row_num] = result
-                self.get_logger().info(
-                    f"Row {row_num}: Strip created "
-                    f"({result.shape[1]}x{result.shape[0]}px)"
-                )
+
+                if metadata['gap_count'] > 0:
+                    self.get_logger().warning(
+                        f"Row {row_num}: Strip created with "
+                        f"{metadata['gap_count']} gap(s), "
+                        f"failed frames: {metadata['failed_frames']} "
+                        f"({result.shape[1]}x{result.shape[0]}px)"
+                    )
+                else:
+                    self.get_logger().info(
+                        f"Row {row_num}: Strip created "
+                        f"({result.shape[1]}x{result.shape[0]}px)"
+                    )
+
+                if (metadata['failed_frames']
+                        and self.get_parameter('save_failed_frames').value):
+                    self._save_failed_frames(
+                        row_num,
+                        metadata['failed_frames'],
+                        work_row_groups[row_num]
+                    )
             else:
                 failed_rows.append((row_num, result))
                 self.get_logger().error(f"Row {row_num}: {result}")
@@ -568,6 +714,25 @@ class StitchingNode(Node):
             f"Mosaic created in {duration:.2f}s "
             f"({mosaic_w}x{mosaic_h}px). "
             f"Saved to: {save_path}{fail_note}"
+        )
+
+    def _save_failed_frames(self, row_num, failed_indices, row_paths):
+        # copy failed frames to a separate folder for manual inspection
+        failed_dir = os.path.join(
+            self.get_parameter('output_dir').value,
+            'failed_frames',
+            f'row_{row_num}'
+        )
+        os.makedirs(failed_dir, exist_ok=True)
+
+        for idx in failed_indices:
+            if idx < len(row_paths):
+                src = row_paths[idx]
+                dst = os.path.join(failed_dir, os.path.basename(src))
+                shutil.copy2(src, dst)
+
+        self.get_logger().info(
+            f"Saved {len(failed_indices)} failed frame(s) to {failed_dir}"
         )
 
     def _restore_files(self, file_paths, dest_dir):
