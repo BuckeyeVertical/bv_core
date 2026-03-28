@@ -71,7 +71,16 @@ echo 'export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"' >> 
 source ~/.zshrc
 ```
 
-## 7. Run
+## 7. Uninstall
+
+```bash
+brew uninstall px4-sim
+brew uninstall px4-dev
+brew untap PX4/px4
+brew untap osx-cross/arm
+```
+
+## 8. Run
 
 **Gazebo Backend:**
 
