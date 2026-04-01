@@ -367,6 +367,12 @@ More on Gazebo (gz) simulation configuration and usage:
 MAVROS launch for simulation (SITL):
 ```bash
 ros2 launch mavros px4.launch \
+	fcu_url:=udp://:14540@localhost:14580
+
+ros2 launch mavros px4.launch \
+	fcu_url:=udp://:14540@host.docker.internal:14580
+	
+ros2 launch mavros px4.launch \
 	fcu_url:=udp://:14540@localhost:14580 \
 	gcs_url:=udp://@localhost:14555
 ```

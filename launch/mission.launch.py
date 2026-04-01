@@ -48,6 +48,6 @@ def generate_launch_description():
         mission_node,
         vision_node,
         filter_node,
-        # stitching_node,
+        stitching_node,
         bv_viz_node,
     ])
