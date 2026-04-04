@@ -12,15 +12,19 @@ estimated_camera_latency: 0.5  # Seconds to pause after stopping before capturin
 num_scan_wp: 3
 
 # Detector configuration
-detector_type: "gazebo_bbox"  # Options: "ml" (RF-DETR), "gazebo_bbox" (Gazebo bounding box camera)
+detector_type: "gazebo_bbox"  # Options: "ml" (RF-DETR), "gazebo_bbox" (direct Gazebo), "socket_bbox" (host proxy)
 gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
 
 # ============================================================
 # PIPELINE CONFIGURATION
 # ============================================================
 
-# Pipeline type: 'sim', 'real', or 'ros'
+# Pipeline type: 'socket', 'sim', 'real', or 'ros'
 pipeline_type: 'sim'
+
+# Host proxy settings (used when pipeline_type: 'socket' or detector_type: 'socket_bbox')
+socket_host: '127.0.0.1'
+socket_port: 37031
 
 # Gazebo simulation settings (used when pipeline_type: 'sim')
 # Change this if drone or world changes

@@ -16,11 +16,14 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
     Args:
         pipeline_type: Type of pipeline to create. Options:
             - "ros": ROS2 CompressedImage topic subscription
+            - "socket": TCP proxy subscription from the Mac host
             - "sim" / "gazebo": Gazebo transport image subscription
             - "real" / "camera": Physical camera or GStreamer pipeline
         **config: All configuration parameters. Factory picks what it needs.
             - gz_topic: Gazebo transport topic (used by sim/gazebo)
             - ros_topic: ROS image topic (used by ros)
+            - socket_host: Hostname for the TCP proxy (used by socket)
+            - socket_port: Port for the TCP proxy (used by socket)
             - node: ROS2 node instance (used by ros, camera)
             - gst_pipeline: GStreamer pipeline string (used by real/camera)
             - queue_size: Frame buffer size (default: 5)
@@ -48,6 +51,19 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
             topic=topic,
             queue_size=queue_size,
             qos_profile=config.get("qos_profile"),
+        )
+        return pipeline, topic
+
+    elif pipeline_type == "socket":
+        from .socket_cam_pipeline import SocketCamPipeline
+
+        host = config.get("socket_host", "127.0.0.1")
+        port = int(config.get("socket_port", 37031))
+        topic = f"socket://{host}:{port}/image"
+        pipeline = SocketCamPipeline(
+            host=host,
+            port=port,
+            queue_size=queue_size,
         )
         return pipeline, topic
 
@@ -80,5 +96,5 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
     else:
         raise ValueError(
             f"Unknown pipeline type: '{pipeline_type}'. "
-            f"Valid options: 'ros', 'sim', 'gazebo', 'real', 'camera'"
+            f"Valid options: 'ros', 'socket', 'sim', 'gazebo', 'real', 'camera'"
         )

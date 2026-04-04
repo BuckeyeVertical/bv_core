@@ -1,9 +1,12 @@
 """Abstract interface for object detection backends."""
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import numpy as np
-import supervision as sv
+
+if TYPE_CHECKING:
+    import supervision as sv
 
 
 class BaseDetector(ABC):
@@ -24,7 +27,7 @@ class BaseDetector(ABC):
         pass
 
     @abstractmethod
-    def process_frame(self, frame: np.ndarray, **kwargs) -> sv.Detections:
+    def process_frame(self, frame: np.ndarray, **kwargs) -> "sv.Detections":
         """Run detection on a frame.
 
         Args:
