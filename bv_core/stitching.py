@@ -17,7 +17,8 @@ import numpy as np
 import os
 # for stitching
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached, CommandCode
-from .pipelines.gz_transport_pipeline import GzTransportPipeline
+from .pipelines import create_pipeline
+from .vision_config import load_vision_config
 
 from datetime import datetime
 
@@ -51,8 +52,11 @@ class ImageStitcherNode(Node):
         #counter for how many total pictures to take
         self.pic_counter = 0
 
-        # Match vision_node default camera topic (Gazebo gz transport bridge)
-        self.declare_parameter('image_topic', '/world/baylands/model/x500_gimbal_0/link/camera_link/sensor/camera/image')
+        vision_cfg = load_vision_config()
+        self.declare_parameter('pipeline_type', vision_cfg.get('pipeline_type', 'sim'))
+        self.declare_parameter('image_topic', vision_cfg.get('gz_topic', '/camera/bounding_boxes_image'))
+        self.declare_parameter('socket_host', vision_cfg.get('socket_host', '127.0.0.1'))
+        self.declare_parameter('socket_port', int(vision_cfg.get('socket_port', 37031)))
         # Directory where snapshots/stitched images are written
         self.declare_parameter('output_path', 'annotated_frames')
         self.declare_parameter('crop', True)
@@ -60,7 +64,10 @@ class ImageStitcherNode(Node):
         self.declare_parameter('stitch_interval_sec', 5.0)
 
         # Fetch parameters
+        pipeline_type = self.get_parameter('pipeline_type').get_parameter_value().string_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        socket_host = self.get_parameter('socket_host').get_parameter_value().string_value
+        socket_port = self.get_parameter('socket_port').get_parameter_value().integer_value
         self.output_path = self.get_parameter('output_path').get_parameter_value().string_value
         self.crop = self.get_parameter('crop').get_parameter_value().bool_value
         self.preprocessing = self.get_parameter('preprocessing').get_parameter_value().bool_value
@@ -69,16 +76,21 @@ class ImageStitcherNode(Node):
         # Ensure output directory exists
         os.makedirs(self.output_path, exist_ok=True)
 
-        # Gazebo transport pipeline (same feed as vision_node)
-        self.pipeline_topic = image_topic
-        self.pipeline = GzTransportPipeline(topic=self.pipeline_topic, queue_size=5)
+        self.pipeline, self.pipeline_topic = create_pipeline(
+            pipeline_type,
+            gz_topic=image_topic,
+            socket_host=socket_host,
+            socket_port=socket_port,
+            node=self,
+            queue_size=5,
+        )
         self.pipeline_running = False
         try:
             self.pipeline.start()
             self.pipeline_running = True
-            self.get_logger().info(f"Gazebo image pipeline started on {self.pipeline_topic}")
+            self.get_logger().info(f"Image pipeline started on {self.pipeline_topic}")
         except RuntimeError as exc:
-            self.get_logger().error(f"Failed to start Gazebo pipeline: {exc}")
+            self.get_logger().error(f"Failed to start image pipeline: {exc}")
 
         # Subscribe to the state the drone is in
         self.mission_state_sub = self.create_subscription(
@@ -100,7 +112,9 @@ class ImageStitcherNode(Node):
 
         # Helpers & buffer
         self.received_images = []
-        self.get_logger().info(f"Subscribed to {image_topic}`; stitch every {self.stitch_interval_sec}s")
+        self.get_logger().info(
+            f"Subscribed to {self.pipeline_topic}; stitch every {self.stitch_interval_sec}s"
+        )
 
     def state_callback(self, msg: String):
         try:

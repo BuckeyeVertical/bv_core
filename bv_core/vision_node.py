@@ -40,6 +40,7 @@ from collections import deque
 from .detectors import create_detector
 from .pipelines import create_pipeline
 from .localizer import Localizer
+from .vision_config import load_vision_config
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -84,14 +85,7 @@ class VisionNode(Node):
 
     def _load_config(self):
         """Load configuration from vision_params.yaml."""
-        vision_yaml = os.path.join(
-            get_package_share_directory('bv_core'),
-            'config',
-            'vision_params.yaml'
-        )
-
-        with open(vision_yaml, 'r') as f:
-            cfg = yaml.safe_load(f)
+        cfg = load_vision_config()
 
         # Detection settings
         self.batch_size = cfg.get('batch_size', 4)
@@ -118,6 +112,8 @@ class VisionNode(Node):
         self.camera_fps = cfg.get('camera_fps', 30.0)
         self.record_video = cfg.get('record_video', False)
         self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
+        self.socket_host = cfg.get('socket_host', '127.0.0.1')
+        self.socket_port = int(cfg.get('socket_port', 37031))
 
     def _init_state(self):
         """Initialize state tracking variables."""
@@ -138,6 +134,8 @@ class VisionNode(Node):
             self.pipeline_type,
             gz_topic=self.gz_topic,
             ros_topic=self.ros_image_topic,
+            socket_host=self.socket_host,
+            socket_port=self.socket_port,
             node=self,
             gst_pipeline=self.gst_pipeline_str,
             record=self.record_video,
@@ -230,6 +228,8 @@ class VisionNode(Node):
             batch_size=self.batch_size,
             resolution=self.resolution,
             gazebo_bbox_topic=self.gazebo_bbox_topic,
+            socket_host=self.socket_host,
+            socket_port=self.socket_port,
         )
         self.detector.start()
 
