@@ -40,6 +40,7 @@ from collections import deque
 from .detectors import create_detector
 from .pipelines import create_pipeline
 from .localizer import Localizer
+from .mission_logger import MissionLogger
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -73,6 +74,9 @@ class VisionNode(Node):
 
         self._load_config()
         self._init_state()
+        self.log = MissionLogger('vision')
+        self._frame_counter = 0
+        self._last_detection_time = time.monotonic()
         self._init_pipeline()
         self._init_threading()
         self._init_subscribers()
@@ -352,7 +356,9 @@ class VisionNode(Node):
         response.longitude = 0.0
         response.altitude = 0.0
         response.class_id = -1
-        
+        target_name = COCO_CLASS_NAMES[request.target_class_id] if request.target_class_id >= 0 and request.target_class_id < len(COCO_CLASS_NAMES) else 'any'
+        self.log.event('LOCALIZE_REQUEST', f"target_class={target_name}({request.target_class_id})")
+
         # Ensure pipeline is running
         if not self.pipeline_running:
             try:
@@ -360,6 +366,7 @@ class VisionNode(Node):
                 self.pipeline_running = True
             except RuntimeError as exc:
                 self.get_logger().error(f"Failed to start pipeline for localization: {exc}")
+                self.log.event('LOCALIZE_RESULT', f"success=false, reason=pipeline_start_failed")
                 return response
         
         # Capture frame
@@ -367,10 +374,12 @@ class VisionNode(Node):
             frame = self.pipeline.get_frame(timeout=1.0)
         except RuntimeError:
             self.get_logger().error("Failed to capture frame for localization")
+            self.log.event('LOCALIZE_RESULT', f"success=false, reason=no_frame")
             return response
         
         if frame is None:
             self.get_logger().error("No frame captured for localization")
+            self.log.event('LOCALIZE_RESULT', f"success=false, reason=no_frame")
             return response
         
         # Convert grayscale to BGR if needed
@@ -386,6 +395,7 @@ class VisionNode(Node):
         
         if len(detections) == 0:
             self.get_logger().warn("No detections found during localization")
+            self.log.event('LOCALIZE_RESULT', f"success=false, reason=no_detections")
             return response
         
         # Get pixel centers: (center_x, center_y, class_id)
@@ -397,6 +407,7 @@ class VisionNode(Node):
         # Check for sensor data
         if len(self.gps_buffer) == 0 or len(self.pose_buffer) == 0 or self.last_rel_alt is None:
             self.get_logger().error("Missing sensor data for localization")
+            self.log.event('LOCALIZE_RESULT', f"success=false, reason=missing_sensor_data")
             return response
         
         # Get latest drone pose
@@ -416,6 +427,10 @@ class VisionNode(Node):
         
         if not coords:
             self.get_logger().warn("Localization conversion failed")
+            self.log.event('LOCALIZE_RESULT',
+                f"success=false, reason=conversion_failed | "
+                f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
+                f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
             return response
 
         target_cls = request.target_class_id
@@ -437,6 +452,11 @@ class VisionNode(Node):
                 # Treat this as a localization failure so the mission
                 # can retry or abandon the object instead of flying to
                 # the wrong target.
+                self.log.event('LOCALIZE_RESULT',
+                    f"success=false, reason=class_not_in_frame, target={request.target_class_id}, "
+                    f"available={[int(c[2]) for c in coords]} | "
+                    f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
+                    f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
                 return response
 
         # At this point we have at least one coordinate to return
@@ -445,7 +465,12 @@ class VisionNode(Node):
         response.longitude = coords[0][1]
         response.altitude = drone_pose[2]
         response.class_id = int(coords[0][2])
-        
+        self.log.event('LOCALIZE_RESULT',
+            f"success=true, lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
+            f"alt={response.altitude:.1f}, class={COCO_CLASS_NAMES[response.class_id]}({response.class_id}) | "
+            f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
+            f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
+
         return response
 
     
@@ -458,6 +483,7 @@ class VisionNode(Node):
             try:
                 self.pipeline.start()
                 self.pipeline_running = True
+                self.log.event('PIPELINE_START', f"type={self.pipeline_type}, trigger={self.state}")
             except RuntimeError as exc:
                 self.get_logger().error(f"Failed to start vision pipeline: {exc}")
                 self.state = self.prev_state
@@ -472,6 +498,7 @@ class VisionNode(Node):
         if self.pipeline_running:
             self.pipeline.stop()
             self.pipeline_running = False
+            self.log.event('PIPELINE_STOP', f"trigger={self.state}")
 
         # Flush any blocking queue.get() calls
         self.queue.put(None)
@@ -592,6 +619,41 @@ class VisionNode(Node):
             overlap=self.overlap
         )
 
+        # Log to mission logger
+        if len(detections) > 0:
+            self._frame_counter += 1
+            self._last_detection_time = time.monotonic()
+            drone_pos = (0.0, 0.0)
+            if len(self.gps_buffer) > 0:
+                g = self.gps_buffer[-1]
+                drone_pos = (g.latitude, g.longitude)
+            det_list = []
+            for (x1, y1, x2, y2), score, cls in zip(
+                detections.xyxy, detections.confidence, detections.class_id
+            ):
+                det_list.append({
+                    'class_name': COCO_CLASS_NAMES[int(cls)],
+                    'class_id': int(cls),
+                    'confidence': float(score),
+                    'px': ((x1 + x2) / 2.0, (y1 + y2) / 2.0),
+                    'latlon': (0.0, 0.0),  # geolocation done by filtering_node
+                })
+            filtered = {}
+            for i, det in enumerate(det_list):
+                if det['confidence'] <= self.det_thresh:
+                    filtered[i] = f"[BELOW_THRESH conf={det['confidence']:.2f} thresh={self.det_thresh:.2f}]"
+            self.log.detection_frame(self._frame_counter, drone_pos, 0.0, det_list, filtered)
+        else:
+            # Heartbeat when no detections during scan
+            if self.state == 'scan':
+                alt = self.last_rel_alt.data if self.last_rel_alt is not None else 0.0
+                drone_pos = (0.0, 0.0)
+                if len(self.gps_buffer) > 0:
+                    g = self.gps_buffer[-1]
+                    drone_pos = (g.latitude, g.longitude)
+                elapsed = time.monotonic() - self._last_detection_time
+                self.log.scan_heartbeat(drone_pos, 0.0, alt, elapsed)
+
         # Annotate frame using supervision
         labels = [
             f"{COCO_CLASS_NAMES[int(class_id)]} {confidence:.2f}"
@@ -640,6 +702,7 @@ class VisionNode(Node):
         self.detector.stop()
         self.queue.put(None)  # Unblock worker thread
 
+        self.log.close()
         return super().destroy_node()
 
 
