@@ -40,6 +40,9 @@ from ament_index_python.packages import get_package_share_directory
 
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
+from .mission_logger import MissionLogger
+from rfdetr.util.coco_classes import COCO_CLASSES
+COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
@@ -76,7 +79,8 @@ class MissionRunner(Node):
         
         # Load configuration from YAML
         self.load_config_from_yaml()
-        
+        self.log = MissionLogger('mission')
+
         # Initialize state variables
         self.init_state_variables()
         
@@ -94,7 +98,15 @@ class MissionRunner(Node):
         self.get_logger().info("MISSION STARTING")
         self.get_logger().info(f"Objects to find: {self.num_objects_to_find}")
         self.get_logger().info("=" * 50)
-        
+        self.log.event('STARTUP',
+            f"num_objects={self.num_objects_to_find}, "
+            f"scan_wps={len(self.scan_waypoints)}, "
+            f"lap_wps={len(self.lap_waypoints)}, "
+            f"scan_vel={self.scan_velocity}m/s, "
+            f"deliver_vel={self.deliver_velocity}m/s, "
+            f"scan_tol={self.scan_tolerance}m, "
+            f"deliver_tol={self.deliver_tolerance}m")
+
         self.enter_takeoff_state()
         
         # Start main timer loop
@@ -331,6 +343,8 @@ class MissionRunner(Node):
         elif self.current_state == STATE_SCAN:
             # Scan waypoints finished - proceed to RTL
             self.get_logger().info("Scan complete")
+            self.log.event('SCAN_COMPLETE',
+                f"objects_delivered={self.objects_delivered_count}/{self.num_objects_to_find}, action=rtl")
             self.enter_rtl_state()
             
         elif self.current_state == STATE_LOCALIZE:
@@ -372,7 +386,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: TAKEOFF")
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', 'takeoff')
+
         # Use first lap point as takeoff destination
         if not self.lap_waypoints:
             self.get_logger().error("No lap waypoints defined!")
@@ -401,7 +416,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: LAP")
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', 'takeoff -> lap')
+
         self.active_waypoint_list = self.build_waypoint_list(
             self.lap_waypoints,
             self.lap_tolerance,
@@ -431,7 +447,8 @@ class MissionRunner(Node):
             f"Resuming from waypoint index: {self.scan_waypoint_index_on_detection}"
         )
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', f"-> scan (resume from wp {self.scan_waypoint_index_on_detection})")
+
         # Get remaining scan waypoints from where we left off
         remaining_scan_points = self.scan_waypoints[self.scan_waypoint_index_on_detection:]
 
@@ -473,7 +490,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: LOCALIZE")
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', 'scan -> localize')
+
         # Publish state so vision node knows to keep pipeline running
         self.publish_mission_state()
         
@@ -501,7 +519,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: DELIVER")
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', 'localize -> deliver')
+
         if self.current_target_coords is None:
             self.get_logger().error("No target coordinates available!")
             self.enter_rtl_state()
@@ -509,7 +528,10 @@ class MissionRunner(Node):
         
         lat, lon, alt = self.current_target_coords
         self.get_logger().info(f"Flying to target: lat={lat:.6f}, lon={lon:.6f}")
-        
+        cls_name = COCO_CLASS_NAMES[self.current_target_class_id] if self.current_target_class_id is not None and self.current_target_class_id < len(COCO_CLASS_NAMES) else 'unknown'
+        self.log.event('DELIVER_TARGET',
+            f"lat={lat:.6f}, lon={lon:.6f}, class={cls_name}({self.current_target_class_id})")
+
         self.active_waypoint_list = self.build_waypoint_list(
             [self.current_target_coords],
             self.deliver_tolerance
@@ -532,7 +554,8 @@ class MissionRunner(Node):
             f"Deploying payload {self.objects_delivered_count + 1}/{self.num_objects_to_find}"
         )
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', 'deliver -> deploy')
+
         # Initialize servo state machine
         self.deploy_servo_state = 0
         self.deploy_state_start_time = time.monotonic()
@@ -551,7 +574,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: RTL")
         self.get_logger().info("-" * 40)
-        
+        self.log.event('STATE_CHANGE', '-> rtl')
+
         self.set_flight_mode("AUTO.RTL")
 
     # Mavros utilities
@@ -719,16 +743,19 @@ class MissionRunner(Node):
             # Extend
             self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {initial_pwm} (extend)")
             self.set_servo_pwm(servo_channel, initial_pwm)
-            
+            self.log.event('DEPLOY_SERVO', f"step=extend, ch={servo_channel}, pwm={initial_pwm}")
+
         elif self.deploy_servo_state == 1:
             # Retract
             self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {second_pwm} (retract)")
             self.set_servo_pwm(servo_channel, second_pwm)
-            
+            self.log.event('DEPLOY_SERVO', f"step=retract, ch={servo_channel}, pwm={second_pwm}")
+
         elif self.deploy_servo_state == 2:
             # Return to idle
             self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {default_pwm} (idle)")
             self.set_servo_pwm(servo_channel, default_pwm)
+            self.log.event('DEPLOY_SERVO', f"step=idle, ch={servo_channel}, pwm={default_pwm}")
 
     def on_deploy_complete(self):
         """Called when the servo deploy sequence finishes."""
@@ -739,6 +766,19 @@ class MissionRunner(Node):
             deployed_msg.longitude = float(lon)
             deployed_msg.class_id = int(self.current_target_class_id) if self.current_target_class_id is not None else -1
             self.deployed_object_pub.publish(deployed_msg)
+            cls_name = COCO_CLASS_NAMES[int(deployed_msg.class_id)] if deployed_msg.class_id >= 0 and deployed_msg.class_id < len(COCO_CLASS_NAMES) else 'unknown'
+            actual_pos = (self.current_lat, self.current_lon) if self.current_lat is not None else (lat, lon)
+            self.log.deploy_complete(
+                class_id=deployed_msg.class_id,
+                class_name=cls_name,
+                target_pos=(lat, lon),
+                actual_pos=actual_pos,
+                delivered_count=self.objects_delivered_count + 1,
+                total=self.num_objects_to_find
+            )
+            self.log.event('DEPLOYED_LOCATION',
+                f"lat={lat:.6f}, lon={lon:.6f}, class={cls_name}({deployed_msg.class_id}), "
+                f"ignore_radius=0.0001deg")
             self.get_logger().info(
                 f"Published deployed object location: lat={lat:.6f}, lon={lon:.6f}, "
                 f"class_id={deployed_msg.class_id}"
@@ -772,6 +812,8 @@ class MissionRunner(Node):
             self.get_logger().info(
                 f"Resuming scan from waypoint {self.scan_waypoint_index_on_detection}"
             )
+            self.log.event('SCAN_RESUME',
+                f"from_wp={self.scan_waypoint_index_on_detection}/{len(self.scan_waypoints)}")
             self.enter_scan_state()
 
     # Callbacks - service responses
@@ -870,6 +912,9 @@ class MissionRunner(Node):
                 self.get_logger().warn(
                     "Localization failed 5 times - abandoning this object and resuming scan"
                 )
+                cls_name = COCO_CLASS_NAMES[self.confirmed_detection_class_id] if self.confirmed_detection_class_id >= 0 and self.confirmed_detection_class_id < len(COCO_CLASS_NAMES) else 'unknown'
+                self.log.event('LOCALIZE_ABANDONED',
+                    f"class={cls_name}({self.confirmed_detection_class_id}), attempts=5, resuming_scan")
                 # Stop any pending retry timer
                 if self._localize_retry_timer is not None:
                     self._localize_retry_timer.cancel()
@@ -922,6 +967,8 @@ class MissionRunner(Node):
             self.home_lat = msg.latitude
             self.home_lon = msg.longitude
             self.home_alt = msg.altitude
+            self.log.event('HOME_SET',
+                f"lat={self.home_lat:.6f}, lon={self.home_lon:.6f}, alt={self.home_alt:.2f}")
 
     def on_waypoint_reached(self, msg):
         """Callback when a waypoint is reached."""
@@ -952,7 +999,10 @@ class MissionRunner(Node):
         self.get_logger().info(
             f"Reached waypoint {waypoint_index} (state={self.current_state})"
         )
-        
+        is_final = (waypoint_index == self.expected_final_waypoint_index)
+        self.log.event('WP_REACHED',
+            f"wp={waypoint_index}, state={self.current_state}, final={is_final}")
+
         # Check if this was the final waypoint
         if waypoint_index == self.expected_final_waypoint_index:
             self.handle_state_completion()
@@ -990,7 +1040,10 @@ class MissionRunner(Node):
         
         # Store which class was confirmed so we can tell the localizer
         self.confirmed_detection_class_id = int(msg.data)
-        
+        cls_name = COCO_CLASS_NAMES[int(msg.data)] if int(msg.data) < len(COCO_CLASS_NAMES) else 'unknown'
+        self.log.event('OBJECT_DETECTED',
+            f"class={cls_name}({msg.data}), delivered_so_far={self.objects_delivered_count}/{self.num_objects_to_find}")
+
         # Mark as transitioning to prevent duplicate triggers
         self.is_transitioning = True
         
@@ -1001,6 +1054,9 @@ class MissionRunner(Node):
         if self.current_lat is not None and self.current_lon is not None:
             scan_alt = self.scan_waypoints[0][2]  # Use scan altitude
             self.loiter_resume_coords = (self.current_lat, self.current_lon, scan_alt)
+            self.log.event('LOITER_SAVED',
+                f"lat={self.current_lat:.6f}, lon={self.current_lon:.6f}, "
+                f"scan_wp_progress={self.last_reached_scan_waypoint}/{len(self.scan_waypoints)}")
             self.get_logger().info(
                 f"Saved loiter position: lat={self.current_lat:.6f}, lon={self.current_lon:.6f}"
             )
@@ -1059,6 +1115,7 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info("Mission interrupted by user")
     finally:
+        node.log.close()
         node.destroy_node()
         rclpy.shutdown()
 

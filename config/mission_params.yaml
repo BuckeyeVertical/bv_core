@@ -87,3 +87,7 @@ Deliver_tolerance: 1.0  # Tight - need accurate drop position
 Default_servo_pwms: [1500, 1500, 1500, 1500]    # Neutral position
 Deliver_initial_pwms: [1600, 1600, 1600, 1600]  # Release position
 Deliver_second_pwms: [1400, 1400, 1400, 1400]   # Retract position
+
+# MISSION LOGGING
+# Set to true to write detailed mission logs to bv_core/logs/
+enable_mission_log: true
