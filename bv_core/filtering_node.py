@@ -24,6 +24,7 @@ import time
 from collections import deque
 from rclpy.time import Time
 import math
+from .mission_logger import MissionLogger
 
 class FilteringNode(Node):
     def __init__(self):
@@ -121,6 +122,8 @@ class FilteringNode(Node):
 
         self.last_rel_alt = None
         self._last_window_print_time = 0.0
+        self.log = MissionLogger('filtering')
+        self.proximity_threshold_deg = 0.00005  # ~5.5m, used in _check_3frame_confirmation
 
     def handle_gps(self, msg: NavSatFix):
         self.gps_buffer.append(msg)
@@ -188,7 +191,7 @@ class FilteringNode(Node):
         filtered_detections = [
             (lat, lon, cls)
             for lat, lon, cls in detections_global
-            if not self._is_near_deployed_location(lat, lon)
+            if not self._is_near_deployed_location(lat, lon, cls)
         ]
         ignored_count = len(detections_global) - len(filtered_detections)
         # if ignored_count > 0:
@@ -216,6 +219,28 @@ class FilteringNode(Node):
             for i, frame_dets in enumerate(self.frame_history):
                 class_names = set(COCO_CLASS_NAMES[int(cls)] for _, _, cls in frame_dets)
                 self.get_logger().info(f"Frame {i}: {class_names}")
+
+        # Log frame window with distances for tuning
+        window_data = {}
+        for cls_id in set(int(c) for frame in self.frame_history for _, _, c in frame):
+            cls_name = COCO_CLASS_NAMES[cls_id]
+            positions = []
+            for frame_dets in self.frame_history:
+                for lat, lon, c in frame_dets:
+                    if int(c) == cls_id:
+                        positions.append((lat, lon))
+                        break
+            dists = []
+            for j in range(len(positions) - 1):
+                d_deg = math.sqrt((positions[j+1][0] - positions[j][0])**2 +
+                                  (positions[j+1][1] - positions[j][1])**2)
+                d_m = d_deg * 111320.0
+                dists.append(d_m)
+            window_data[cls_name] = {
+                'dists': dists,
+                'thresh': self.proximity_threshold_deg * 111320.0,
+            }
+        self.log.frame_window(len(self.frame_history), 3, window_data)
 
         # Check for consistent detection across 3 frames
         confirmed_class = self._check_3frame_confirmation()
@@ -257,7 +282,7 @@ class FilteringNode(Node):
             return None
         
         # For each common class, check spatial proximity
-        PROXIMITY_THRESHOLD_DEG =  0.00005  #5.5 meters maybe can tighten
+        PROXIMITY_THRESHOLD_DEG = self.proximity_threshold_deg
         
         for cls in common_classes:
             # Get positions for this class in each frame
@@ -267,34 +292,53 @@ class FilteringNode(Node):
                     if int(c) == cls:
                         positions.append((lat, lon))
                         break  # Take first detection of this class per frame
-            
+
             if len(positions) < 3:
                 continue
-            
+
             # Check if CONSECUTIVE positions are within proximity
-            # Only compare consecutive frames (0->1, 1->2) not all pairs
-            # This avoids cumulative drift from failing the check
             all_close = True
+            dists_m = []
             for i in range(len(positions) - 1):
                 lat1, lon1 = positions[i]
                 lat2, lon2 = positions[i + 1]
                 dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+                dists_m.append(dist * 111320.0)
                 if dist > PROXIMITY_THRESHOLD_DEG:
                     all_close = False
                     break
-            
+
+            cls_name = COCO_CLASS_NAMES[int(cls)]
+            thresh_m = PROXIMITY_THRESHOLD_DEG * 111320.0
             if all_close:
+                self.log.event('CONFIRMED',
+                    f"class={cls_name}({cls}), "
+                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
+                    f"thresh={thresh_m:.1f}m")
                 return cls
-        
+            else:
+                self.log.event('REJECTED',
+                    f"class={cls_name}({cls}), "
+                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
+                    f"thresh={thresh_m:.1f}m, reason=proximity_fail")
+
         return None
 
     def deployed_location_callback(self, msg: ObjectLocations):
         self.deployed_locations.append((msg.latitude, msg.longitude, msg.class_id))
 
-    def _is_near_deployed_location(self, lat: float, lon: float) -> bool:
+    def _is_near_deployed_location(self, lat: float, lon: float, cls_id: int = -1) -> bool:
         for deployed_lat, deployed_lon, _ in self.deployed_locations:
             distance = math.sqrt((lat - deployed_lat) ** 2 + (lon - deployed_lon) ** 2)
             if distance <= self.deployed_ignore_radius_deg:
+                dist_m = distance * 111320.0
+                thresh_m = self.deployed_ignore_radius_deg * 111320.0
+                cls_name = COCO_CLASS_NAMES[int(cls_id)] if cls_id >= 0 and cls_id < len(COCO_CLASS_NAMES) else 'unknown'
+                self.log.event('DEPLOYED_IGNORE',
+                    f"class={cls_name}({cls_id}), "
+                    f"det_pos=({lat:.6f},{lon:.6f}), "
+                    f"deployed_pos=({deployed_lat:.6f},{deployed_lon:.6f}), "
+                    f"dist={dist_m:.1f}m, thresh={thresh_m:.1f}m")
                 return True
         return False
 
