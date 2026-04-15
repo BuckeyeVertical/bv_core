@@ -16,6 +16,7 @@ import time
 import traceback
 import numpy as np
 import yaml
+import cv2
 
 # ROS2
 import rclpy
@@ -81,6 +82,10 @@ class VisionNode(Node):
         self._init_localizer()
         self._init_services()
         self._start_worker_threads()
+        #index to keep track for image naming convention
+        self.curr_wp = 0
+        self.frame_number = 1
+        os.makedirs("raw_frames", exist_ok=True)
 
     def _load_config(self):
         """Load configuration from vision_params.yaml."""
@@ -311,6 +316,8 @@ class VisionNode(Node):
         
         Sets latest_wp to trigger frame capture in the fetch loop.
         """
+        self.curr_wp = self.curr_wp + 1
+        self.frame_number = 1
         if self.last_wp is not None and msg.wp_seq != self.last_wp:
             self.latest_wp = msg.wp_seq
 
@@ -586,6 +593,10 @@ class VisionNode(Node):
             threshold=self.det_thresh,
             overlap=self.overlap
         )
+        
+        if (self.curr_wp % 2 == 0):
+            cv2.imwrite(f"raw_frames/row_{self.curr_wp // 2 + 1}_{self.frame_number}.jpg", frame)
+            self.frame_number = self.frame_number + 1
 
         # Annotate frame using supervision
         labels = [
