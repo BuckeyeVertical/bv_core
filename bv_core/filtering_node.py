@@ -10,15 +10,6 @@ from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import PoseStamped
 import numpy as np
-from rfdetr.util.coco_classes import COCO_CLASSES
-
-# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
-
-# Only two target classes for the competition: one mannequin, one tent
-MANNEQUIN_CLASS_ID = COCO_CLASS_NAMES.index('person')
-TENT_CLASS_ID = COCO_CLASS_NAMES.index('umbrella')  # closest COCO class to tent
-TARGET_CLASS_IDS = {MANNEQUIN_CLASS_ID, TENT_CLASS_ID}
 
 from sensor_msgs.msg import NavSatFix
 
@@ -29,6 +20,9 @@ import os
 from collections import deque
 from rclpy.time import Time
 import math
+
+CLASS_NAMES = ("person", "tent")
+
 
 class FilteringNode(Node):
     def __init__(self):
@@ -92,10 +86,10 @@ class FilteringNode(Node):
         self.state = None
         
         # === target tracking ===
-        # One entry per competition target: mannequin and tent
+        # One entry per competition target: person and tent
         self.targets = {
-            MANNEQUIN_CLASS_ID: {"state": "undetected", "lat": None, "lon": None},
-            TENT_CLASS_ID:      {"state": "undetected", "lat": None, "lon": None},
+            class_id: {"state": "undetected", "lat": None, "lon": None}
+            for class_id in range(len(CLASS_NAMES))
         }
         
         # === 3-frame confirmation tracking ===
@@ -306,7 +300,11 @@ class FilteringNode(Node):
                 with open('finalized_object_locations.txt', 'w') as f:
                         for cls, info in self.targets.items():
                             if info["state"] == "deployed":
-                                class_name = COCO_CLASS_NAMES[int(cls)] if int(cls) >= 0 else "unknown"
+                                class_name = (
+                                    CLASS_NAMES[int(cls)]
+                                    if 0 <= int(cls) < len(CLASS_NAMES)
+                                    else "unknown"
+                                )
                                 f.write(f"{info['lat']:.6f},{info['lon']:.6f},{class_name}\n")
 
         self.prev_state = msg.data

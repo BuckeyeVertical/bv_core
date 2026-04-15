@@ -45,12 +45,9 @@ from .localizer import Localizer
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
 
-# Detection utilities
-from rfdetr.util.coco_classes import COCO_CLASSES
 import supervision as sv
 
-# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
+CLASS_NAMES = ("person", "tent")
 
 
 # Vision Node
@@ -427,7 +424,12 @@ class VisionNode(Node):
 
         target_cls = request.target_class_id
         if target_cls >= 0:
-            self.get_logger().info(f"Localizing object: {COCO_CLASS_NAMES[target_cls]}")
+            target_name = (
+                CLASS_NAMES[target_cls]
+                if target_cls < len(CLASS_NAMES)
+                else "unknown"
+            )
+            self.get_logger().info(f"Localizing object: {target_name}")
         else:
             self.get_logger().info("Localizing: any detected object")
 
@@ -600,7 +602,8 @@ class VisionNode(Node):
 
         # Annotate frame using supervision
         labels = [
-            f"{COCO_CLASS_NAMES[int(class_id)]} {confidence:.2f}"
+            f"{CLASS_NAMES[int(class_id)] if 0 <= int(class_id) < len(CLASS_NAMES) else 'unknown'} "
+            f"{confidence:.2f}"
             for class_id, confidence
             in zip(detections.class_id, detections.confidence)
         ]
