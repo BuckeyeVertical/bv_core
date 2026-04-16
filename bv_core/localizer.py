@@ -13,11 +13,6 @@ import rclpy.logging
 from ament_index_python.packages import get_package_share_directory
 from collections import defaultdict, Counter
 
-from rfdetr.util.coco_classes import COCO_CLASSES
-
-# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
-
 
 class Localizer:
     def __init__(self,

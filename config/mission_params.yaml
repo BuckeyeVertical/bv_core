@@ -9,7 +9,7 @@
 # MISSION CONFIGURATION
 
 # Number of objects to detect and deliver payloads to
-num_objects: 4
+num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
 takeoff_alt: &TAKEOFF 16.2
