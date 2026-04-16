@@ -6,7 +6,7 @@ End-to-end autonomy stack for BV missions: mission control, vision-based detecti
 
 This package orchestrates an autonomous mission with PX4:
 - Mission node pushes waypoints, arms, and switches to AUTO.MISSION.
-- Vision node captures frames during scan legs, runs RF-DETR, and publishes detections.
+- Vision node captures frames during scan legs, runs LTDETR, and publishes detections.
 - Filtering node fuses detections with pose/GPS to estimate object lat/lon and serves them to Mission.
 - Stitching node captures images at waypoints to build an aerial map.
 
@@ -20,9 +20,9 @@ bv_ws
 ├── build
 ├── install
 ├── log
+├── ltdetr.pt
 ├── logs
 ├── PX4-Autopilot
-├── rf-detr-base.pth
 └── src
     ├── bv_core
     └── bv_msgs
@@ -36,7 +36,7 @@ bv_ws
 ├── build
 ├── install
 ├── log
-├── rf-detr-base.pth
+├── ltdetr.pt
 └── src
     ├── bv_core
     ├── bv_msgs
@@ -63,7 +63,7 @@ High-level services (“microservices”) and data flow:
 	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
 	- Subscribes: `/mission_state` (String), `/mavros/mission/reached` (WaypointReached), `/mavros/global_position/global` (NavSatFix), `/mavros/local_position/pose` (PoseStamped), `/mavros/global_position/rel_alt` (Float64)
 	- Provides: `localize_object` (bv_msgs/srv/LocalizeObject) — captures a frame, runs detection, returns lat/lon and class for the requested object
-	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs RF-DETR in batches, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
+	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs LTDETR when `detector_type: "ml"` is selected, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
 
 - **filtering_node** (bv_core.filtering_node.FilteringNode)
 	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after 3-frame consistency, excluding areas near already-deployed locations
@@ -163,7 +163,7 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [ROS 2 Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
 - [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html) use --no-nuttx when running the script
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
-- Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
+- Python 3.10+ with LightlyTrain support; CUDA-capable GPU recommended for LTDETR.
 
 Make sure you have followed the instructions in the linked pre-req websites
 Clone PX4 in bv_ws
@@ -228,6 +228,15 @@ source /opt/ros/humble/setup.bash
 colcon build
 source install/local_setup.bash
 ```
+
+Configuration files:
+- `config/mission_params.yaml`
+	- Waypoint lists: `points` (lap), `scan_points`, `stitch_points`, `deliver_points`
+	- Velocities/tolerances: `Lap_velocity`, `Scan_velocity`, `Stitch_velocity`, `*_tolerance`
+- `config/vision_params.yaml`
+	- `detection_threshold`, `capture_interval`, `num_scan_wp`, `detector_type`, `ml_model_path`
+- `config/filtering_params.yaml`
+	- `c_matrix` (intrinsics 3x3), `dist_coefficients` (k1…k5), `camera_orientation` (mount euler xyz in radians)
 
 Test PX4
 Add the following to your .bashrc as needed
@@ -371,7 +380,7 @@ ros2 launch mavros px4.launch \
 
 ros2 launch mavros px4.launch \
 	fcu_url:=udp://:14540@host.docker.internal:14580
-	
+
 ros2 launch mavros px4.launch \
 	fcu_url:=udp://:14540@localhost:14580 \
 	gcs_url:=udp://@localhost:14555
@@ -656,7 +665,7 @@ ros2 bag record -o bag_recording_1 \
 
 - No detections published
 	- Verify `/image_raw` is publishing.
-	- Ensure GPU/CUDA available for RF-DETR; adjust `batch_size`/`resolution` to fit memory.
+	- Ensure the configured `ml_model_path` exists and `lightly-train` is installed when using `detector_type: "ml"`.
 
 - Object locations empty
 	- Locations are finalized after leaving `scan` state; confirm `/mission_state` transitions.

@@ -71,11 +71,6 @@ RUN apt-get update && \
     apt-get install -y ros-${ROS_DISTRO}-foxglove-bridge && \
     rm -rf /var/lib/apt/lists/*
 
-
-WORKDIR /
-RUN git clone https://github.com/BuckeyeVertical/rf-detr.git && \
-    pip install --no-cache-dir -e /rf-detr
-
 WORKDIR /bv_ws
 
 # Entrypoint & env

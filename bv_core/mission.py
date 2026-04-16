@@ -47,6 +47,7 @@ COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
 DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
+CLASS_NAMES = ("person", "tent")
 
 
 # State constants
@@ -259,7 +260,7 @@ class MissionRunner(Node):
         )
         
         # Object detection trigger from filtering_node (confirmed 3-frame detection)
-        # Int8 carries the confirmed COCO class_id
+        # Int8 carries the confirmed semantic class_id.
         self.object_detected_sub = self.create_subscription(
             Int8,
             '/global_obj_dets',
@@ -1035,7 +1036,7 @@ class MissionRunner(Node):
     def on_object_detected(self, msg: Int8):
         """
         Callback when filtering_node confirms object detection (3 frames).
-        msg.data contains the confirmed COCO class_id.
+        msg.data contains the confirmed semantic class_id.
         Stops the drone, waits for stabilization, then transitions to localization.
         """
         if msg.data < 0:
@@ -1046,10 +1047,17 @@ class MissionRunner(Node):
         
         if self.is_transitioning:
             return  # Already handling a transition
+
+        target_name = (
+            CLASS_NAMES[int(msg.data)]
+            if 0 <= int(msg.data) < len(CLASS_NAMES)
+            else "unknown"
+        )
         
         self.get_logger().info(
             f"OBJECT CONFIRMED! (#{self.objects_delivered_count + 1}) "
-            "- 3-frame detection confirmed. Stopping to localize..."
+            f"- 3-frame detection confirmed. "
+            f"Target={target_name}({int(msg.data)}). Stopping to localize..."
         )
         
         # Store which class was confirmed so we can tell the localizer
