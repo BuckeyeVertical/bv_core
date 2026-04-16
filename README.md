@@ -6,7 +6,7 @@ End-to-end autonomy stack for BV missions: mission control, vision-based detecti
 
 This package orchestrates an autonomous mission with PX4:
 - Mission node pushes waypoints, arms, and switches to AUTO.MISSION.
-- Vision node captures frames during scan legs, runs RF-DETR, and publishes detections.
+- Vision node captures frames during scan legs, runs LTDETR, and publishes detections.
 - Filtering node fuses detections with pose/GPS to estimate object lat/lon and serves them to Mission.
 - Stitching node captures images at waypoints to build an aerial map.
 
@@ -21,7 +21,7 @@ bv_ws
 ├── build
 ├── install
 ├── log
-├── rf-detr-base.pth
+├── ltdetr.pt
 └── src
     ├── bv_core
     └── bv_msgs
@@ -35,7 +35,7 @@ bv_ws
 ├── build
 ├── install
 ├── log
-├── rf-detr-base.pth
+├── ltdetr.pt
 └── src
     ├── bv_core
     ├── bv_msgs
@@ -61,7 +61,7 @@ High-level services (“microservices”) and data flow:
 - vision_node (bv_core.vision_node.VisionNode)
 	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
 	- Subscribes: `/image_raw` (sensor_msgs/Image), `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
-	- Role: On scan state, enqueue frames at each reach event, infer with RF-DETR in batches, annotate/save frames, publish detections.
+	- Role: On scan state, enqueue frames at each reach event, infer with LTDETR, annotate/save frames, publish detections.
 
 - filtering_node (bv_core.filtering_node.FilteringNode)
 	- Provides: `get_object_locations` (bv_msgs/srv/GetObjectLocations)
@@ -151,17 +151,11 @@ Prerequisites (Ubuntu 22.04 LTS recommended; typical dev machine or Jetson):
 - [GeographicLib](https://geographiclib.sourceforge.io/C++/doc/index.html)
 - [PX4_Autopilot](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
 - download Render_CAD.stl into meshes/ folder [Render_CAD.STL](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/clute_25_buckeyemail_osu_edu/EcOCPRC-NQFAmV3IplgyZxwBzP3rijvungflwU5AE4Jchw?e=PTFW1S)
-- Python 3.10+ with CUDA-capable GPU recommended for RF-DETR.
+- Python 3.10+ with LightlyTrain support; CUDA-capable GPU recommended for LTDETR.
 
 Install python deps (setup a venv... I recommend uv):
 ```bash
 pip install -r requirements.txt
-```
-In the root of your ROS workspace (~/bv_ws) run:
-```bash
-git clone https://github.com/BuckeyeVertical/rf-detr.git
-cd rf-detr
-pip install -e .
 ```
 
 Install mavros:
@@ -197,7 +191,7 @@ Configuration files:
 	- Waypoint lists: `points` (lap), `scan_points`, `stitch_points`, `deliver_points`
 	- Velocities/tolerances: `Lap_velocity`, `Scan_velocity`, `Stitch_velocity`, `*_tolerance`
 - `config/vision_params.yaml`
-	- `batch_size`, `detection_threshold`, `resolution`, `overlap`, `capture_interval`, `num_scan_wp`
+	- `detection_threshold`, `capture_interval`, `num_scan_wp`, `detector_type`, `ml_model_path`
 - `config/filtering_params.yaml`
 	- `c_matrix` (intrinsics 3x3), `dist_coefficients` (k1…k5), `camera_orientation` (mount euler xyz in radians)
 
@@ -580,7 +574,7 @@ ros2 bag record -o bag_recording_1 \
 
 - No detections published
 	- Verify `/image_raw` is publishing.
-	- Ensure GPU/CUDA available for RF-DETR; adjust `batch_size`/`resolution` to fit memory.
+	- Ensure the configured `ml_model_path` exists and `lightly-train` is installed when using `detector_type: "ml"`.
 
 - Object locations empty
 	- Locations are finalized after leaving `scan` state; confirm `/mission_state` transitions.

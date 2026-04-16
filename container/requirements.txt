@@ -1,5 +1,6 @@
 supervision
-git+https://github.com/BuckeyeVertical/rf-detr.git#egg=rfdetr
+lightly-train
+Pillow
 empy==3.3.4
 pyros-genmsg 
 setuptools==65.5.1

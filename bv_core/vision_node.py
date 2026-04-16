@@ -96,15 +96,16 @@ class VisionNode(Node):
             cfg = yaml.safe_load(f)
 
         # Detection settings
-        self.batch_size = cfg.get('batch_size', 4)
         self.det_thresh = cfg.get('detection_threshold', 0.5)
-        self.resolution = cfg.get('resolution', 560)
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
-        self.overlap = cfg.get('overlap', 100)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
         # Detector configuration
         self.detector_type = cfg.get('detector_type', 'ml')
+        self.ml_model_path = cfg.get(
+            'ml_model_path',
+            '/Users/allenthomas/Code/Personal/inference/ltdetr.pt'
+        )
         self.gazebo_bbox_topic = cfg.get('gazebo_bbox_topic', '/camera/bounding_boxes')
 
         # Pipeline configuration
@@ -229,8 +230,7 @@ class VisionNode(Node):
         """Initialize the object detector based on config."""
         self.detector = create_detector(
             detector_type=self.detector_type,
-            batch_size=self.batch_size,
-            resolution=self.resolution,
+            ml_model_path=self.ml_model_path,
             gazebo_bbox_topic=self.gazebo_bbox_topic,
         )
         self.detector.start()
@@ -385,7 +385,6 @@ class VisionNode(Node):
         detections = self.detector.process_frame(
             frame=frame,
             threshold=self.det_thresh,
-            overlap=self.overlap
         )
         
         if len(detections) == 0:
@@ -596,7 +595,6 @@ class VisionNode(Node):
         detections = self.detector.process_frame(
             frame=frame,
             threshold=self.det_thresh,
-            overlap=self.overlap
         )
         
         if (self.curr_wp % 2 == 0):
