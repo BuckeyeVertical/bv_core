@@ -1,12 +1,21 @@
+# Active ML backend
 supervision
 lightly-train
 protobuf>=3.19.6,<4
 Pillow
+pydantic
+pycocotools
+peft
+
 empy==3.3.4
-pyros-genmsg 
+pyros-genmsg
 setuptools==65.5.1
 catkin_pkg
 lark
 colcon-common-extensions
-geographiclib
+
 numpy<2,>=1.23
+
+scikit-learn
+opencv-python
+geographiclib
