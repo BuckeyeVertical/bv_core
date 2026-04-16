@@ -445,16 +445,20 @@ class VisionNode(Node):
             if matched:
                 coords = matched
             else:
+                available_class_names = [
+                    COCO_CLASS_NAMES[int(c[2])] if 0 <= int(c[2]) < len(COCO_CLASS_NAMES) else f"class_{int(c[2])}"
+                    for c in coords
+                ]
                 self.get_logger().warn(
-                    f"Requested class {target_cls} not found in frame, "
-                    f"available: {[int(c[2]) for c in coords]}"
+                    f"Requested object '{target_name}' not found in frame; "
+                    f"detected: {available_class_names}"
                 )
                 # Treat this as a localization failure so the mission
                 # can retry or abandon the object instead of flying to
                 # the wrong target.
                 self.log.event('LOCALIZE_RESULT',
-                    f"success=false, reason=class_not_in_frame, target={request.target_class_id}, "
-                    f"available={[int(c[2]) for c in coords]} | "
+                    f"success=false, reason=class_not_in_frame, target={target_name}({request.target_class_id}), "
+                    f"available={available_class_names} | "
                     f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
                     f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
                 return response

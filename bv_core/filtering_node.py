@@ -92,6 +92,7 @@ class FilteringNode(Node):
         # === 3-frame confirmation tracking ===
         self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
         self.already_confirmed_classes = set()  # avoid re-triggering same object
+        self._last_frame_window_summary = None
         
         # === publisher for confirmed detections ===
         # Use same reliable QoS pattern for /global_obj_dets
@@ -121,7 +122,6 @@ class FilteringNode(Node):
         )
 
         self.last_rel_alt = None
-        self._last_window_print_time = 0.0
         self.log = MissionLogger('filtering')
         self.proximity_threshold_deg = 0.00005  # ~5.5m, used in _check_3frame_confirmation
 
@@ -212,13 +212,16 @@ class FilteringNode(Node):
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
 
-        # Rate-limited print of class names in frame window (1/sec)
-        now = time.time()
-        if now - self._last_window_print_time >= 1.0:
-            self._last_window_print_time = now
-            for i, frame_dets in enumerate(self.frame_history):
-                class_names = set(COCO_CLASS_NAMES[int(cls)] for _, _, cls in frame_dets)
-                self.get_logger().info(f"Frame {i}: {class_names}")
+        # Print the current 3-frame detection window in plain English.
+        frame_summaries = []
+        for i, frame_dets in enumerate(self.frame_history):
+            class_names = sorted(set(COCO_CLASS_NAMES[int(cls)] for _, _, cls in frame_dets))
+            detected_text = ', '.join(class_names) if class_names else 'no objects'
+            frame_summaries.append(f"frame {i + 1}: {detected_text}")
+        frame_window_summary = "Recent detection window: " + " | ".join(frame_summaries)
+        if frame_window_summary != self._last_frame_window_summary:
+            self.get_logger().info(frame_window_summary)
+            self._last_frame_window_summary = frame_window_summary
 
         # Log frame window with distances for tuning
         window_data = {}
@@ -349,6 +352,7 @@ class FilteringNode(Node):
             # detections from deliver/deploy phases carrying into scan
             if msg.data in ('localize', 'deliver', 'deploy', 'scan'):
                 self.frame_history.clear()
+                self._last_frame_window_summary = None
 
             if msg.data == 'scan':
                 self.already_confirmed_classes.clear()

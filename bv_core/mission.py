@@ -321,8 +321,11 @@ class MissionRunner(Node):
         ]
         
         for client, name in services:
+            has_logged_wait = False
             while not client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info(f"Waiting for service: {name}")
+                if not has_logged_wait:
+                    self.get_logger().info(f"Waiting for service: {name}")
+                    has_logged_wait = True
         
         self.get_logger().info("All services available")
 
@@ -527,8 +530,8 @@ class MissionRunner(Node):
             return
         
         lat, lon, alt = self.current_target_coords
-        self.get_logger().info(f"Flying to target: lat={lat:.6f}, lon={lon:.6f}")
         cls_name = COCO_CLASS_NAMES[self.current_target_class_id] if self.current_target_class_id is not None and self.current_target_class_id < len(COCO_CLASS_NAMES) else 'unknown'
+        self.get_logger().info(f"Flying to {cls_name}: lat={lat:.6f}, lon={lon:.6f}")
         self.log.event('DELIVER_TARGET',
             f"lat={lat:.6f}, lon={lon:.6f}, class={cls_name}({self.current_target_class_id})")
 
@@ -717,9 +720,15 @@ class MissionRunner(Node):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
         request.target_class_id = self.confirmed_detection_class_id
+        target_name = (
+            COCO_CLASS_NAMES[request.target_class_id]
+            if 0 <= request.target_class_id < len(COCO_CLASS_NAMES)
+            else 'any object'
+        )
         
         self.get_logger().info(
-            f"Requesting localization from vision node (target_class_id={request.target_class_id})..."
+            f"Requesting localization from vision node for {target_name} "
+            f"(class_id={request.target_class_id})..."
         )
         
         future = self.localize_object_client.call_async(request)
@@ -781,7 +790,7 @@ class MissionRunner(Node):
                 f"ignore_radius=0.0001deg")
             self.get_logger().info(
                 f"Published deployed object location: lat={lat:.6f}, lon={lon:.6f}, "
-                f"class_id={deployed_msg.class_id}"
+                f"class={cls_name}({deployed_msg.class_id})"
             )
 
         self.objects_delivered_count += 1
@@ -949,9 +958,14 @@ class MissionRunner(Node):
 
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
         self.current_target_class_id = int(response.class_id)
+        cls_name = (
+            COCO_CLASS_NAMES[self.current_target_class_id]
+            if 0 <= self.current_target_class_id < len(COCO_CLASS_NAMES)
+            else 'unknown'
+        )
         
         self.get_logger().info(
-            f"Object localized at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
+            f"Localized {cls_name} at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
             f"alt={response.altitude:.2f}m (class_id={response.class_id})"
         )
         

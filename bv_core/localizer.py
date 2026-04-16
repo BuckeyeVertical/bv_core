@@ -37,6 +37,7 @@ class Localizer:
         self.eps = eps
         self.min_samples = min_samples
         self.geod = Geodesic.WGS84
+        self._warned_no_detections = False
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -69,8 +70,11 @@ class Localizer:
         """
 
         if not pixel_centers:
-            rclpy.logging.get_logger("localizer").warn("No pixel centers provided, returning empty list")
+            if not self._warned_no_detections:
+                rclpy.logging.get_logger("localizer").warn("No objects detected in frame")
+                self._warned_no_detections = True
             return []
+        self._warned_no_detections = False
 
         # 1) Undistort to normalized image plane
         pts = np.array([(u, v) for u, v, _ in pixel_centers], dtype=np.float32)
