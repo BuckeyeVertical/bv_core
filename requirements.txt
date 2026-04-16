@@ -1,5 +1,6 @@
 supervision
 lightly-train
+protobuf>=3.19.6,<4
 Pillow
 empy==3.3.4
 pyros-genmsg 
