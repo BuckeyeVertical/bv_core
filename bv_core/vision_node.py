@@ -443,6 +443,9 @@ class VisionNode(Node):
                     f"Requested class {target_cls} not found in frame, "
                     f"available: {[int(c[2]) for c in coords]}"
                 )
+                # Treat this as a localization failure so mission retries
+                # instead of navigating to the wrong target.
+                return response
 
         response.success = True
         response.latitude = coords[0][0]

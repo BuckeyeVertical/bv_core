@@ -242,7 +242,7 @@ class FilteringNode(Node):
             return None
         
         # For each common class, check spatial proximity
-        PROXIMITY_THRESHOLD_DEG =  0.00005  #5.5 meters maybe can tighten
+        PROXIMITY_THRESHOLD_DEG =  0.0001  #5.5 meters maybe can tighten
         
         for cls in common_classes:
             # Get positions for this class in each frame
