@@ -42,6 +42,7 @@ from .detectors import create_detector
 from .pipelines import create_pipeline
 from .localizer import Localizer
 from .mission_logger import MissionLogger
+from .stitch_geometry import along_track_m, compute_step_m
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -126,6 +127,21 @@ class VisionNode(Node):
         self.record_video = cfg.get('record_video', False)
         self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
 
+        # Stitching capture
+        self.stitch_overlap = float(cfg.get('stitch_overlap', 0.35))
+        self.frame_width_px = int(cfg.get('frame_width_px', 4640))
+
+        # Scan waypoints + takeoff altitude come from mission_params.yaml
+        mission_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'mission_params.yaml'
+        )
+        with open(mission_yaml, 'r') as f:
+            mcfg = yaml.safe_load(f)
+        self.scan_points = mcfg.get('scan_points', [])
+        self.takeoff_alt = float(mcfg.get('takeoff_alt', 15.24))
+
     def _init_state(self):
         """Initialize state tracking variables."""
         self.prev_state = ""
@@ -138,6 +154,36 @@ class VisionNode(Node):
         self.gps_buffer = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
         self.last_rel_alt = None
+
+        # Stitch capture state
+        fx = self._read_fx_from_filtering_yaml()
+        self.step_m = compute_step_m(
+            frame_width_px=self.frame_width_px,
+            fx=fx,
+            altitude_m=self.takeoff_alt,
+            overlap=self.stitch_overlap,
+        )
+        self.row_anchor_ll = None   # (lat, lon) of current row anchor, or None
+        self.row_next_ll = None     # (lat, lon) of segment endpoint
+        self.next_capture_m = 0.0
+        self.col_idx = 1
+        self.raw_frames_cleared = False
+        self.get_logger().info(
+            f"Stitch capture: step_m={self.step_m:.2f} "
+            f"(overlap={self.stitch_overlap}, alt={self.takeoff_alt}, fx={fx:.1f})"
+        )
+
+    def _read_fx_from_filtering_yaml(self) -> float:
+        """Read fx (c_matrix[0]) from filtering_params.yaml."""
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+        with open(filtering_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+        c_mat = cfg.get('c_matrix', [1.0] * 9)
+        return float(c_mat[0])
 
     def _init_pipeline(self):
         """Initialize the camera pipeline based on configuration."""
