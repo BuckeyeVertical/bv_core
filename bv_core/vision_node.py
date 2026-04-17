@@ -185,6 +185,21 @@ class VisionNode(Node):
         c_mat = cfg.get('c_matrix', [1.0] * 9)
         return float(c_mat[0])
 
+    def _clear_raw_frames_dir(self):
+        """Delete all files in raw_frames/ at first SCAN entry per mission."""
+        raw_dir = "raw_frames"
+        if not os.path.isdir(raw_dir):
+            os.makedirs(raw_dir, exist_ok=True)
+            return
+        for name in os.listdir(raw_dir):
+            path = os.path.join(raw_dir, name)
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as e:
+                self.get_logger().warn(f"Could not remove {path}: {e}")
+        self.get_logger().info("Cleared raw_frames/ for new mission")
+
     def _init_pipeline(self):
         """Initialize the camera pipeline based on configuration."""
         self.pipeline, self.pipeline_topic = create_pipeline(
@@ -351,6 +366,9 @@ class VisionNode(Node):
 
         # Keep pipeline running in both scan and localize states
         if new_state in ('scan', 'localize'):
+            if new_state == 'scan' and not self.raw_frames_cleared:
+                self._clear_raw_frames_dir()
+                self.raw_frames_cleared = True
             self._start_scanning()
         else:
             self._stop_scanning()
@@ -704,9 +722,27 @@ class VisionNode(Node):
             threshold=self.det_thresh,
         )
         
-        if (self.curr_wp % 2 == 0):
-            cv2.imwrite(f"raw_frames/row_{self.curr_wp // 2 + 1}_{self.frame_number}.jpg", frame)
-            self.frame_number = self.frame_number + 1
+        # Distance-based stitching capture (long-side rows only).
+        if (self.state == 'scan'
+                and self.row_anchor_ll is not None
+                and self.row_next_ll is not None
+                and self.curr_wp % 2 == 0
+                and len(self.gps_buffer) > 0):
+            g = self.gps_buffer[-1]
+            d = along_track_m(
+                (g.latitude, g.longitude),
+                self.row_anchor_ll,
+                self.row_next_ll,
+            )
+            if d >= self.next_capture_m:
+                row_n = (self.curr_wp // 2) + 1
+                path = f"raw_frames/row{row_n}_{self.col_idx}.jpg"
+                cv2.imwrite(path, frame)
+                self.get_logger().info(
+                    f"Stitch capture: {path} (d={d:.2f}m, target={self.next_capture_m:.2f}m)"
+                )
+                self.col_idx += 1
+                self.next_capture_m += self.step_m
 
         # Log to mission logger
         if len(detections) > 0:
