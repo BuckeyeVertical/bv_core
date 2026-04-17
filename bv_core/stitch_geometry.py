@@ -33,6 +33,12 @@ def _ll_to_local_xy(point: LatLon, origin: LatLon) -> Tuple[float, float]:
     return x, y
 
 
+def distance_m(a: LatLon, b: LatLon) -> float:
+    """Ground distance between two nearby lat/lon points, in meters."""
+    dx, dy = _ll_to_local_xy(a, b)
+    return math.hypot(dx, dy)
+
+
 def along_track_m(current: LatLon, anchor: LatLon, nxt: LatLon) -> float:
     """Signed along-track distance of `current` along segment `anchor → nxt`, in meters.
 

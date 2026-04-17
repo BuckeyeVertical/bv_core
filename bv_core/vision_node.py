@@ -42,7 +42,7 @@ from .detectors import create_detector
 from .pipelines import create_pipeline
 from .localizer import Localizer
 from .mission_logger import MissionLogger
-from .stitch_geometry import along_track_m, compute_step_m
+from .stitch_geometry import along_track_m, compute_step_m, distance_m
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -84,8 +84,7 @@ class VisionNode(Node):
         self._init_localizer()
         self._init_services()
         self._start_worker_threads()
-        #index to keep track for image naming convention
-        self.curr_wp = 0
+        # Index retained for legacy image naming conventions.
         self.frame_number = 1
         os.makedirs("raw_frames", exist_ok=True)
 
@@ -141,6 +140,7 @@ class VisionNode(Node):
             mcfg = yaml.safe_load(f)
         self.scan_points = mcfg.get('scan_points', [])
         self.takeoff_alt = float(mcfg.get('takeoff_alt', 15.24))
+        self.scan_tolerance = float(mcfg.get('Scan_tolerance', 2.0))
 
     def _init_state(self):
         """Initialize state tracking variables."""
@@ -163,11 +163,13 @@ class VisionNode(Node):
             altitude_m=self.takeoff_alt,
             overlap=self.stitch_overlap,
         )
-        self.row_anchor_ll = None   # (lat, lon) of current row anchor, or None
-        self.row_next_ll = None     # (lat, lon) of segment endpoint
+        self.row_anchor_ll = None   # (lat, lon) of active row anchor, or None
+        self.row_next_ll = None     # (lat, lon) of active row endpoint
         self.next_capture_m = 0.0
         self.col_idx = 1
         self.raw_frames_cleared = False
+        self.curr_wp = -1
+        self.stitch_paused = False
         self.get_logger().info(
             f"Stitch capture: step_m={self.step_m:.2f} "
             f"(overlap={self.stitch_overlap}, alt={self.takeoff_alt}, fx={fx:.1f})"
@@ -358,17 +360,31 @@ class VisionNode(Node):
         whether we're in 'scan' or 'localize' state.
         """
         new_state = msg.data
+        leaving_scan_mid_row = (
+            self.prev_state == 'scan'
+            and new_state != 'scan'
+            and self.row_anchor_ll is not None
+            and self.row_next_ll is not None
+            and self.curr_wp % 2 == 0
+        )
 
         if new_state == self.prev_state:
             return
 
         self.state = new_state
+        if self.prev_state == 'scan' and new_state != 'scan':
+            self.stitch_paused = leaving_scan_mid_row
 
         # Keep pipeline running in both scan and localize states
         if new_state in ('scan', 'localize'):
             if new_state == 'scan' and not self.raw_frames_cleared:
                 self._clear_raw_frames_dir()
                 self.raw_frames_cleared = True
+            if (new_state == 'scan'
+                    and self.row_anchor_ll is None
+                    and self.curr_wp + 1 >= len(self.scan_points)):
+                self.curr_wp = -1
+                self.stitch_paused = False
             self._start_scanning()
         else:
             self._stop_scanning()
@@ -378,27 +394,45 @@ class VisionNode(Node):
     def _on_waypoint_reached(self, msg: WaypointReached):
         """Handle waypoint reached notifications.
 
-        Advances curr_wp, latches the long-side row anchor on even waypoints,
-        and clears the anchor on odd waypoints (end of row).
+        Advances scan progress only when the next planned scan waypoint is reached,
+        latches the long-side row anchor on even waypoints, and clears the anchor
+        on odd waypoints (end of row).
         """
-        self.curr_wp = self.curr_wp + 1
         self.frame_number = 1  # retained for any legacy consumers
         if self.last_wp is not None and msg.wp_seq != self.last_wp:
             self.latest_wp = msg.wp_seq
         self.last_wp = msg.wp_seq
 
-        # Stitch row tracking: even curr_wp = entry to long-side row
-        if self.state != 'scan':
+        # Stitch row tracking only advances on planned scan waypoints.
+        if self.state != 'scan' or len(self.gps_buffer) == 0:
             return
+
+        next_scan_idx = self.curr_wp + 1
+        if next_scan_idx >= len(self.scan_points):
+            return
+
+        g = self.gps_buffer[-1]
+        current_ll = (g.latitude, g.longitude)
+        expected_scan_ll = (
+            float(self.scan_points[next_scan_idx][0]),
+            float(self.scan_points[next_scan_idx][1]),
+        )
+
+        # Ignore non-scan waypoints, such as the prepended loiter return point on resume.
+        if distance_m(current_ll, expected_scan_ll) > self.scan_tolerance:
+            if self.stitch_paused:
+                self.stitch_paused = False
+                self.get_logger().info(
+                    "Stitch capture resumed after return waypoint; continuing active row"
+                )
+            return
+
+        self.curr_wp = next_scan_idx
+        self.stitch_paused = False
 
         if self.curr_wp % 2 == 0 and self.curr_wp + 1 < len(self.scan_points):
             # Anchor at current GPS (drone is at scan_points[curr_wp]); next is scan_points[curr_wp+1]
-            if len(self.gps_buffer) > 0:
-                g = self.gps_buffer[-1]
-                self.row_anchor_ll = (g.latitude, g.longitude)
-            else:
-                sp = self.scan_points[self.curr_wp]
-                self.row_anchor_ll = (float(sp[0]), float(sp[1]))
+            self.row_anchor_ll = current_ll
             sp_next = self.scan_points[self.curr_wp + 1]
             self.row_next_ll = (float(sp_next[0]), float(sp_next[1]))
             self.col_idx = 1
@@ -408,9 +442,10 @@ class VisionNode(Node):
                 f"anchor={self.row_anchor_ll}, next={self.row_next_ll}"
             )
         else:
-            # Odd curr_wp or past the scan plan: row complete
+            # Odd curr_wp or past the scan plan: row complete.
             self.row_anchor_ll = None
             self.row_next_ll = None
+            self.stitch_paused = False
 
     def _on_timer(self):
         """
@@ -727,6 +762,7 @@ class VisionNode(Node):
                 and self.row_anchor_ll is not None
                 and self.row_next_ll is not None
                 and self.curr_wp % 2 == 0
+                and not self.stitch_paused
                 and len(self.gps_buffer) > 0):
             g = self.gps_buffer[-1]
             d = along_track_m(

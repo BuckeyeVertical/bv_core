@@ -1,8 +1,7 @@
 """Unit tests for stitch_geometry helpers."""
-import math
 import pytest
 
-from bv_core.stitch_geometry import along_track_m, compute_step_m
+from bv_core.stitch_geometry import along_track_m, compute_step_m, distance_m
 
 
 def test_compute_step_m_35_percent_overlap():
@@ -50,3 +49,9 @@ def test_along_track_negative_before_anchor():
     behind = (40.159520, -83.197500)
     d = along_track_m(behind, anchor, nxt)
     assert d < 0.0
+
+
+def test_distance_m_matches_short_east_west_segment():
+    a = (40.159520, -83.197420)
+    b = (40.159520, -83.196820)
+    assert distance_m(a, b) == pytest.approx(51.06, abs=0.5)
