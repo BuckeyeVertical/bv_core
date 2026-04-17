@@ -8,6 +8,10 @@ capture_interval: 1.5e9
 estimated_camera_latency: 0.5  # Seconds to pause after stopping before capturing frame
 num_scan_wp: 3
 
+# Stitching frame capture
+stitch_overlap: 0.35     # Horizontal overlap fraction between consecutive frames in a row
+frame_width_px: 4640     # Camera frame width used for ground-footprint math; must match gst_pipeline
+
 # Detector configuration
 detector_type: "ml"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
 ml_model_path: "ltdetr.pt"  # LTDETR checkpoint path when detector_type is "ml"

@@ -42,6 +42,7 @@ from .detectors import create_detector
 from .pipelines import create_pipeline
 from .localizer import Localizer
 from .mission_logger import MissionLogger
+from .stitch_geometry import along_track_m, compute_step_m, distance_m
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -83,8 +84,7 @@ class VisionNode(Node):
         self._init_localizer()
         self._init_services()
         self._start_worker_threads()
-        #index to keep track for image naming convention
-        self.curr_wp = 0
+        # Index retained for legacy image naming conventions.
         self.frame_number = 1
         os.makedirs("raw_frames", exist_ok=True)
 
@@ -126,6 +126,22 @@ class VisionNode(Node):
         self.record_video = cfg.get('record_video', False)
         self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
 
+        # Stitching capture
+        self.stitch_overlap = float(cfg.get('stitch_overlap', 0.35))
+        self.frame_width_px = int(cfg.get('frame_width_px', 4640))
+
+        # Scan waypoints + takeoff altitude come from mission_params.yaml
+        mission_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'mission_params.yaml'
+        )
+        with open(mission_yaml, 'r') as f:
+            mcfg = yaml.safe_load(f)
+        self.scan_points = mcfg.get('scan_points', [])
+        self.takeoff_alt = float(mcfg.get('takeoff_alt', 15.24))
+        self.scan_tolerance = float(mcfg.get('Scan_tolerance', 2.0))
+
     def _init_state(self):
         """Initialize state tracking variables."""
         self.prev_state = ""
@@ -138,6 +154,53 @@ class VisionNode(Node):
         self.gps_buffer = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
         self.last_rel_alt = None
+
+        # Stitch capture state
+        fx = self._read_fx_from_filtering_yaml()
+        self.step_m = compute_step_m(
+            frame_width_px=self.frame_width_px,
+            fx=fx,
+            altitude_m=self.takeoff_alt,
+            overlap=self.stitch_overlap,
+        )
+        self.row_anchor_ll = None   # (lat, lon) of active row anchor, or None
+        self.row_next_ll = None     # (lat, lon) of active row endpoint
+        self.next_capture_m = 0.0
+        self.col_idx = 1
+        self.raw_frames_cleared = False
+        self.curr_wp = -1
+        self.stitch_paused = False
+        self.get_logger().info(
+            f"Stitch capture: step_m={self.step_m:.2f} "
+            f"(overlap={self.stitch_overlap}, alt={self.takeoff_alt}, fx={fx:.1f})"
+        )
+
+    def _read_fx_from_filtering_yaml(self) -> float:
+        """Read fx (c_matrix[0]) from filtering_params.yaml."""
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+        with open(filtering_yaml, 'r') as f:
+            cfg = yaml.safe_load(f)
+        c_mat = cfg.get('c_matrix', [1.0] * 9)
+        return float(c_mat[0])
+
+    def _clear_raw_frames_dir(self):
+        """Delete all files in raw_frames/ at first SCAN entry per mission."""
+        raw_dir = "raw_frames"
+        if not os.path.isdir(raw_dir):
+            os.makedirs(raw_dir, exist_ok=True)
+            return
+        for name in os.listdir(raw_dir):
+            path = os.path.join(raw_dir, name)
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as e:
+                self.get_logger().warn(f"Could not remove {path}: {e}")
+        self.get_logger().info("Cleared raw_frames/ for new mission")
 
     def _init_pipeline(self):
         """Initialize the camera pipeline based on configuration."""
@@ -297,14 +360,31 @@ class VisionNode(Node):
         whether we're in 'scan' or 'localize' state.
         """
         new_state = msg.data
+        leaving_scan_mid_row = (
+            self.prev_state == 'scan'
+            and new_state != 'scan'
+            and self.row_anchor_ll is not None
+            and self.row_next_ll is not None
+            and self.curr_wp % 2 == 0
+        )
 
         if new_state == self.prev_state:
             return
 
         self.state = new_state
+        if self.prev_state == 'scan' and new_state != 'scan':
+            self.stitch_paused = leaving_scan_mid_row
 
         # Keep pipeline running in both scan and localize states
         if new_state in ('scan', 'localize'):
+            if new_state == 'scan' and not self.raw_frames_cleared:
+                self._clear_raw_frames_dir()
+                self.raw_frames_cleared = True
+            if (new_state == 'scan'
+                    and self.row_anchor_ll is None
+                    and self.curr_wp + 1 >= len(self.scan_points)):
+                self.curr_wp = -1
+                self.stitch_paused = False
             self._start_scanning()
         else:
             self._stop_scanning()
@@ -312,17 +392,60 @@ class VisionNode(Node):
         self.prev_state = new_state
 
     def _on_waypoint_reached(self, msg: WaypointReached):
+        """Handle waypoint reached notifications.
+
+        Advances scan progress only when the next planned scan waypoint is reached,
+        latches the long-side row anchor on even waypoints, and clears the anchor
+        on odd waypoints (end of row).
         """
-        Handle waypoint reached notifications.
-        
-        Sets latest_wp to trigger frame capture in the fetch loop.
-        """
-        self.curr_wp = self.curr_wp + 1
-        self.frame_number = 1
+        self.frame_number = 1  # retained for any legacy consumers
         if self.last_wp is not None and msg.wp_seq != self.last_wp:
             self.latest_wp = msg.wp_seq
-
         self.last_wp = msg.wp_seq
+
+        # Stitch row tracking only advances on planned scan waypoints.
+        if self.state != 'scan' or len(self.gps_buffer) == 0:
+            return
+
+        next_scan_idx = self.curr_wp + 1
+        if next_scan_idx >= len(self.scan_points):
+            return
+
+        g = self.gps_buffer[-1]
+        current_ll = (g.latitude, g.longitude)
+        expected_scan_ll = (
+            float(self.scan_points[next_scan_idx][0]),
+            float(self.scan_points[next_scan_idx][1]),
+        )
+
+        # Ignore non-scan waypoints, such as the prepended loiter return point on resume.
+        if distance_m(current_ll, expected_scan_ll) > self.scan_tolerance:
+            if self.stitch_paused:
+                self.stitch_paused = False
+                self.get_logger().info(
+                    "Stitch capture resumed after return waypoint; continuing active row"
+                )
+            return
+
+        self.curr_wp = next_scan_idx
+        self.stitch_paused = False
+
+        if self.curr_wp % 2 == 0 and self.curr_wp + 1 < len(self.scan_points):
+            # Anchor at current GPS (drone is at scan_points[curr_wp]); next is scan_points[curr_wp+1]
+            self.row_anchor_ll = current_ll
+            sp_next = self.scan_points[self.curr_wp + 1]
+            self.row_next_ll = (float(sp_next[0]), float(sp_next[1]))
+            self.col_idx = 1
+            self.next_capture_m = self.step_m
+            self.get_logger().info(
+                f"Stitch row entry: curr_wp={self.curr_wp}, "
+                f"anchor={self.row_anchor_ll}, next={self.row_next_ll}"
+            )
+        else:
+            # Odd curr_wp or past the scan plan: row complete.
+            self.row_anchor_ll = None
+            self.row_next_ll = None
+            self.stitch_paused = False
 
     def _on_timer(self):
         """
@@ -634,9 +757,28 @@ class VisionNode(Node):
             threshold=self.det_thresh,
         )
         
-        if (self.curr_wp % 2 == 0):
-            cv2.imwrite(f"raw_frames/row_{self.curr_wp // 2 + 1}_{self.frame_number}.jpg", frame)
-            self.frame_number = self.frame_number + 1
+        # Distance-based stitching capture (long-side rows only).
+        if (self.state == 'scan'
+                and self.row_anchor_ll is not None
+                and self.row_next_ll is not None
+                and self.curr_wp % 2 == 0
+                and not self.stitch_paused
+                and len(self.gps_buffer) > 0):
+            g = self.gps_buffer[-1]
+            d = along_track_m(
+                (g.latitude, g.longitude),
+                self.row_anchor_ll,
+                self.row_next_ll,
+            )
+            if d >= self.next_capture_m:
+                row_n = (self.curr_wp // 2) + 1
+                path = f"raw_frames/row{row_n}_{self.col_idx}.jpg"
+                cv2.imwrite(path, frame)
+                self.get_logger().info(
+                    f"Stitch capture: {path} (d={d:.2f}m, target={self.next_capture_m:.2f}m)"
+                )
+                self.col_idx += 1
+                self.next_capture_m += self.step_m
 
         # Log to mission logger
         if len(detections) > 0:
