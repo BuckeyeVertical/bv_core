@@ -358,17 +358,41 @@ class VisionNode(Node):
         self.prev_state = new_state
 
     def _on_waypoint_reached(self, msg: WaypointReached):
-        """
-        Handle waypoint reached notifications.
-        
-        Sets latest_wp to trigger frame capture in the fetch loop.
+        """Handle waypoint reached notifications.
+
+        Advances curr_wp, latches the long-side row anchor on even waypoints,
+        and clears the anchor on odd waypoints (end of row).
         """
         self.curr_wp = self.curr_wp + 1
-        self.frame_number = 1
+        self.frame_number = 1  # retained for any legacy consumers
         if self.last_wp is not None and msg.wp_seq != self.last_wp:
             self.latest_wp = msg.wp_seq
-
         self.last_wp = msg.wp_seq
+
+        # Stitch row tracking: even curr_wp = entry to long-side row
+        if self.state != 'scan':
+            return
+
+        if self.curr_wp % 2 == 0 and self.curr_wp + 1 <= len(self.scan_points):
+            # Anchor at current GPS (drone is at scan_points[curr_wp]); next is scan_points[curr_wp+1]
+            if len(self.gps_buffer) > 0:
+                g = self.gps_buffer[-1]
+                self.row_anchor_ll = (g.latitude, g.longitude)
+            else:
+                sp = self.scan_points[self.curr_wp]
+                self.row_anchor_ll = (float(sp[0]), float(sp[1]))
+            sp_next = self.scan_points[self.curr_wp + 1]
+            self.row_next_ll = (float(sp_next[0]), float(sp_next[1]))
+            self.col_idx = 1
+            self.next_capture_m = self.step_m
+            self.get_logger().info(
+                f"Stitch row entry: curr_wp={self.curr_wp}, "
+                f"anchor={self.row_anchor_ll}, next={self.row_next_ll}"
+            )
+        else:
+            # Odd curr_wp or past the scan plan: row complete
+            self.row_anchor_ll = None
+            self.row_next_ll = None
 
     def _on_timer(self):
         """
