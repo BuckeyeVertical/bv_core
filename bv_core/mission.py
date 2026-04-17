@@ -41,8 +41,6 @@ from ament_index_python.packages import get_package_share_directory
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 from .mission_logger import MissionLogger
-from rfdetr.util.coco_classes import COCO_CLASSES
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 
 # Mission configuration
 NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
@@ -531,7 +529,7 @@ class MissionRunner(Node):
             return
         
         lat, lon, alt = self.current_target_coords
-        cls_name = COCO_CLASS_NAMES[self.current_target_class_id] if self.current_target_class_id is not None and self.current_target_class_id < len(COCO_CLASS_NAMES) else 'unknown'
+        cls_name = CLASS_NAMES[self.current_target_class_id] if self.current_target_class_id is not None and 0 <= self.current_target_class_id < len(CLASS_NAMES) else 'unknown'
         self.get_logger().info(f"Flying to {cls_name}: lat={lat:.6f}, lon={lon:.6f}")
         self.log.event('DELIVER_TARGET',
             f"lat={lat:.6f}, lon={lon:.6f}, class={cls_name}({self.current_target_class_id})")
@@ -722,14 +720,13 @@ class MissionRunner(Node):
         request = LocalizeObject.Request()
         request.target_class_id = self.confirmed_detection_class_id
         target_name = (
-            COCO_CLASS_NAMES[request.target_class_id]
-            if 0 <= request.target_class_id < len(COCO_CLASS_NAMES)
+            CLASS_NAMES[request.target_class_id]
+            if 0 <= request.target_class_id < len(CLASS_NAMES)
             else 'any object'
         )
         
         self.get_logger().info(
-            f"Requesting localization from vision node for {target_name} "
-            f"(class_id={request.target_class_id})..."
+            f"Requesting localization from vision node for {target_name}..."
         )
         
         future = self.localize_object_client.call_async(request)
@@ -776,7 +773,7 @@ class MissionRunner(Node):
             deployed_msg.longitude = float(lon)
             deployed_msg.class_id = int(self.current_target_class_id) if self.current_target_class_id is not None else -1
             self.deployed_object_pub.publish(deployed_msg)
-            cls_name = COCO_CLASS_NAMES[int(deployed_msg.class_id)] if deployed_msg.class_id >= 0 and deployed_msg.class_id < len(COCO_CLASS_NAMES) else 'unknown'
+            cls_name = CLASS_NAMES[int(deployed_msg.class_id)] if 0 <= deployed_msg.class_id < len(CLASS_NAMES) else 'unknown'
             actual_pos = (self.current_lat, self.current_lon) if self.current_lat is not None else (lat, lon)
             self.log.deploy_complete(
                 class_id=deployed_msg.class_id,
@@ -922,7 +919,7 @@ class MissionRunner(Node):
                 self.get_logger().warn(
                     "Localization failed 5 times - abandoning this object and resuming scan"
                 )
-                cls_name = COCO_CLASS_NAMES[self.confirmed_detection_class_id] if self.confirmed_detection_class_id >= 0 and self.confirmed_detection_class_id < len(COCO_CLASS_NAMES) else 'unknown'
+                cls_name = CLASS_NAMES[self.confirmed_detection_class_id] if 0 <= self.confirmed_detection_class_id < len(CLASS_NAMES) else 'unknown'
                 self.log.event('LOCALIZE_ABANDONED',
                     f"class={cls_name}({self.confirmed_detection_class_id}), attempts=5, resuming_scan")
                 # Stop any pending retry timer
@@ -960,14 +957,14 @@ class MissionRunner(Node):
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
         self.current_target_class_id = int(response.class_id)
         cls_name = (
-            COCO_CLASS_NAMES[self.current_target_class_id]
-            if 0 <= self.current_target_class_id < len(COCO_CLASS_NAMES)
+            CLASS_NAMES[self.current_target_class_id]
+            if 0 <= self.current_target_class_id < len(CLASS_NAMES)
             else 'unknown'
         )
         
         self.get_logger().info(
             f"Localized {cls_name} at: lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
-            f"alt={response.altitude:.2f}m (class_id={response.class_id})"
+            f"alt={response.altitude:.2f}m"
         )
         
         # Proceed to delivery
@@ -1062,7 +1059,7 @@ class MissionRunner(Node):
         
         # Store which class was confirmed so we can tell the localizer
         self.confirmed_detection_class_id = int(msg.data)
-        cls_name = COCO_CLASS_NAMES[int(msg.data)] if int(msg.data) < len(COCO_CLASS_NAMES) else 'unknown'
+        cls_name = CLASS_NAMES[int(msg.data)] if 0 <= int(msg.data) < len(CLASS_NAMES) else 'unknown'
         self.log.event('OBJECT_DETECTED',
             f"class={cls_name}({msg.data}), delivered_so_far={self.objects_delivered_count}/{self.num_objects_to_find}")
 

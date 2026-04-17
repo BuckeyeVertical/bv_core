@@ -360,7 +360,11 @@ class VisionNode(Node):
         response.longitude = 0.0
         response.altitude = 0.0
         response.class_id = -1
-        target_name = COCO_CLASS_NAMES[request.target_class_id] if request.target_class_id >= 0 and request.target_class_id < len(COCO_CLASS_NAMES) else 'any'
+        target_name = (
+            CLASS_NAMES[request.target_class_id]
+            if 0 <= request.target_class_id < len(CLASS_NAMES)
+            else 'any'
+        )
         self.log.event('LOCALIZE_REQUEST', f"target_class={target_name}({request.target_class_id})")
 
         # Ensure pipeline is running
@@ -454,7 +458,7 @@ class VisionNode(Node):
                 coords = matched
             else:
                 available_class_names = [
-                    COCO_CLASS_NAMES[int(c[2])] if 0 <= int(c[2]) < len(COCO_CLASS_NAMES) else f"class_{int(c[2])}"
+                    CLASS_NAMES[int(c[2])] if 0 <= int(c[2]) < len(CLASS_NAMES) else f"class_{int(c[2])}"
                     for c in coords
                 ]
                 self.get_logger().warn(
@@ -479,7 +483,7 @@ class VisionNode(Node):
         response.class_id = int(coords[0][2])
         self.log.event('LOCALIZE_RESULT',
             f"success=true, lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
-            f"alt={response.altitude:.1f}, class={COCO_CLASS_NAMES[response.class_id]}({response.class_id}) | "
+            f"alt={response.altitude:.1f}, class={CLASS_NAMES[response.class_id] if 0 <= response.class_id < len(CLASS_NAMES) else 'unknown'}({response.class_id}) | "
             f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
             f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
 
@@ -647,7 +651,7 @@ class VisionNode(Node):
                 detections.xyxy, detections.confidence, detections.class_id
             ):
                 det_list.append({
-                    'class_name': COCO_CLASS_NAMES[int(cls)],
+                    'class_name': CLASS_NAMES[int(cls)] if 0 <= int(cls) < len(CLASS_NAMES) else 'unknown',
                     'class_id': int(cls),
                     'confidence': float(score),
                     'px': ((x1 + x2) / 2.0, (y1 + y2) / 2.0),

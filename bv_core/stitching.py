@@ -44,6 +44,7 @@ class ImageStitcherNode(Node):
 
         #default to lap state at the beginning
         self.state = "lap"
+        self._was_stitching_active = False
 
         #default reached mode
         self.reached = False
@@ -100,12 +101,16 @@ class ImageStitcherNode(Node):
 
         # Helpers & buffer
         self.received_images = []
-        self.get_logger().info(f"Subscribed to {image_topic}`; stitch every {self.stitch_interval_sec}s")
 
     def state_callback(self, msg: String):
         try:
-            self.get_logger().info(f"Received State: state={msg.data}")
             self.state = msg.data
+            is_stitching_active = (self.state == "stitching")
+            if is_stitching_active and not self._was_stitching_active:
+                self.get_logger().info("Stitching active")
+            elif self._was_stitching_active and not is_stitching_active:
+                self.get_logger().info(f"Stitching inactive (state={self.state})")
+            self._was_stitching_active = is_stitching_active
         except Exception as e:
             self.get_logger().error(f"Failed to determine state")
 
@@ -113,7 +118,6 @@ class ImageStitcherNode(Node):
         if self.transition_in_progress:
             return
         idx = msg.wp_seq
-        self.get_logger().info(f'Reached waypoint {idx} (state={self.state})')
 
         #setting waypoint number
         self.waypoint_current = idx
@@ -126,10 +130,8 @@ class ImageStitcherNode(Node):
         #ask shankar if self.state can equal WaypointReached
         if (self.state == "stitching"): #or self.state == "lap" or self.state == "scan"):
             self.reached = True
-            self.get_logger().info(f'Reached waypoint in {self.state}')
         else: 
             self.reached = False
-            self.get_logger().info(f'Reached waypoint, NOT in stitching')
 
     def timer_callback(self):
         
@@ -147,7 +149,6 @@ class ImageStitcherNode(Node):
                 self.get_logger().info(f"Took picture number: {self.pic_counter}")
                 self.waypoint_prev = self.waypoint_current
                 self.received_images.append(self.latest_frame)
-                self.get_logger().info(f"Received frame: shape={self.latest_frame.shape} dtype={self.latest_frame.dtype} (buffer={len(self.received_images)})")
                 
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 out_file = os.path.join(self.output_path, f"pic_{self.waypoint_current}.jpg")
