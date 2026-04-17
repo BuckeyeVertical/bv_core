@@ -59,7 +59,7 @@ qtcreator-*
 #Agents
 .cursor
 .claude
-.codex
+
 # Catkin custom files
 CATKIN_IGNORE
 rf-detr-large.pth
@@ -71,3 +71,4 @@ bv_core/.DS_Store
 .DS_Store
 
 *.pt
+.codex
