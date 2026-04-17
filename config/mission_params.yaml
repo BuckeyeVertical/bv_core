@@ -7,6 +7,7 @@
 # Altitude is relative to takeoff point (AGL - Above Ground Level)
 
 # MISSION CONFIGURATION
+enable_mission_log: true
 
 # Number of objects to detect and deliver payloads to
 num_objects: 2

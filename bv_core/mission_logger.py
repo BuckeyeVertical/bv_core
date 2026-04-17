@@ -13,8 +13,11 @@ import math
 import yaml
 from datetime import datetime
 
-# Default log directory — lives next to the bv_core Python package
-LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
+# Default log directory — anchored at the repository's package directory
+# so logs consistently land in bv_core/logs even when running from install/.
+LOG_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'bv_core', 'logs')
+)
 
 
 def _load_mission_config() -> dict:

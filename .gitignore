@@ -58,7 +58,8 @@ qtcreator-*
 
 #Agents
 .cursor
-
+.claude
+.codex
 # Catkin custom files
 CATKIN_IGNORE
 rf-detr-large.pth
@@ -68,3 +69,5 @@ meshes/Render_CAD.STL
 meshes/Render_CAD.stl
 bv_core/.DS_Store
 .DS_Store
+
+*.pt
