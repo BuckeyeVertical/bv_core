@@ -13,7 +13,7 @@ enable_mission_log: true
 num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
-takeoff_alt: &TAKEOFF 16.2
+takeoff_alt: &TAKEOFF 15.24
 
 
 
@@ -55,9 +55,9 @@ scan_points:
 # Lower velocities improve detection accuracy but increase
 # mission time.
 
-Lap_velocity: 5.0       # Fast - reconnaissance only
-Scan_velocity: 2.5      # Slow - need time for detection
-Deliver_velocity: 5.0   # Fast - target already localized (stitching runs in background)
+Lap_velocity: 3.0       # Fast - reconnaissance only
+Scan_velocity: 3.0      # Slow - need time for detection
+Deliver_velocity: 3.0   # Fast - target already localized (stitching runs in background)
 
 
 

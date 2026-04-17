@@ -43,7 +43,6 @@ from bv_msgs.msg import ObjectLocations
 from .mission_logger import MissionLogger
 
 # Mission configuration
-NUM_OBJECTS_TO_FIND = 4          # Total number of objects to detect and deliver to
 DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
 CLASS_NAMES = ("person", "tent")
 
@@ -141,8 +140,10 @@ class MissionRunner(Node):
         self.deploy_initial_pwms = config.get('Deliver_initial_pwms', [1600, 1600, 1600, 1600])
         self.deploy_second_pwms = config.get('Deliver_second_pwms', [1400, 1400, 1400, 1400])
         
-        # Number of objects (can be overridden in YAML)
-        self.num_objects_to_find = config.get('num_objects', NUM_OBJECTS_TO_FIND)
+        # Required mission parameters
+        if 'num_objects' not in config:
+            raise ValueError("mission_params.yaml is missing required key: num_objects")
+        self.num_objects_to_find = int(config['num_objects'])
         
         self.get_logger().info(f"Loaded {len(self.lap_waypoints)} lap waypoints")
         self.get_logger().info(f"Loaded {len(self.scan_waypoints)} scan waypoints")
