@@ -4,26 +4,26 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from std_msgs.msg import String, Float64, Bool, Int8
+from std_msgs.msg import String, Float64, Int8
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
 from bv_msgs.msg import ObjectDetections
 from geometry_msgs.msg import PoseStamped
 import numpy as np
-from rfdetr.util.coco_classes import COCO_CLASSES
 
-# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
 from sensor_msgs.msg import NavSatFix
 
 from bv_msgs.msg import ObjectLocations         # your custom msg
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
-import time
 from collections import deque
 from rclpy.time import Time
 import math
+from .mission_logger import MissionLogger
+
+CLASS_NAMES = ("person", "tent")
+
 
 class FilteringNode(Node):
     def __init__(self):
@@ -83,14 +83,19 @@ class FilteringNode(Node):
         self.pose_buffer = deque(maxlen=200)
 
         # === internal state ===
-        self.global_dets = []   # list of (lat, lon, class_id) for all detections so far
         self.prev_state = None
         self.state = None
-        self.deployed_locations = []  # list of (lat, lon, class_id) for completed deployments
+        
+        # === target tracking ===
+        # One entry per competition target: person and tent
+        self.targets = {
+            class_id: {"state": "undetected", "lat": None, "lon": None}
+            for class_id in range(len(CLASS_NAMES))
+        }
         
         # === 3-frame confirmation tracking ===
         self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
-        self.already_confirmed_classes = set()  # avoid re-triggering same object
+        self._last_frame_window_summary = None
         
         # === publisher for confirmed detections ===
         # Use same reliable QoS pattern for /global_obj_dets
@@ -109,7 +114,6 @@ class FilteringNode(Node):
 
         c_mat_list = cfg.get('c_matrix', [1.0]*9)
         dist_coeff_list = cfg.get('dist_coefficients', [0.0]*5)
-        self.deployed_ignore_radius_deg = float(cfg.get('deployed_ignore_radius_deg', 0.00005))
 
         camera_matrix = np.array(c_mat_list, dtype=np.float64).reshape((3, 3))
         dist_coeffs = np.array(dist_coeff_list, dtype=np.float64)
@@ -120,7 +124,8 @@ class FilteringNode(Node):
         )
 
         self.last_rel_alt = None
-        self._last_window_print_time = 0.0
+        self.log = MissionLogger('filtering')
+        self.proximity_threshold_deg = 0.0001
 
     def handle_gps(self, msg: NavSatFix):
         self.gps_buffer.append(msg)
@@ -185,19 +190,12 @@ class FilteringNode(Node):
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
+        # filter to target classes that haven't been confirmed or deployed yet
         filtered_detections = [
             (lat, lon, cls)
             for lat, lon, cls in detections_global
-            if not self._is_near_deployed_location(lat, lon)
+            if cls in self.targets and self.targets[cls]["state"] == "undetected"
         ]
-        ignored_count = len(detections_global) - len(filtered_detections)
-        # if ignored_count > 0:
-            # self.get_logger().info(
-                # f"[DEBUG] Ignored {ignored_count} detections near deployed locations"
-            # )
-
-        # store for later clustering once mission state changes
-        self.global_dets.extend(detections_global)
         
         # Only run 3-frame confirmation during scan state
         if self.state != 'scan':
@@ -209,21 +207,49 @@ class FilteringNode(Node):
         if len(self.frame_history) > 3:
             self.frame_history.pop(0)
 
-        # Rate-limited print of class names in frame window (1/sec)
-        now = time.time()
-        if now - self._last_window_print_time >= 1.0:
-            self._last_window_print_time = now
-            for i, frame_dets in enumerate(self.frame_history):
-                class_names = set(COCO_CLASS_NAMES[int(cls)] for _, _, cls in frame_dets)
-                self.get_logger().info(f"Frame {i}: {class_names}")
+        # Print the current 3-frame detection window in plain English.
+        frame_summaries = []
+        for i, frame_dets in enumerate(self.frame_history):
+            class_names = sorted(
+                set(
+                    CLASS_NAMES[int(cls)] if 0 <= int(cls) < len(CLASS_NAMES) else "unknown"
+                    for _, _, cls in frame_dets
+                )
+            )
+            detected_text = ', '.join(class_names) if class_names else 'no objects'
+            frame_summaries.append(f"frame {i + 1}: {detected_text}")
+        frame_window_summary = "Recent detection window: " + " | ".join(frame_summaries)
+        if frame_window_summary != self._last_frame_window_summary:
+            self.get_logger().info(frame_window_summary)
+            self._last_frame_window_summary = frame_window_summary
 
+        # Log frame window with distances for tuning
+        window_data = {}
+        for cls_id in set(int(c) for frame in self.frame_history for _, _, c in frame):
+            cls_name = CLASS_NAMES[cls_id] if 0 <= cls_id < len(CLASS_NAMES) else "unknown"
+            positions = []
+            for frame_dets in self.frame_history:
+                for lat, lon, c in frame_dets:
+                    if int(c) == cls_id:
+                        positions.append((lat, lon))
+                        break
+            dists = []
+            for j in range(len(positions) - 1):
+                d_deg = math.sqrt((positions[j+1][0] - positions[j][0])**2 +
+                                  (positions[j+1][1] - positions[j][1])**2)
+                d_m = d_deg * 111320.0
+                dists.append(d_m)
+            window_data[cls_name] = {
+                'dists': dists,
+                'thresh': self.proximity_threshold_deg * 111320.0,
+            }
+        self.log.frame_window(len(self.frame_history), 3, window_data)
         # Check for consistent detection across 3 frames
         confirmed_class = self._check_3frame_confirmation()
-        # self.get_logger().info(f"[DEBUG] 3-frame check result: {confirmed_class}, "
-                            #    f"already confirmed: {self.already_confirmed_classes}")
         
-        if confirmed_class is not None and confirmed_class not in self.already_confirmed_classes:
-            self.already_confirmed_classes.add(confirmed_class)
+        # Guard: confirm class is a valid target and still undetected
+        if confirmed_class is not None and confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
+            self.targets[confirmed_class]["state"] = "confirmed"
             self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
 
     def _check_3frame_confirmation(self):
@@ -257,7 +283,7 @@ class FilteringNode(Node):
             return None
         
         # For each common class, check spatial proximity
-        PROXIMITY_THRESHOLD_DEG =  0.00005  #5.5 meters maybe can tighten
+        PROXIMITY_THRESHOLD_DEG = self.proximity_threshold_deg
         
         for cls in common_classes:
             # Get positions for this class in each frame
@@ -267,36 +293,45 @@ class FilteringNode(Node):
                     if int(c) == cls:
                         positions.append((lat, lon))
                         break  # Take first detection of this class per frame
-            
+
             if len(positions) < 3:
                 continue
-            
+
             # Check if CONSECUTIVE positions are within proximity
-            # Only compare consecutive frames (0->1, 1->2) not all pairs
-            # This avoids cumulative drift from failing the check
             all_close = True
+            dists_m = []
             for i in range(len(positions) - 1):
                 lat1, lon1 = positions[i]
                 lat2, lon2 = positions[i + 1]
                 dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+                dists_m.append(dist * 111320.0)
                 if dist > PROXIMITY_THRESHOLD_DEG:
                     all_close = False
                     break
-            
+
+            cls_name = CLASS_NAMES[int(cls)] if 0 <= int(cls) < len(CLASS_NAMES) else "unknown"
+            thresh_m = PROXIMITY_THRESHOLD_DEG * 111320.0
             if all_close:
+                self.log.event('CONFIRMED',
+                    f"class={cls_name}({cls}), "
+                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
+                    f"thresh={thresh_m:.1f}m")
                 return cls
-        
+            else:
+                self.log.event('REJECTED',
+                    f"class={cls_name}({cls}), "
+                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
+                    f"thresh={thresh_m:.1f}m, reason=proximity_fail")
+
         return None
 
     def deployed_location_callback(self, msg: ObjectLocations):
-        self.deployed_locations.append((msg.latitude, msg.longitude, msg.class_id))
-
-    def _is_near_deployed_location(self, lat: float, lon: float) -> bool:
-        for deployed_lat, deployed_lon, _ in self.deployed_locations:
-            distance = math.sqrt((lat - deployed_lat) ** 2 + (lon - deployed_lon) ** 2)
-            if distance <= self.deployed_ignore_radius_deg:
-                return True
-        return False
+        # Mark target as deployed and store its final location
+        cls = msg.class_id
+        if cls in self.targets:
+            self.targets[cls]["state"] = "deployed"
+            self.targets[cls]["lat"] = msg.latitude
+            self.targets[cls]["lon"] = msg.longitude
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
@@ -305,16 +340,25 @@ class FilteringNode(Node):
             # detections from deliver/deploy phases carrying into scan
             if msg.data in ('localize', 'deliver', 'deploy', 'scan'):
                 self.frame_history.clear()
+                self._last_frame_window_summary = None
 
             if msg.data == 'scan':
-                self.already_confirmed_classes.clear()
+                # Reset non-deployed targets so they can be re-detected
+                for cls in self.targets:
+                    if self.targets[cls]["state"] != "deployed":
+                        self.targets[cls]["state"] = "undetected"
 
             # once we leave the 'scan' state, write deployed locations
             if self.prev_state == 'scan':
                 with open('finalized_object_locations.txt', 'w') as f:
-                        for lat, lon, cls in self.deployed_locations:
-                            class_name = COCO_CLASS_NAMES[int(cls)] if int(cls) >= 0 else "unknown"
-                            f.write(f"{lat:.6f},{lon:.6f},{class_name}\n")
+                        for cls, info in self.targets.items():
+                            if info["state"] == "deployed":
+                                class_name = (
+                                    CLASS_NAMES[int(cls)]
+                                    if 0 <= int(cls) < len(CLASS_NAMES)
+                                    else "unknown"
+                                )
+                                f.write(f"{info['lat']:.6f},{info['lon']:.6f},{class_name}\n")
 
         self.prev_state = msg.data
 

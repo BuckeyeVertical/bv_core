@@ -7,12 +7,13 @@
 # Altitude is relative to takeoff point (AGL - Above Ground Level)
 
 # MISSION CONFIGURATION
+enable_mission_log: true
 
 # Number of objects to detect and deliver payloads to
-num_objects: 4
+num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
-takeoff_alt: &TAKEOFF 16.2
+takeoff_alt: &TAKEOFF 15.24
 
 
 
@@ -54,9 +55,9 @@ scan_points:
 # Lower velocities improve detection accuracy but increase
 # mission time.
 
-Lap_velocity: 5.0       # Fast - reconnaissance only
-Scan_velocity: 2.5      # Slow - need time for detection
-Deliver_velocity: 5.0   # Fast - target already localized (stitching runs in background)
+Lap_velocity: 3.0       # Fast - reconnaissance only
+Scan_velocity: 3.0      # Slow - need time for detection
+Deliver_velocity: 3.0   # Fast - target already localized (stitching runs in background)
 
 
 
@@ -87,3 +88,7 @@ Deliver_tolerance: 1.0  # Tight - need accurate drop position
 Default_servo_pwms: [1500, 1500, 1500, 1500]    # Neutral position
 Deliver_initial_pwms: [1600, 1600, 1600, 1600]  # Release position
 Deliver_second_pwms: [1400, 1400, 1400, 1400]   # Retract position
+
+# MISSION LOGGING
+# Set to true to write detailed mission logs to bv_core/logs/
+enable_mission_log: true

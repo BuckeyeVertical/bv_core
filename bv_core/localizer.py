@@ -13,11 +13,6 @@ import rclpy.logging
 from ament_index_python.packages import get_package_share_directory
 from collections import defaultdict, Counter
 
-from rfdetr.util.coco_classes import COCO_CLASSES
-
-# Create 0-indexed list from COCO_CLASSES (detector outputs 0-79, not original COCO IDs)
-COCO_CLASS_NAMES = [COCO_CLASSES[k] for k in sorted(COCO_CLASSES.keys())]
-
 
 class Localizer:
     def __init__(self,
@@ -37,6 +32,7 @@ class Localizer:
         self.eps = eps
         self.min_samples = min_samples
         self.geod = Geodesic.WGS84
+        self._warned_no_detections = False
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -69,8 +65,11 @@ class Localizer:
         """
 
         if not pixel_centers:
-            rclpy.logging.get_logger("localizer").warn("No pixel centers provided, returning empty list")
+            if not self._warned_no_detections:
+                rclpy.logging.get_logger("localizer").warn("No objects detected in frame")
+                self._warned_no_detections = True
             return []
+        self._warned_no_detections = False
 
         # 1) Undistort to normalized image plane
         pts = np.array([(u, v) for u, v, _ in pixel_centers], dtype=np.float32)
