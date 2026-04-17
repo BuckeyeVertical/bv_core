@@ -391,7 +391,7 @@ class VisionNode(Node):
         if self.state != 'scan':
             return
 
-        if self.curr_wp % 2 == 0 and self.curr_wp + 1 <= len(self.scan_points):
+        if self.curr_wp % 2 == 0 and self.curr_wp + 1 < len(self.scan_points):
             # Anchor at current GPS (drone is at scan_points[curr_wp]); next is scan_points[curr_wp+1]
             if len(self.gps_buffer) > 0:
                 g = self.gps_buffer[-1]
