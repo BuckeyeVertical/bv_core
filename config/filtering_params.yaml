@@ -10,7 +10,6 @@ c_matrix: [3582.919594907671, 0.0, 2309.6945407896765,
 dist_coefficients: [0.13686699, -0.31351783, 0.0008991, -0.0005242, 0.20004041]
 
 camera_orientation: [0.0, 0.0, 0.0]
-#camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
 
 
 # Ignore detections within this radius of previously deployed targets.
@@ -26,3 +25,4 @@ deployed_ignore_radius_deg: 0.0001
 #            0.0, 410.9392741979716, 360.0,
 #            0.0, 0.0, 1.0]
 # dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+#camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
