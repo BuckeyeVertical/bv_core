@@ -55,9 +55,9 @@ High-level services (“microservices”) and data flow:
 
 - **mission_node** (bv_core.mission.MissionRunner)
 	- Publishes: `/mission_state` (std_msgs/String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
-	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/global_obj_dets` (std_msgs/Int8)
+	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), and a confirmed-detection topic configurable via the `confirmed_topic` parameter — defaults to `/global_obj_dets` (autonomous) and is set to `/approved_obj_dets` by `mission.launch.py` when `human_approval_required:=true` (sourced from the [bv_gcs](https://github.com/BuckeyeVertical/bv_gcs) approval gate)
 	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `localize_object` (bv_msgs/srv/LocalizeObject) on vision_node
-	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params. On confirmed detections from `/global_obj_dets`, calls `localize_object` to get GPS, then flies to object and deploys payload.
+	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params. On confirmed detections from the configured topic, calls `localize_object` to get GPS, then flies to object and deploys payload.
 
 - **vision_node** (bv_core.vision_node.VisionNode)
 	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
@@ -66,9 +66,9 @@ High-level services (“microservices”) and data flow:
 	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs LTDETR when `detector_type: "ml"` is selected, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
 
 - **filtering_node** (bv_core.filtering_node.FilteringNode)
-	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after 3-frame consistency, excluding areas near already-deployed locations
+	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after 3-frame consistency, excluding areas near already-deployed locations; `/pending_obj_dets` (bv_msgs/PendingDetection) — same confirmation event enriched with geolocated lat/lon, altitude, and drone GPS, consumed by the [bv_gcs](https://github.com/BuckeyeVertical/bv_gcs) approval gate
 	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
-	- Role: Time-aligns detections with pose/GPS, projects to lat/lon using camera intrinsics/orientation from `filtering_params.yaml`. Confirms detections in scan state and publishes `/global_obj_dets`; does not provide a service — mission uses `localize_object` on vision_node for per-object GPS.
+	- Role: Time-aligns detections with pose/GPS, projects to lat/lon using camera intrinsics/orientation from `filtering_params.yaml`. Confirms detections in scan state and publishes `/global_obj_dets` (legacy) and `/pending_obj_dets` (rich); does not provide a service — mission uses `localize_object` on vision_node for per-object GPS.
 
 - **stitching_node** (bv_core.stitching.ImageStitcherNode)
 	- Subscribes (ROS): `/mission_state` (String), `/mavros/mission/reached` (WaypointReached)
@@ -319,8 +319,16 @@ bash ./PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx
 
 Single system run (PX4 + MAVROS already running):
 ```bash
+# Default — human approval gate ON; brings up rosbridge + approval_node.
 ros2 launch bv_core mission.launch.py
+
+# Fully autonomous — original behavior, no GCS in the loop.
+ros2 launch bv_core mission.launch.py human_approval_required:=false
 ```
+
+Launch arguments:
+- `human_approval_required` (default `true`): when `true`, inserts the [bv_gcs](https://github.com/BuckeyeVertical/bv_gcs) approval gate between filtering and mission and brings up `rosbridge_websocket`. When `false`, `mission_node` subscribes directly to `/global_obj_dets` and runs autonomously.
+- `rosbridge_port` (default `9090`): port for `rosbridge_websocket` when the gate is on.
 
 Individual nodes (for testing):
 ```bash
@@ -341,6 +349,27 @@ To run foxglove:
 ```bash
 ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765
 ```
+
+## Human-in-the-loop GCS (bv_gcs)
+
+By default `mission.launch.py` runs with `human_approval_required:=true`, which inserts the [bv_gcs](https://github.com/BuckeyeVertical/bv_gcs) approval gate between `filtering_node` and `mission_node`. Confirmed detections show up in a browser dashboard on the ground laptop and the operator must Approve or Reject before the drone localizes/delivers.
+
+```
+filtering_node --/pending_obj_dets--> approval_node --/approved_obj_dets--> mission_node
+                                          ^
+                          srv /detection_decision  (called from browser via rosbridge :9090)
+```
+
+When the gate is enabled, the launch file additionally brings up `bv_gcs`'s `approval_node` and a `rosbridge_websocket` on port `9090` (override with `rosbridge_port:=...`). On the ground laptop, run the [bv_gcs web frontend](https://github.com/BuckeyeVertical/bv_gcs/tree/main/web):
+
+```bash
+cd ~/bv_ws/src/bv_gcs/web
+npm install            # first time only
+VITE_ROS_URL=ws://<drone-ip>:9090 npm run dev
+# Open http://localhost:5173
+```
+
+Setup steps for `bv_gcs` (clone the package into `src/`, add the two new `bv_msgs` interfaces, install `rosbridge_suite`) are documented in the [bv_gcs README](https://github.com/BuckeyeVertical/bv_gcs#one-time-setup). For fully autonomous runs (no operator), use `human_approval_required:=false` — `mission_node` falls back to `/global_obj_dets` and neither the gate nor the bridge is launched.
 
 ## Simulation (SITL) and vehicle setup
 
@@ -526,7 +555,7 @@ You can now proceed to run the BV stack (`ros2 launch bv_core mission.launch.py`
 	- `takeoff` → `lap` → `stitching` → `scan` → `localize` → `deliver` → `deploy` → `return`
 - Mission publishes `/deployed_object_locations` (bv_msgs/ObjectLocations) after each successful payload deployment; filtering_node uses this to ignore detections near serviced locations.
 - Vision publishes `/obj_dets` and queue state on `/queue_state` (1=empty/ready, 0=busy). Vision provides `localize_object` (bv_msgs/srv/LocalizeObject) for mission_node to get object GPS during localize state.
-- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (3-frame consistency) during scan; mission_node subscribes and triggers localize/deliver/deploy per detection.
+- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (3-frame consistency) during scan, and the same confirmation event on `/pending_obj_dets` (bv_msgs/PendingDetection) enriched with geolocated lat/lon for the GCS. When the bv_gcs gate is enabled, `mission_node` subscribes to `/approved_obj_dets` (set by the launch file) instead of `/global_obj_dets` and only acts on operator-approved detections; the autonomous path is recovered with `human_approval_required:=false`.
 - MAVROS bridges:
 	- Topics: `/mavros/mission/reached`, `/mavros/state`, `/mavros/global_position/global`, `/mavros/global_position/rel_alt`, `/mavros/local_position/pose`
 	- Services: `/mavros/mission/push`, `/mavros/cmd/arming`, `/mavros/set_mode`, `/mavros/cmd/command`, `/mavros/param/set`

@@ -258,14 +258,20 @@ class MissionRunner(Node):
             qos_profile=reliable_qos
         )
         
-        # Object detection trigger from filtering_node (confirmed 3-frame detection)
-        # Int8 carries the confirmed semantic class_id.
+        # Object detection trigger (Int8 carrying the confirmed semantic class_id).
+        # Default source is filtering_node's /global_obj_dets. When the bv_gcs
+        # approval gate is in front, mission.launch.py remaps this to
+        # /approved_obj_dets so a human approval is required first.
+        self.declare_parameter('confirmed_topic', '/global_obj_dets')
+        confirmed_topic = self.get_parameter('confirmed_topic') \
+            .get_parameter_value().string_value
         self.object_detected_sub = self.create_subscription(
             Int8,
-            '/global_obj_dets',
+            confirmed_topic,
             self.on_object_detected,
             qos_profile=reliable_qos
         )
+        self.get_logger().info(f"Subscribed to confirmed_topic={confirmed_topic}")
         
         
         # Service Clients

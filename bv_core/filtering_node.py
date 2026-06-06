@@ -14,6 +14,7 @@ import numpy as np
 from sensor_msgs.msg import NavSatFix
 
 from bv_msgs.msg import ObjectLocations         # your custom msg
+from bv_msgs.msg import PendingDetection
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -102,6 +103,8 @@ class FilteringNode(Node):
         global_dets_qos = QoSProfile(depth=10)
         global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
         self.confirmed_pub = self.create_publisher(Int8, '/global_obj_dets', global_dets_qos)
+        self.pending_pub = self.create_publisher(
+            PendingDetection, '/pending_obj_dets', global_dets_qos)
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -245,19 +248,35 @@ class FilteringNode(Node):
             }
         self.log.frame_window(len(self.frame_history), 3, window_data)
         # Check for consistent detection across 3 frames
-        confirmed_class = self._check_3frame_confirmation()
-        
+        confirmation = self._check_3frame_confirmation()
+
         # Guard: confirm class is a valid target and still undetected
-        if confirmed_class is not None and confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
-            self.targets[confirmed_class]["state"] = "confirmed"
-            self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
+        if confirmation is not None:
+            confirmed_class, confirmed_lat, confirmed_lon = confirmation
+            if confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
+                self.targets[confirmed_class]["state"] = "confirmed"
+                self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
+
+                pending = PendingDetection()
+                pending.header.stamp = self.get_clock().now().to_msg()
+                pending.header.frame_id = 'map'
+                pending.detection_id = ''
+                pending.class_id = int(confirmed_class)
+                pending.latitude = float(confirmed_lat)
+                pending.longitude = float(confirmed_lon)
+                pending.altitude = float(self.last_rel_alt.data) if self.last_rel_alt else 0.0
+                pending.confidence = 0.0
+                pending.drone_latitude = float(best_gps.latitude)
+                pending.drone_longitude = float(best_gps.longitude)
+                self.pending_pub.publish(pending)
 
     def _check_3frame_confirmation(self):
         """
         Check if any class appears in all 3 recent frames within spatial proximity.
-        
+
         Returns:
-            class_id if confirmed, None otherwise
+            (class_id, lat, lon) tuple if confirmed, None otherwise.
+            lat/lon come from the most recent confirming frame.
         """
         # if len(self.frame_history) < 3:
             # self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
@@ -316,7 +335,8 @@ class FilteringNode(Node):
                     f"class={cls_name}({cls}), "
                     f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
                     f"thresh={thresh_m:.1f}m")
-                return cls
+                last_lat, last_lon = positions[-1]
+                return (cls, last_lat, last_lon)
             else:
                 self.log.event('REJECTED',
                     f"class={cls_name}({cls}), "
