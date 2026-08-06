@@ -858,12 +858,32 @@ autonomous behavior already flown."
 ### Task 3: vision_node fills the annotated crop
 
 **Files:**
+- Modify: `../bv_msgs/srv/LocalizeObject.srv`
 - Modify: `bv_core/vision_node.py` (config load near line 103; `_handle_localize_request` lines 475–612)
 - Modify: `config/vision_params.yaml`
 
 **Interfaces:**
 - Consumes: `bv_core.detection_crop.CropConfig`, `build_annotated_crop` (Task 1).
-- Produces: `LocalizeObject.Response.annotated_crop` populated with JPEG bytes and `format='jpeg'`, or left empty on failure.
+- Produces:
+  - `LocalizeObject.Response.annotated_crop` — JPEG bytes with `format='jpeg'`, or left empty on failure.
+  - `LocalizeObject.Response.confidence` — `float32`, the detector confidence for the returned detection, `0.0` when unavailable.
+
+- [ ] **Step 0: Add `confidence` to the localize service response**
+
+`mission_node` needs the detector confidence to show the operator, but only
+`vision_node` has it. Without this the dashboard would display `0%` beside a
+crop whose own burned-in label reads `person 0.94` — two contradictory numbers
+on one screen.
+
+In `~/bv_ws/src/bv_msgs/srv/LocalizeObject.srv`, append to the **response**
+block (after `annotated_crop`):
+
+```
+# Detector confidence for the returned detection, 0.0 when unavailable.
+float32 confidence
+```
+
+This is another trailing field, so existing readers are unaffected.
 
 - [ ] **Step 1: Add the crop tunables to `config/vision_params.yaml`**
 
@@ -948,6 +968,14 @@ Replace the response-building block (currently lines 601–612, beginning `# At 
         response.altitude = drone_pose[2]
         response.class_id = int(best_coord[2])
 
+        # Set outside the try below: confidence cannot fail to compute, and a
+        # crop failure must not silently zero it — the GCS displays this number.
+        response.confidence = (
+            float(detections.confidence[best_index])
+            if detections.confidence is not None
+            else 0.0
+        )
+
         # Annotated crop for the human-in-the-loop gate. A failure here must
         # never fail the localization: an encoding bug would silently turn into
         # the aircraft abandoning real targets. The ground station renders an
@@ -958,15 +986,13 @@ Replace the response-building block (currently lines 601–612, beginning `# At 
                 if 0 <= response.class_id < len(CLASS_NAMES)
                 else f"class_{response.class_id}"
             )
-            conf = float(detections.confidence[best_index]) \
-                if detections.confidence is not None else 0.0
             response.annotated_crop.header.stamp = \
                 self.get_clock().now().to_msg()
             response.annotated_crop.format = 'jpeg'
             response.annotated_crop.data = build_annotated_crop(
                 frame,
                 detections.xyxy[best_index],
-                f"{cls_name} {conf:.2f}",
+                f"{cls_name} {response.confidence:.2f}",
                 self.crop_cfg,
             )
         except Exception as exc:   # noqa: BLE001 - degrade, never fail localize
@@ -1438,7 +1464,7 @@ with:
             lat=response.latitude,
             lon=response.longitude,
             alt=response.altitude,
-            confidence=0.0,
+            confidence=response.confidence,
             drone_lat=self.current_lat if self.current_lat is not None else 0.0,
             drone_lon=self.current_lon if self.current_lon is not None else 0.0,
             annotated_crop=crop,
@@ -1705,8 +1731,6 @@ from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
 
 from bv_msgs.msg import ObjectLocations, PendingDetection
 from std_msgs.msg import String
-
-CLASS_NAMES = ("person", "tent")
 
 
 class SimApprovalCheck(Node):
