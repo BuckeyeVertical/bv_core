@@ -181,6 +181,22 @@ class TestRequest:
         assert calls['approve'] == 0
         assert calls['reject'] == []
 
+    def test_superseded_timer_cannot_approve_the_new_detection(self, gate_env):
+        node, gate, calls, make_request = gate_env
+        make_request()
+        first_timer = node.timers[0]
+        second_id = make_request()
+
+        # destroy_timer stops future firings, but a timer already collected into
+        # the executor's ready queue still runs its callback. That late fire must
+        # not consume the detection the operator is currently looking at.
+        first_timer.callback()
+
+        assert calls['approve'] == 0
+        assert calls['reject'] == []
+        assert gate.is_pending()
+        assert node.publisher.published[-1].detection_id == second_id
+
     def test_zero_timeout_arms_no_timer(self):
         node = StubNode()
         gate = ApprovalGate(node, timeout_sec=0.0)

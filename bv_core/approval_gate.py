@@ -123,8 +123,14 @@ class ApprovalGate:
                 'the decision will time out and deploy')
 
         if self._timeout_sec > 0:
+            # Bind the timer to the id it was armed for. This is NOT redundant
+            # with the destroy_timer in _clear(): destroying stops future
+            # firings, but a timer already collected into the executor's ready
+            # queue still runs its callback afterwards. Without the id, that
+            # late fire would auto-approve whatever is pending *now* -- a
+            # superseding detection the operator has had only seconds to judge.
             self._timer = self._node.create_timer(
-                self._timeout_sec, self._on_timeout)
+                self._timeout_sec, lambda: self._on_timeout(detection_id))
 
         self._node.get_logger().info(
             f"AWAITING APPROVAL id={detection_id} class_id={class_id} "
@@ -203,8 +209,14 @@ class ApprovalGate:
 
         return response
 
-    def _on_timeout(self):
+    def _on_timeout(self, armed_for):
         if self._pending is None:
+            return
+        if self._pending['detection_id'] != armed_for:
+            # A deadline that belongs to a detection we already moved past.
+            self._node.get_logger().warn(
+                f"ignoring stale approval timeout armed for id={armed_for}; "
+                f"id={self._pending['detection_id']} is now pending")
             return
         pending = self._pending
         on_approve = self._on_approve
