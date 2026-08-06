@@ -29,6 +29,12 @@ its worst failure is a blank video panel.
 - **`cv2.VideoCapture` owns the capture GStreamer pipeline** (`camera_pipeline.py:35`)
   and exposes no handle to its elements, so a `tee` branch cannot be gated at
   runtime. The preview is fed from the numpy frames Python already holds.
+- **OpenCV cannot be relied on for the encode.** The dev PC's `opencv-python` wheel
+  reports `GStreamer: NO`, so `cv2.VideoWriter(..., CAP_GSTREAMER)` does not exist
+  there. It works on the Jetson only because that OpenCV is built with GStreamer —
+  which is also why `CameraPipeline` runs only under `pipeline_type: 'real'` while sim
+  uses `GzTransportPipeline`. Depending on an OpenCV build flag that varies per machine
+  is the fragile path.
 
 ## Decisions
 
@@ -38,11 +44,36 @@ three pipelines funnel through it — `camera_pipeline.py:85`,
 rosbag replay all get the stream with zero per-pipeline code. The feature can be
 developed and tested entirely in Gazebo.
 
+**Encoding goes through `gi.repository.Gst` directly, not `cv2`.** PyGObject and
+GStreamer 1.20 are already installed and verified working on both the dev PC and the
+Jetson, so the same code runs everywhere regardless of how OpenCV was built. It also
+gives an `appsink`, so encoded bytes come straight back into Python — which removes
+the localhost TCP socket an earlier draft needed purely to work around
+`cv2.VideoWriter` being write-only.
+
+**The encoder element is chosen by probing, in a three-tier ladder.** Measured on the
+target machines:
+
+| Tier | Element | Where |
+| --- | --- | --- |
+| 1 | `nvv4l2h264enc` + `nvvidconv` | Jetson (Tegra NVENC, NVMM memory) |
+| 2 | `nvh264enc` | desktop NVIDIA GPUs |
+| 3 | `x264enc` | anywhere, software |
+
+Tier 1 and 2 differ by more than the element name: `nvvidconv` produces
+`video/x-raw(memory:NVMM)`, which only the Jetson encoder consumes, so each tier
+carries its own caps. Selection probes the registry once at `start()`.
+
+Software encoding is not a compromise on the dev machine: `x264enc` was measured at
+roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — about 15× the 8 fps target.
+(`nvh264enc` is present there but fails to initialise under WSL2 with "Could not
+configure supporting library"; tier 3 covers it and nothing is lost.)
+
 **Transport is H.264 → fragmented MP4 → the existing WebSocket → MSE.** It reuses
-`approval_node`'s WebSocket, so there is no new port, no ICE, and no new Python
-dependency. Latency lands around 300–600 ms, which is acceptable for debugging. The
-encode half is identical to a WebRTC design, so if latency ever matters the browser
-transport can be swapped without touching the pipeline.
+`approval_node`'s WebSocket, so there is no new port and no ICE. Latency lands around
+300–600 ms, which is acceptable for debugging. The encode half is identical to a
+WebRTC design, so if latency ever matters the browser transport can be swapped
+without touching the pipeline.
 
 **The operator toggles it explicitly in the GCS**, defaulting off at startup. Because
 the vision pipeline only runs during `scan` and `localize`, a forgotten "on" is
@@ -78,20 +109,21 @@ capture loop
               ▼
          encoder thread
           decimate → resize → appsrc
-          → nvv4l2h264enc → h264parse
-          → mp4mux(fragmented)
-          → tcpserversink 127.0.0.1:5001
-                                    │
-                                    └──TCP──→ relay task
-                                                └──binary WS frames──→ MSE <video>
+          → [probed encoder] → h264parse
+          → mp4mux(fragmented) → appsink
+              │
+              └─→ /preview_stream ──────────→ subscribe
+                  (std_msgs/UInt8MultiArray)     └──binary WS frames──→ MSE <video>
                                                                             ▲
 /obj_dets ─────────────────────────────────→ normalise ──JSON WS──→ canvas overlay
 /preview_enabled ←──────────────────────────  toggle
 ```
 
-The localhost TCP socket is the process boundary between `bv_core` and `bv_gcs`. It
-avoids a `gi.repository.Gst` dependency: `cv2.VideoWriter` with `CAP_GSTREAMER` can
-drive an `appsrc → … → tcpserversink` pipeline, and `cv2` is already a dependency.
+The process boundary between `bv_core` and `bv_gcs` is a plain ROS topic carrying
+fMP4 chunks, which matches how every other cross-node path in this stack works and
+needs no socket lifecycle management. `std_msgs/UInt8MultiArray` avoids a new
+`bv_msgs` interface. QoS is BEST_EFFORT depth 2: a dropped chunk should be skipped,
+never retried, since late video is worse than missing video.
 
 ## Components
 
@@ -103,11 +135,10 @@ class PreviewConfig:
     width: int = 1024
     fps: float = 8.0
     bitrate_bps: int = 1_200_000
-    port: int = 5001
 
 class PreviewStream:
-    def __init__(self, cfg: PreviewConfig, log=None)
-    def start(self) -> None      # build the VideoWriter, spawn the encode thread
+    def __init__(self, cfg: PreviewConfig, on_chunk, log=None)
+    def start(self) -> None      # probe encoder, build the Gst pipeline, spawn thread
     def stop(self) -> None       # release; idempotent
     def is_running(self) -> bool
     def offer(self, frame) -> None   # non-blocking, latest-wins, drops when busy
@@ -130,16 +161,36 @@ order of magnitude cheaper than resizing the full frame directly. `n` is derived
 accepted frame, return immediately. This is what makes a 24 fps camera cost the same
 as an 8 fps one.
 
-GStreamer pipeline (Jetson):
+**The Jetson pipeline is the one that matters.** It is the deployment target and the
+only machine where encode cost competes with flight work; the other tiers exist so the
+feature can be developed against sim and must not be optimised for.
+
+Tier 1 — **Jetson**, the shipping path. Scaling and colour conversion happen in NVMM
+memory on the hardware converter, so the CPU never touches a full-size frame after the
+decimation step:
 ```
 appsrc ! video/x-raw,format=BGR ! videoconvert ! nvvidconv
+  ! video/x-raw(memory:NVMM),width=<w>,height=<h>
   ! nvv4l2h264enc bitrate=<bitrate> insert-sps-pps=true iframeinterval=<2*fps>
+    maxperf-enable=true
   ! h264parse ! mp4mux fragment-duration=200 streamable=true
-  ! tcpserversink host=127.0.0.1 port=<port> sync=false recover-policy=keyframe
+  ! appsink emit-signals=true sync=false max-buffers=8 drop=true
 ```
-On a machine without NVENC (dev laptops, sim) `nvvidconv`/`nvv4l2h264enc` are absent;
-the module falls back to `videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast`.
-Selection is by probing element availability once at `start()`, not by config.
+
+Tier 2 — desktop NVIDIA. `nvh264enc` takes ordinary system memory, so the NVMM caps
+must not be applied:
+```
+appsrc ! video/x-raw,format=BGR ! videoconvert ! videoscale
+  ! video/x-raw,width=<w>,height=<h>
+  ! nvh264enc bitrate=<kbps> preset=low-latency-hq ! h264parse ! mp4mux … ! appsink
+```
+
+Tier 3 — software, any machine: `videoconvert ! videoscale ! x264enc tune=zerolatency
+speed-preset=ultrafast bitrate=<kbps>`, same tail.
+
+Selection probes `Gst.Registry` once at `start()` and logs which tier was chosen — on
+the Jetson, seeing tier 2 or 3 in the log means the hardware path silently regressed,
+which is exactly the failure worth noticing.
 
 ### Edits: `bv_core/pipelines/Vision_Pipeline.py` (~8 lines)
 
@@ -160,18 +211,20 @@ allocation. Behaviour is identical to today.
 
 ### Edits: `bv_core/vision_node.py` (~25 lines)
 
-Construct `PreviewStream` from config, subscribe `/preview_enabled` (`std_msgs/Bool`),
-and start/stop it on toggle, attaching it to the pipeline via `set_preview`. Starting
-is a no-op unless the pipeline is running, so the stream naturally follows the existing
-scan/localize lifecycle without touching it.
+Construct `PreviewStream` from config with an `on_chunk` callback that publishes to
+`/preview_stream`, subscribe `/preview_enabled` (`std_msgs/Bool`), and start/stop it on
+toggle, attaching it to the pipeline via `set_preview`. Starting is a no-op unless the
+pipeline is running, so the stream naturally follows the existing scan/localize
+lifecycle without touching it.
 
 ### Edits: `bv_gcs/bv_gcs/approval_node.py` (~70 lines)
 
 - Publish `/preview_enabled` (`std_msgs/Bool`, latched) from a WS message
   `{"type": "preview", "enabled": bool}`.
-- When enabled, an asyncio task connects to `127.0.0.1:5001`, reads fMP4 chunks, and
-  broadcasts them as **binary** WebSocket frames. On disconnect it retries with backoff
-  while the toggle is on, and stops when it is off.
+- Subscribe `/preview_stream` (`std_msgs/UInt8MultiArray`, BEST_EFFORT depth 2) and
+  broadcast each chunk as a **binary** WebSocket frame. Chunks arriving with no WS
+  client are dropped rather than buffered, so nothing crosses the radio link when
+  nobody is watching.
 - Subscribe `/obj_dets`, **normalise centres to 0–1** against the source frame
   dimensions, and broadcast
   `{"type":"detections","dets":[{"x":0.42,"y":0.31,"class_id":0,"class_name":"person"}],"stamp":…}`.
@@ -199,8 +252,7 @@ operator who does not want video.
 | --- | --- | --- |
 | `preview_width` | `1024` | Output width; height follows source aspect |
 | `preview_fps` | `8.0` | Decimation target; the knob for CPU and bitrate |
-| `preview_bitrate_bps` | `1200000` | NVENC target bitrate |
-| `preview_port` | `5001` | localhost TCP port between the nodes |
+| `preview_bitrate_bps` | `1200000` | Encoder target bitrate |
 
 **Aspect ratio differs between sources and this affects the bitrate.** The real
 sensor is 4640×3480 — **4:3**, not 16:9 — so `preview_width: 1024` gives 1024×768.
@@ -218,11 +270,11 @@ mission.** Every failure resolves by the video stopping.
 | Failure | Behaviour |
 | --- | --- |
 | Encoder slower than capture | Frames dropped in `offer()`. Preview loses fps; capture unaffected. |
-| `VideoWriter` fails to open (no encoder, port in use) | Log an error, `is_running()` stays false, toggle reports failure to the UI. Vision continues. |
+| Gst pipeline fails to reach PLAYING | Log an error naming the tier that was tried, `is_running()` stays false, toggle reports failure to the UI. Vision continues. On the Jetson this is the signal that the hardware encoder is unavailable and the flight image needs checking. |
 | `offer()` raises | Caught inside `offer()` and logged once per N failures; never propagates into `_enqueue_frame`. |
-| `approval_node` cannot connect to 5001 | Retry with backoff while the toggle is on; UI shows `connecting`. |
-| Last browser disconnects | The toggle is authoritative and stays on — it is an operator control, not a viewer-presence signal. The relay stops reading the socket while there are no WS clients, so nothing crosses the radio link; the encoder keeps running on the Jetson until the operator toggles off. Reconnecting a browser resumes mid-stream on the next keyframe. |
-| Pipeline stops (leaving scan/localize) | No frames arrive, so no chunks. The socket stays open and resumes on the next scan. |
+| No chunks arriving on `/preview_stream` | UI shows `connecting` while the toggle is on. Distinguishes "encoder failed" from "not in scan yet" by whether `is_running()` was reported true. |
+| Last browser disconnects | The toggle is authoritative and stays on — it is an operator control, not a viewer-presence signal. `approval_node` drops incoming chunks while there are no WS clients, so nothing crosses the radio link; the encoder keeps running on the Jetson until the operator toggles off. Reconnecting resumes on the next keyframe. |
+| Pipeline stops (leaving scan/localize) | No frames arrive, so no chunks are produced. The encoder stays alive and resumes on the next scan. |
 | MSE buffer grows unbounded | Client evicts appended ranges behind `currentTime` and seeks to live if it falls more than 2 s behind. |
 
 ## Testing
