@@ -77,6 +77,16 @@ class ApprovalGate:
         Returns:
             The generated detection_id.
         """
+        if self._pending is not None:
+            # Replace rather than ignore: a stale detection the aircraft has
+            # already moved on from is worse than a surprising swap. Clearing
+            # also kills the old timer, which would otherwise fire on the FIRST
+            # detection's deadline and auto-approve THIS one early.
+            self._node.get_logger().warn(
+                f"superseding pending approval id={self._pending['detection_id']} "
+                f"with a new detection; the operator's decision window restarts")
+            self._clear()
+
         detection_id = str(uuid.uuid4())
 
         self._pending = {
@@ -170,7 +180,10 @@ class ApprovalGate:
             if self._log:
                 self._log.event('APPROVAL_GRANTED',
                                 f"id={pending['detection_id']}, source=operator")
-            on_approve()
+            # accepted stays True: the verdict *was* accepted. The action it
+            # triggered failed, and that failure is reported separately -- the
+            # ground station must still get a response instead of hanging.
+            self._safely(on_approve, pending, 'on_approve')
         else:
             response.accepted = True
             response.message = 'rejected - resuming scan'
@@ -183,8 +196,10 @@ class ApprovalGate:
                     f"id={pending['detection_id']}, class={pending['class_id']}, "
                     f"lat={pending['lat']:.6f}, lon={pending['lon']:.6f}, "
                     f"reason={request.reason!r}")
-            on_reject(pending['lat'], pending['lon'],
-                      pending['class_id'], request.reason)
+            # As above: the rejection was accepted even if acting on it failed.
+            self._safely(on_reject, pending, 'on_reject',
+                         pending['lat'], pending['lon'],
+                         pending['class_id'], request.reason)
 
         return response
 
@@ -203,9 +218,29 @@ class ApprovalGate:
                 'APPROVAL_TIMEOUT',
                 f"id={pending['detection_id']}, class={pending['class_id']}, "
                 f"timeout={self._timeout_sec:.0f}s, action=deploy")
-        on_approve()
+        self._safely(on_approve, pending, 'on_approve')
 
     # -- internals --------------------------------------------------------
+
+    def _safely(self, callback, pending, name, *args):
+        """Run a mission callback without letting it escape into rclpy.
+
+        These callbacks drive MAVROS waypoint pushes. rclpy does not catch
+        exceptions raised in service or timer callbacks, so an unguarded raise
+        would propagate out of rclpy.spin() and take mission_node down in
+        flight. Log it and keep the node alive instead.
+        """
+        try:
+            callback(*args)
+        except Exception as exc:      # noqa: BLE001 - deliberately broad
+            self._node.get_logger().error(
+                f"{name} failed for id={pending['detection_id']} "
+                f"class={pending['class_id']} "
+                f"lat={pending['lat']:.6f} lon={pending['lon']:.6f}: {exc!r}")
+            if self._log:
+                self._log.event(
+                    'APPROVAL_CALLBACK_FAILED',
+                    f"id={pending['detection_id']}, callback={name}, error={exc!r}")
 
     def _clear(self):
         self._pending = None
@@ -213,6 +248,9 @@ class ApprovalGate:
         self._on_reject = None
         if self._timer is not None:
             self._timer.cancel()
+            # Cancelling alone leaves the timer in node._timers, where the
+            # executor re-adds it to its wait set every spin iteration.
+            self._node.destroy_timer(self._timer)
             self._timer = None
         # Empty detection_id is the "nothing pending" convention the GCS uses.
         self._pub.publish(PendingDetection())

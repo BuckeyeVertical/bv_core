@@ -11,6 +11,8 @@ from builtin_interfaces.msg import Time
 
 import pytest
 
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from bv_msgs.srv import DetectionDecision  # noqa: E402
@@ -68,11 +70,14 @@ class StubNode:
     def __init__(self):
         self.publisher = _StubPublisher()
         self.timers = []
+        self.destroyed_timers = []
+        self.publisher_args = None
         self.services = {}
         self._logger = _StubLogger()
         self._clock = _StubClock()
 
     def create_publisher(self, msg_type, topic, qos):
+        self.publisher_args = (msg_type, topic, qos)
         return self.publisher
 
     def create_service(self, srv_type, name, callback):
@@ -84,11 +89,19 @@ class StubNode:
         self.timers.append(timer)
         return timer
 
+    def destroy_timer(self, timer):
+        self.destroyed_timers.append(timer)
+
     def get_logger(self):
         return self._logger
 
     def get_clock(self):
         return self._clock
+
+    def live_timers(self):
+        """Timers created but neither cancelled nor destroyed."""
+        return [t for t in self.timers
+                if not t.cancelled and t not in self.destroyed_timers]
 
 
 @pytest.fixture
@@ -139,6 +152,34 @@ class TestRequest:
         make_request()
         assert len(node.timers) == 1
         assert node.timers[0].period == pytest.approx(180.0)
+
+    def test_publisher_qos_is_latched_for_ground_station_recovery(self, gate_env):
+        node, _, _, _ = gate_env
+        _, topic, qos = node.publisher_args
+        assert topic == '/pending_obj_dets'
+        assert qos.reliability == ReliabilityPolicy.RELIABLE
+        assert qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
+        assert qos.history == HistoryPolicy.KEEP_LAST
+        assert qos.depth == 1
+
+    def test_second_request_supersedes_the_first(self, gate_env):
+        node, gate, calls, make_request = gate_env
+        make_request()
+        first_timer = node.timers[0]
+        second_id = make_request()
+
+        # The superseded detection's timer must not survive to auto-approve the
+        # new one on the old deadline.
+        assert first_timer.cancelled is True
+        assert first_timer in node.destroyed_timers
+        assert len(node.live_timers()) == 1
+        assert node.live_timers()[0] is not first_timer
+
+        assert gate.is_pending()
+        assert node.publisher.published[-1].detection_id == second_id
+        # Superseding is not a verdict: neither callback runs.
+        assert calls['approve'] == 0
+        assert calls['reject'] == []
 
     def test_zero_timeout_arms_no_timer(self):
         node = StubNode()
@@ -193,6 +234,52 @@ class TestDecision:
         _decide(node, detection_id, True)
         assert node.timers[0].cancelled is True
 
+    def test_decision_destroys_the_timer(self, gate_env):
+        node, _, _, make_request = gate_env
+        detection_id = make_request()
+        _decide(node, detection_id, True)
+        # A merely-cancelled rclpy timer stays in node._timers and is re-added
+        # to the executor wait set every spin iteration.
+        assert node.destroyed_timers == [node.timers[0]]
+
+
+class TestCallbackFailure:
+    """A raising callback must not take mission_node down mid-flight."""
+
+    def _gate_with(self, on_approve=None, on_reject=None):
+        node = StubNode()
+        gate = ApprovalGate(node, timeout_sec=180.0)
+        detection_id = gate.request(
+            class_id=3, lat=38.3877, lon=-76.4190, alt=15.2, confidence=0.9,
+            drone_lat=38.3876, drone_lon=-76.4191, annotated_crop=b'x',
+            on_approve=on_approve or (lambda: None),
+            on_reject=on_reject or (lambda *a: None))
+        return node, gate, detection_id
+
+    def _boom(self, *args):
+        raise RuntimeError('waypoint push failed')
+
+    def test_raising_on_approve_still_returns_a_response(self):
+        node, gate, detection_id = self._gate_with(on_approve=self._boom)
+        response = _decide(node, detection_id, True)
+        # The verdict was accepted; the action failed and is logged separately.
+        assert response.accepted is True
+        assert not gate.is_pending()
+        assert any(level == 'error' for level, _ in node.get_logger().lines)
+
+    def test_raising_on_reject_still_returns_a_response(self):
+        node, gate, detection_id = self._gate_with(on_reject=self._boom)
+        response = _decide(node, detection_id, False, 'shadow')
+        assert response.accepted is True
+        assert not gate.is_pending()
+        assert any(level == 'error' for level, _ in node.get_logger().lines)
+
+    def test_raising_on_approve_does_not_escape_the_timer_callback(self):
+        node, gate, _ = self._gate_with(on_approve=self._boom)
+        node.timers[0].callback()      # rclpy does not catch callback exceptions
+        assert not gate.is_pending()
+        assert any(level == 'error' for level, _ in node.get_logger().lines)
+
 
 class TestTimeout:
     def test_timeout_approves(self, gate_env):
@@ -209,6 +296,7 @@ class TestTimeout:
         _decide(node, detection_id, False)
         node.timers[0].callback()          # late fire after the FSM moved on
         assert calls['approve'] == 0
+        assert len(calls['reject']) == 1   # and it did not re-run the verdict
 
 
 class TestCancel:
