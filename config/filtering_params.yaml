@@ -12,9 +12,19 @@ dist_coefficients: [0.13686699, -0.31351783, 0.0008991, -0.0005242, 0.20004041]
 camera_orientation: [0.0, 0.0, 0.0]
 
 
-# Ignore detections within this radius of previously deployed targets.
-# Units are degrees latitude/longitude (~5.5m at equator for 0.00005).
+# NOTE: deployed_ignore_radius_deg is NOT read by filtering_node. Suppression of
+# already-delivered targets is class-wide (targets[cls]["state"] == "deployed"),
+# not spatial. Kept only because mission.py logs the value. Do not wire it up
+# without reading the phase 5 design doc: making deployed suppression spatial
+# would let the drone re-deliver to a class it has already serviced.
 deployed_ignore_radius_deg: 0.0001
+
+# Ignore detections of the SAME CLASS within this radius of a location the
+# operator rejected. Degrees lat/lon; 0.0001 deg is about 11 m, which covers the
+# ~4 m localization error seen in sim while leaving a genuine second target
+# 20 m away still findable. A different class at the same spot is NOT
+# suppressed - the operator rejected a specific claim, not the ground.
+rejected_ignore_radius_deg: 0.0001
 
 # ============================================================
 # SIMULATION CAMERA INTRINSICS (Gazebo 1280x720)

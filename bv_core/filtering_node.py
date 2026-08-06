@@ -25,6 +25,18 @@ from .mission_logger import MissionLogger
 CLASS_NAMES = ("person", "tent")
 
 
+def is_within_radius(lat, lon, ref_lat, ref_lon, radius_deg):
+    """True when (lat, lon) is inside radius_deg of (ref_lat, ref_lon).
+
+    Euclidean in degrees — the mission area is small enough that treating
+    degrees as a flat plane is well within the localization error, and it
+    matches how proximity_threshold_deg is already used for 3-frame clustering.
+    """
+    d_lat = lat - ref_lat
+    d_lon = lon - ref_lon
+    return (d_lat * d_lat + d_lon * d_lon) <= (radius_deg * radius_deg)
+
+
 class FilteringNode(Node):
     def __init__(self):
         super().__init__('filtering_node')
@@ -79,6 +91,17 @@ class FilteringNode(Node):
             reliable_qos
         )
 
+        # Locations the operator rejected. Detections of the SAME class near
+        # one of these are dropped before 3-frame confirmation, so a rejected
+        # false positive cannot immediately re-confirm and re-interrupt.
+        self.rejected_location_sub = self.create_subscription(
+            ObjectLocations,
+            '/rejected_object_locations',
+            self.rejected_location_callback,
+            reliable_qos
+        )
+        self.rejected_locations = []   # list of (lat, lon, class_id)
+
         self.gps_buffer  = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
 
@@ -126,6 +149,8 @@ class FilteringNode(Node):
         self.last_rel_alt = None
         self.log = MissionLogger('filtering')
         self.proximity_threshold_deg = 0.0001
+        self.rejected_ignore_radius_deg = float(
+            cfg.get('rejected_ignore_radius_deg', 0.0001))
 
     def handle_gps(self, msg: NavSatFix):
         self.gps_buffer.append(msg)
@@ -190,11 +215,14 @@ class FilteringNode(Node):
             # drone_orientation=(1.0, 0.0, 0.0, 0.0)
         )
 
-        # filter to target classes that haven't been confirmed or deployed yet
+        # filter to target classes that haven't been confirmed or deployed yet,
+        # and drop anything the operator already rejected at this spot
         filtered_detections = [
             (lat, lon, cls)
             for lat, lon, cls in detections_global
-            if cls in self.targets and self.targets[cls]["state"] == "undetected"
+            if cls in self.targets
+            and self.targets[cls]["state"] == "undetected"
+            and not self._is_rejected(lat, lon, cls)
         ]
         
         # Only run 3-frame confirmation during scan state
@@ -332,6 +360,30 @@ class FilteringNode(Node):
             self.targets[cls]["state"] = "deployed"
             self.targets[cls]["lat"] = msg.latitude
             self.targets[cls]["lon"] = msg.longitude
+
+    def rejected_location_callback(self, msg: ObjectLocations):
+        """Record a location the operator rejected for a specific class."""
+        entry = (msg.latitude, msg.longitude, int(msg.class_id))
+        self.rejected_locations.append(entry)
+        cls_name = (CLASS_NAMES[entry[2]]
+                    if 0 <= entry[2] < len(CLASS_NAMES) else 'unknown')
+        self.get_logger().info(
+            f"Suppressing {cls_name} within "
+            f"{self.rejected_ignore_radius_deg * 111320.0:.1f}m of "
+            f"lat={entry[0]:.6f}, lon={entry[1]:.6f}")
+        self.log.event('REJECTED_LOCATION',
+                       f"lat={entry[0]:.6f}, lon={entry[1]:.6f}, "
+                       f"class={cls_name}({entry[2]}), "
+                       f"radius={self.rejected_ignore_radius_deg}deg")
+
+    def _is_rejected(self, lat, lon, class_id):
+        """True when this class was rejected by the operator near this point."""
+        return any(
+            int(class_id) == rej_cls
+            and is_within_radius(lat, lon, rej_lat, rej_lon,
+                                 self.rejected_ignore_radius_deg)
+            for rej_lat, rej_lon, rej_cls in self.rejected_locations
+        )
 
     def mission_state_callback(self, msg: String):
         if msg.data != self.prev_state:
