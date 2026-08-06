@@ -266,8 +266,38 @@ Existing JSON message handling is unaffected; binary frames are distinguished by
   (`off` / `connecting` / `live`).
 - Store additions for `previewEnabled`, `detections`, `streamState`.
 
-The panel is collapsed by default so the approval workflow is unchanged for an
-operator who does not want video.
+### Layout
+
+Three columns. The live feed and the approval crop are **side by side and both
+visible** — the gate never replaces the video, because the operator wants to see what
+the aircraft is looking at *now* while judging a frame captured a moment ago.
+
+```
+┌──────────┬───────────────────────────┬──────────────────────┐
+│ MISSION  │  LIVE FEED                │  PENDING DETECTION   │
+│          │  ┌─────────────────────┐  │  ┌────────────────┐  │
+│ state    │  │                     │  │  │ annotated crop │  │
+│ drone    │  │   <video> + canvas  │  │  │  (native res)  │  │
+│ lat/lon  │  │   detection markers │  │  └────────────────┘  │
+│          │  │                     │  │  PERSON      94%     │
+│ ── ── ── │  └─────────────────────┘  │  lat/lon/alt/dist    │
+│ STREAM   │  live · 1024×768 · 8fps   │  auto-deploys 2:41   │
+│ [ on/off]│                           │  [APPROVE] [REJECT]  │
+└──────────┴───────────────────────────┴──────────────────────┘
+   260px            flex: 1                    360px
+```
+
+**With no pending detection** the right column collapses and the live feed takes the
+full width — so an operator who is only watching the stream gets the biggest possible
+picture, and the approval card arriving is itself a visible signal.
+
+**With the stream toggled off** the centre column shows the toggle and a short "stream
+off" message. The approval workflow is completely unchanged from today for an operator
+who never turns video on: same crop, same fields, same countdown, same shortcuts.
+
+The `[A]`/`[R]` keyboard shortcuts stay bound to the approval card regardless of what
+the video is doing, and the video element is never focusable, so it cannot swallow
+them.
 
 ### Configuration — `config/vision_params.yaml`
 
