@@ -100,7 +100,41 @@ ros2 bag play <bag_path>
 
 **Inter-node communication**: mission_node broadcasts state via `/mission_state` topic. Other nodes react to state transitions. Vision publishes detections → filtering accumulates and geolocates → mission queries filtering via service call after scan completes.
 
-**Custom messages**: defined in separate `bv_msgs` package (sibling repo in `src/`). Key types: `ObjectDetections`, `ObjectLocations`, `LocalizeObject` (service).
+**Custom messages**: defined in separate `bv_msgs` package (sibling repo in `src/`). Key types: `ObjectDetections`, `ObjectLocations`, `PendingDetection`, `LocalizeObject` (service), `DetectionDecision` (service).
+
+`LocalizeObject`'s response carries an `annotated_crop` (`sensor_msgs/CompressedImage`) alongside the coordinates — a native-resolution crop around the detection with the box and class label drawn on. It is only populated when the human-in-the-loop gate is enabled; autonomous runs leave it empty. The request carries `bool want_crop` to say so: `mission_node` sets it from whether the gate is active, so with approval disabled the localize service does exactly the work it did before the feature existed. `PendingDetection` and `DetectionDecision` belong to that gate, implemented in the sibling `bv_gcs` package — see `src/bv_gcs/README.md`. The mission-side wiring is live and is described under "Human-in-the-loop approval gate" below.
+
+`bv_msgs` for this feature lives on branch `feat/hitl-interfaces`. `mission_node` and `vision_node` both refuse to start against an older `bv_msgs` — deliberately, because the failure would otherwise be a silently failed localize on every detection, in flight.
+
+## Human-in-the-loop approval gate
+
+Optional operator confirmation between LOCALIZE and DELIVER. Off by default; when off, the flight path is identical to the pre-feature behavior.
+
+**Flow**: `mission_node` localizes a confirmed detection → `ApprovalGate` publishes a `PendingDetection` (with the annotated crop) on `/pending_obj_dets` and starts a timeout → `bv_gcs/approval_node` relays it to a browser UI → the operator approves or rejects → the verdict comes back over the `/detection_decision` service → approve runs the normal deliver path, reject publishes to `/rejected_object_locations` and resumes the scan.
+
+**Two invariants any change here must preserve**:
+
+1. With `Approval_required: false` the flight path is byte-for-byte the pre-feature path. No new topics are exercised, no gate is constructed, and no extra work is asked of the localize service.
+2. Nothing strands the aircraft. The timeout **fails open** — on expiry the drone deploys and continues, which is exactly the autonomous behavior. `mission_node` owns the deadline, so a dead ground station cannot hold the aircraft. `Approval_timeout_sec` is clamped to a 10 s floor (`MIN_APPROVAL_TIMEOUT_SEC` in `mission.py`) because a disabled timer would be the one way to violate this: nothing else can leave the localize state. If an approval callback raises, `ApprovalGate` reports it via `on_callback_error` and `mission_node` abandons the target and resumes the scan rather than loitering.
+
+**New topics and services**
+
+- **`/pending_obj_dets` (`bv_msgs/PendingDetection`)**: published by `mission_node`'s `ApprovalGate`, subscribed by `bv_gcs/approval_node`. Latched (`TRANSIENT_LOCAL`, depth 1) so a restarted ground station immediately picks up a decision already in progress. An empty `detection_id` means "nothing pending".
+- **`/detection_decision` (`bv_msgs/DetectionDecision`, service)**: served by `mission_node`, called by `bv_gcs/approval_node`. Carries the `detection_id`, the verdict and an optional reason. A verdict for a stale id is refused.
+- **`/rejected_object_locations` (`bv_msgs/ObjectLocations`)**: published by `mission_node` on a rejection, subscribed by `filtering_node`, which then suppresses future detections of that class near that spot — otherwise the same false positive re-confirms immediately and the mission loops.
+
+**New modules**
+
+- **`bv_core/approval_gate.py`** — `ApprovalGate`, owned by `mission_node`. Holds at most one pending detection, mints the `detection_id`, owns the timeout timer, and relays verdicts to mission callbacks. It is the authority; `bv_gcs` is only a relay.
+- **`bv_core/detection_crop.py`** — `CropConfig` and `build_annotated_crop`, used by `vision_node` to produce the JPEG the operator judges. The box is drawn *after* the downscale so line weight is specified in the pixels the operator actually sees.
+
+**New configuration keys**
+
+- `config/mission_params.yaml`: `Approval_required` (default `false`), `Approval_timeout_sec` (default `180.0`, clamped to a 10 s minimum).
+- `config/vision_params.yaml`: `crop_margin_factor`, `crop_min_px`, `crop_max_px`, `crop_jpeg_quality` — the `CropConfig` tunables for the operator image.
+- `config/filtering_params.yaml`: `rejected_ignore_radius_deg` — angular radius around an operator-rejected location within which detections of that class are suppressed. (Note that the neighbouring `deployed_ignore_radius_deg` is *not* read by `filtering_node` — deployed objects are suppressed by target state instead. See the comment in that YAML.)
+
+**`bv_gcs` relationship**: `bv_gcs` is a sibling ROS 2 package (`src/bv_gcs`) holding `approval_node`, which bridges the gate to a browser UI over a plain WebSocket plus a small aiohttp server. `launch/mission.launch.py` launches it only when `Approval_required` is true, so an autonomous build never needs it running. It is a relay with no authority: it cannot extend a deadline, and if it dies the mission continues on the timeout.
 
 ## Topics
 

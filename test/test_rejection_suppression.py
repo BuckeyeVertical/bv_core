@@ -166,3 +166,79 @@ class TestSuppressionReferenceFrame:
 
         # The message coordinate is the fallback, and it still suppresses.
         assert _drive(node, class_id=1) == []
+
+
+def _drive_multi(node, per_frame, class_id, frames=3):
+    """Feed `frames` of MULTIPLE detections and report what confirmed.
+
+    `per_frame` is the (lat, lon, class_id) list every frame projects to, in the
+    order the detector emitted them.
+    """
+    published = []
+    node.confirmed_pub.publish = lambda msg: published.append(int(msg.data))
+    node.localizer.get_lat_lon = lambda *a, **k: list(per_frame)
+
+    node.frame_history = []
+    node.targets[class_id]['state'] = 'undetected'
+
+    for _ in range(frames):
+        msg = ObjectDetections()
+        msg.dets = [Vector3(x=640.0, y=360.0, z=float(cls))
+                    for _, _, cls in per_frame]
+        node.handle_detections(msg)
+
+    return published
+
+
+class TestConfirmedCentroidMatchesTheConfirmedDetection:
+    """The stored position must be the one 3-frame confirmation validated.
+
+    `_check_3frame_confirmation` takes only the FIRST same-class detection per
+    frame. If the stored centroid averages every same-class detection instead,
+    a frame holding a false positive AND a real object stores a point between
+    them: the ~11 m suppression circle then lands on empty ground, so the false
+    positive keeps re-confirming, or it covers the real object and forfeits a
+    delivery.
+    """
+
+    # ~44 m north of the confirmed cluster: same class, clearly a second object.
+    OTHER_LAT = REJECT_LAT + 0.0004
+
+    def test_centroid_ignores_the_second_same_class_detection(self, node):
+        per_frame = [
+            (REJECT_LAT, REJECT_LON, 0),        # the one confirmation validates
+            (self.OTHER_LAT, REJECT_LON, 0),    # never inspected by confirmation
+        ]
+        assert _drive_multi(node, per_frame, class_id=0) == [0]
+
+        stored_lat = node.targets[0]['confirmed_lat']
+        midpoint = (REJECT_LAT + self.OTHER_LAT) / 2.0
+
+        assert stored_lat == pytest.approx(REJECT_LAT, abs=1e-9), (
+            f"stored {stored_lat!r}; midpoint of the two clusters is {midpoint!r}")
+        assert stored_lat != pytest.approx(midpoint, abs=1e-9)
+        assert node.targets[0]['confirmed_lon'] == pytest.approx(
+            REJECT_LON, abs=1e-9)
+
+    def test_rejection_suppresses_at_the_confirmed_cluster(self, node):
+        """The behavioural consequence: suppression must land on the real spot.
+
+        `rejected_location_callback` stores the confirmed position rather than
+        the message coordinates, so a midpoint centroid puts the suppression
+        circle ~22 m north of the detection that keeps firing — and the loop
+        this feature exists to break never breaks.
+        """
+        per_frame = [
+            (REJECT_LAT, REJECT_LON, 0),
+            (self.OTHER_LAT, REJECT_LON, 0),
+        ]
+        assert _drive_multi(node, per_frame, class_id=0) == [0]
+
+        rejection = ObjectLocations()
+        rejection.latitude = REJECT_LAT
+        rejection.longitude = REJECT_LON
+        rejection.class_id = 0
+        node.rejected_location_callback(rejection)
+
+        # The rejected detection alone must now be suppressed.
+        assert _drive(node, class_id=0) == []

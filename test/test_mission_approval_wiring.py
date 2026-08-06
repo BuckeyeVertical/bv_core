@@ -63,6 +63,30 @@ class _RecordingPublisher:
         return 1
 
 
+class _StubMissionLog:
+    def __init__(self):
+        self.events = []
+
+    def event(self, name, detail=''):
+        self.events.append((name, detail))
+
+
+class _RecordingLocalizeClient:
+    """Captures the LocalizeObject.Request mission_node builds."""
+
+    def __init__(self):
+        self.requests = []
+
+    def call_async(self, request):
+        self.requests.append(request)
+        return _RecordingFuture()
+
+
+class _RecordingFuture:
+    def add_done_callback(self, callback):
+        pass
+
+
 class FakeMission:
     """Stand-in carrying exactly the attributes the two callbacks touch.
 
@@ -72,7 +96,9 @@ class FakeMission:
 
     _on_approval_granted = MissionRunner._on_approval_granted
     _on_approval_rejected = MissionRunner._on_approval_rejected
+    _on_approval_callback_failed = MissionRunner._on_approval_callback_failed
     on_vision_localization_complete = MissionRunner.on_vision_localization_complete
+    request_localization_from_vision = MissionRunner.request_localization_from_vision
 
     def __init__(self, state=STATE_LOCALIZE):
         self.current_state = state
@@ -88,6 +114,8 @@ class FakeMission:
         self._localize_retry_timer = None
         self.current_lat = 38.3876
         self.current_lon = -76.4191
+        self.log = _StubMissionLog()
+        self.localize_object_client = _RecordingLocalizeClient()
 
     def get_logger(self):
         return self._logger
@@ -216,6 +244,7 @@ class GateStubNode:
     def __init__(self):
         self.publisher = _StubPublisher()
         self.timers = []
+        self.destroyed_timers = []
         self.services = {}
         self._logger = _StubLogger()
         self._clock = _StubClock()
@@ -233,13 +262,18 @@ class GateStubNode:
         return timer
 
     def destroy_timer(self, timer):
-        pass
+        self.destroyed_timers.append(timer)
 
     def get_logger(self):
         return self._logger
 
     def get_clock(self):
         return self._clock
+
+    def live_timers(self):
+        """Timers created but neither cancelled nor destroyed."""
+        return [t for t in self.timers
+                if not t.cancelled and t not in self.destroyed_timers]
 
 
 class _FakeFuture:
@@ -371,3 +405,105 @@ class TestLiveGateContract:
 
         assert mission.calls == []
         assert not gate.is_pending()
+
+
+class TestWantCropFlag:
+    """The disabled path must ask for no work it will not use.
+
+    vision_node cannot see Approval_required, so the flag rides the request.
+    """
+
+    def test_gate_disabled_does_not_request_a_crop(self):
+        mission = FakeMission()
+        assert mission.approval_gate is None
+        mission.request_localization_from_vision()
+        assert mission.localize_object_client.requests[-1].want_crop is False
+
+    def test_gate_enabled_requests_a_crop(self):
+        mission = FakeMission()
+        mission.approval_gate = object()
+        mission.request_localization_from_vision()
+        assert mission.localize_object_client.requests[-1].want_crop is True
+
+    def test_target_class_still_rides_the_request(self):
+        mission = FakeMission()
+        mission.confirmed_detection_class_id = 1
+        mission.request_localization_from_vision()
+        assert mission.localize_object_client.requests[-1].target_class_id == 1
+
+
+class TestApprovalCallbackRecovery:
+    """A verdict callback that dies mid-transition must not strand the aircraft."""
+
+    def test_abandons_the_target_and_resumes_scan(self):
+        mission = FakeMission()
+        mission._on_approval_callback_failed(
+            'on_approve', RuntimeError('waypoint push failed'))
+
+        assert mission.calls == ['enter_scan_state']
+        assert mission.current_state == 'scan'
+        assert mission.current_target_coords is None
+        assert mission.current_target_class_id is None
+        assert mission.confirmed_detection_class_id == -1
+
+    def test_does_not_retry_the_delivery(self):
+        mission = FakeMission()
+        mission._on_approval_callback_failed('on_approve', RuntimeError('x'))
+        assert 'enter_deliver_state' not in mission.calls
+
+    @pytest.mark.parametrize('state', [STATE_RTL, STATE_DELIVER, 'scan'])
+    def test_outside_localize_nothing_is_disturbed(self, state):
+        mission = FakeMission(state=state)
+        mission._on_approval_callback_failed('on_reject', RuntimeError('x'))
+        assert mission.calls == []
+        assert mission.current_target_coords is not None
+        assert mission.current_state == state
+
+    def test_live_gate_recovers_when_enter_deliver_state_raises(self):
+        """End to end: the real gate, mission's real handler, a real verdict.
+
+        This is the stranding scenario. The gate clears the pending and destroys
+        the timer BEFORE calling on_approve, so when the deliver transition dies
+        there is nothing armed left to fire.
+        """
+        node = GateStubNode()
+        mission = FakeMission()
+
+        def _explode():
+            mission.calls.append('enter_deliver_state')
+            raise RuntimeError('MAVROS waypoint push failed')
+
+        mission.enter_deliver_state = _explode
+        mission.approval_gate = ApprovalGate(
+            node, timeout_sec=180.0,
+            on_callback_error=mission._on_approval_callback_failed)
+        mission.on_vision_localization_complete(
+            _FakeFuture(_localize_response()))
+        detection_id = node.publisher.published[-1].detection_id
+
+        response = _decide(node, detection_id, True)
+
+        assert response.accepted is True
+        assert not mission.approval_gate.is_pending()
+        assert node.live_timers() == []          # nothing left to fire
+        assert mission.calls == ['enter_deliver_state', 'enter_scan_state']
+        assert mission.current_state == 'scan'   # flying, not loitering forever
+
+    def test_live_gate_recovers_on_the_timeout_path_too(self):
+        node = GateStubNode()
+        mission = FakeMission()
+
+        def _explode():
+            raise RuntimeError('MAVROS waypoint push failed')
+
+        mission.enter_deliver_state = _explode
+        mission.approval_gate = ApprovalGate(
+            node, timeout_sec=180.0,
+            on_callback_error=mission._on_approval_callback_failed)
+        mission.on_vision_localization_complete(
+            _FakeFuture(_localize_response()))
+
+        node.timers[0].callback()
+
+        assert mission.current_state == 'scan'
+        assert mission.calls == ['enter_scan_state']

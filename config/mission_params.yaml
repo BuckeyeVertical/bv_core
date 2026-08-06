@@ -111,7 +111,12 @@ enable_mission_log: true
 Approval_required: false
 
 # Seconds before auto-approving. FAILS OPEN: on expiry the drone deploys and
-# continues, so a dead link or an absent operator can never strand it. 0 waits
-# forever. The timer lives here, in mission_node, so it survives a ground
-# station crash.
+# continues, so a dead link or an absent operator can never strand it. The timer
+# lives here, in mission_node, so it survives a ground station crash.
+#
+# No value disables the timeout. mission_node clamps this to a 10 s minimum and
+# warns when it does: with no timer armed, nothing else can leave the localize
+# state (on_waypoint_reached ignores it, on_object_detected only fires in scan),
+# so a dead ground station would mean an indefinite loiter until the battery
+# failsafe. That would contradict the fail-open property above.
 Approval_timeout_sec: 180.0

@@ -324,3 +324,74 @@ class TestCancel:
         assert calls['approve'] == 0
         assert calls['reject'] == []
         assert node.publisher.published[-1].detection_id == ''
+
+
+class TestCallbackErrorHandler:
+    """Catching a raising callback is not enough — the mission must recover.
+
+    `_clear()` runs BEFORE the callback, so when on_approve dies partway through
+    the deliver transition there is no pending left and no timer left to fire.
+    Nothing else can leave STATE_LOCALIZE, so without this signal the aircraft
+    loiters until a battery failsafe.
+    """
+
+    def _gate_with(self, on_callback_error, on_approve=None, on_reject=None):
+        node = StubNode()
+        gate = ApprovalGate(node, timeout_sec=180.0,
+                            on_callback_error=on_callback_error)
+        detection_id = gate.request(
+            class_id=3, lat=38.3877, lon=-76.4190, alt=15.2, confidence=0.9,
+            drone_lat=38.3876, drone_lon=-76.4191, annotated_crop=b'x',
+            on_approve=on_approve or (lambda: None),
+            on_reject=on_reject or (lambda *a: None))
+        return node, gate, detection_id
+
+    @staticmethod
+    def _boom(*args):
+        raise RuntimeError('waypoint push failed')
+
+    def test_raising_on_approve_invokes_the_error_handler(self):
+        seen = []
+        node, _, detection_id = self._gate_with(
+            lambda name, exc: seen.append((name, type(exc))),
+            on_approve=self._boom)
+        _decide(node, detection_id, True)
+        assert seen == [('on_approve', RuntimeError)]
+
+    def test_raising_on_reject_invokes_the_error_handler(self):
+        seen = []
+        node, _, detection_id = self._gate_with(
+            lambda name, exc: seen.append(name), on_reject=self._boom)
+        _decide(node, detection_id, False, 'shadow')
+        assert seen == ['on_reject']
+
+    def test_timeout_path_invokes_the_error_handler(self):
+        seen = []
+        node, _, _ = self._gate_with(
+            lambda name, exc: seen.append(name), on_approve=self._boom)
+        node.timers[0].callback()
+        assert seen == ['on_approve']
+
+    def test_a_successful_callback_does_not_invoke_the_handler(self):
+        seen = []
+        node, _, detection_id = self._gate_with(lambda name, exc: seen.append(name))
+        _decide(node, detection_id, True)
+        assert seen == []
+
+    def test_a_raising_error_handler_cannot_cascade(self):
+        """The recovery path is itself mission code and may fail too."""
+        node, gate, detection_id = self._gate_with(
+            self._boom, on_approve=self._boom)
+        response = _decide(node, detection_id, True)     # must not raise
+        assert response.accepted is True
+        assert not gate.is_pending()
+        assert any(level == 'error' for level, _ in node.get_logger().lines)
+
+    def test_no_handler_configured_still_only_logs(self):
+        node = StubNode()
+        gate = ApprovalGate(node, timeout_sec=180.0)
+        detection_id = gate.request(
+            class_id=3, lat=38.3877, lon=-76.4190, alt=15.2, confidence=0.9,
+            drone_lat=38.3876, drone_lon=-76.4191, annotated_crop=b'x',
+            on_approve=self._boom, on_reject=lambda *a: None)
+        assert _decide(node, detection_id, True).accepted is True

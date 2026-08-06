@@ -57,6 +57,13 @@ STATE_DELIVER  = "deliver"
 STATE_DEPLOY   = "deploy"
 STATE_RTL      = "return"
 
+# Floor for Approval_timeout_sec. The approval timeout is the ONLY thing that can
+# leave STATE_LOCALIZE when a verdict never arrives, so a configured 0 (or any
+# value the gate treats as "arm no timer") would let a dead ground station strand
+# the aircraft in an indefinite loiter. Clamping at the config boundary keeps the
+# fail-open guarantee true for every possible config.
+MIN_APPROVAL_TIMEOUT_SEC = 10.0
+
 
 # Mavlink constants
 MAV_CMD_NAV_WAYPOINT = 16
@@ -138,8 +145,15 @@ class MissionRunner(Node):
 
         # Human-in-the-loop approval gate
         self.approval_required = bool(config.get('Approval_required', False))
-        self.approval_timeout_sec = float(
-            config.get('Approval_timeout_sec', 180.0))
+        configured_timeout = float(config.get('Approval_timeout_sec', 180.0))
+        self.approval_timeout_sec = max(
+            MIN_APPROVAL_TIMEOUT_SEC, configured_timeout)
+        if self.approval_timeout_sec != configured_timeout:
+            self.get_logger().warn(
+                f"Approval_timeout_sec={configured_timeout:g}s raised to "
+                f"{self.approval_timeout_sec:g}s: the approval timeout is the "
+                f"only exit from the localize state, so it cannot be disabled "
+                f"or set arbitrarily short")
 
         # Servo PWM configuration for payload deployment
         self.default_servo_pwms = config.get('Default_servo_pwms', [1500, 1500, 1500, 1500])
@@ -314,7 +328,8 @@ class MissionRunner(Node):
 
         if self.approval_required:
             self.approval_gate = ApprovalGate(
-                self, self.approval_timeout_sec, self.log)
+                self, self.approval_timeout_sec, self.log,
+                on_callback_error=self._on_approval_callback_failed)
             self.get_logger().info(
                 f"Human-in-the-loop approval ENABLED "
                 f"(timeout={self.approval_timeout_sec:.0f}s, fails open)")
@@ -750,6 +765,11 @@ class MissionRunner(Node):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
         request.target_class_id = self.confirmed_detection_class_id
+        # Only pay for the annotated crop when a human will actually look at it.
+        # vision_node cannot see Approval_required, so the flag rides the request:
+        # with the gate disabled the localize service does exactly the work it
+        # did before this feature existed.
+        request.want_crop = self.approval_gate is not None
         target_name = (
             CLASS_NAMES[request.target_class_id]
             if 0 <= request.target_class_id < len(CLASS_NAMES)
@@ -1051,6 +1071,34 @@ class MissionRunner(Node):
             + (f" ({reason})" if reason else "") + " - resuming scan")
 
         # Same cleanup as the abandon-after-5-failures path.
+        self.current_target_coords = None
+        self.current_target_class_id = None
+        self.confirmed_detection_class_id = -1
+        self.enter_scan_state()
+
+    def _on_approval_callback_failed(self, name, exc):
+        """A verdict callback raised. Get the FSM moving again.
+
+        The gate clears its pending and destroys its timer before running a
+        callback, so a half-completed transition leaves nothing armed to fire.
+        Without this the aircraft holds in STATE_LOCALIZE until a battery
+        failsafe. Abandon this target and resume the scan — the same tail the
+        reject path and the abandon-after-5-failures path already use.
+
+        Deliberately no retry: degraded-but-flying beats stranded.
+        """
+        if self.current_state != STATE_LOCALIZE:
+            self.get_logger().warn(
+                f"Approval callback '{name}' failed in state "
+                f"'{self.current_state}' - no recovery needed: {exc!r}")
+            return
+
+        self.get_logger().error(
+            f"Approval callback '{name}' failed ({exc!r}) - abandoning this "
+            f"target and resuming scan so the aircraft keeps flying")
+        self.log.event('APPROVAL_RECOVERY',
+                       f"callback={name}, action=abandon_target_resume_scan")
+
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1

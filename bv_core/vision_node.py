@@ -53,6 +53,33 @@ import supervision as sv
 CLASS_NAMES = ("person", "tent")
 
 
+# Fail on the ground, not in the air.
+#
+# rosidl Python messages use __slots__ with property setters, so assigning a
+# field that does not exist raises AttributeError. Against a stale bv_msgs that
+# would happen inside the localize service callback, on EVERY localization, even
+# with the approval gate disabled: the FSM would see a failed localize, retry
+# five times and abandon a real target — silently, in flight. mission.py already
+# fails at startup in this scenario (its ApprovalGate import pulls in the new
+# bv_msgs types), and this makes vision_node do the same.
+def _assert_bv_msgs_is_current():
+    _request = LocalizeObject.Request()
+    _response = LocalizeObject.Response()
+    _missing = [name for obj, name in ((_response, 'Response.confidence'),
+                                       (_response, 'Response.annotated_crop'),
+                                       (_request, 'Request.want_crop'))
+                if not hasattr(obj, name.split('.', 1)[1])]
+    if _missing:
+        raise RuntimeError(
+            f"bv_msgs is out of date: LocalizeObject is missing "
+            f"{', '.join(_missing)}. Rebuild bv_msgs (branch "
+            f"feat/hitl-interfaces) before flying:  "
+            f"colcon build --packages-select bv_msgs bv_core")
+
+
+_assert_bv_msgs_is_current()
+
+
 # Vision Node
 
 class VisionNode(Node):
@@ -630,28 +657,33 @@ class VisionNode(Node):
             else 0.0
         )
 
-        # Annotated crop for the human-in-the-loop gate. A failure here must
-        # never fail the localization: an encoding bug would silently turn into
-        # the aircraft abandoning real targets. The ground station renders an
-        # explicit "no image received" state instead.
-        try:
-            cls_name = (
-                CLASS_NAMES[response.class_id]
-                if 0 <= response.class_id < len(CLASS_NAMES)
-                else f"class_{response.class_id}"
-            )
-            response.annotated_crop.header.stamp = \
-                self.get_clock().now().to_msg()
-            response.annotated_crop.format = 'jpeg'
-            response.annotated_crop.data = build_annotated_crop(
-                frame,
-                detections.xyxy[best_index],
-                f"{cls_name} {response.confidence:.2f}",
-                self.crop_cfg,
-            )
-        except Exception as exc:   # noqa: BLE001 - degrade, never fail localize
-            self.get_logger().warn(f"Annotated crop failed: {exc}")
-            self.log.event('CROP_FAILED', f"reason={exc}")
+        # Annotated crop for the human-in-the-loop gate. Skipped unless the
+        # caller asked for it: on the real camera this is a 4640x3480 crop plus
+        # an INTER_AREA resize plus a JPEG encode, all on the FSM's critical
+        # path, and an autonomous mission has no one to show it to.
+        #
+        # A failure here must never fail the localization: an encoding bug would
+        # silently turn into the aircraft abandoning real targets. The ground
+        # station renders an explicit "no image received" state instead.
+        if request.want_crop:
+            try:
+                cls_name = (
+                    CLASS_NAMES[response.class_id]
+                    if 0 <= response.class_id < len(CLASS_NAMES)
+                    else f"class_{response.class_id}"
+                )
+                response.annotated_crop.header.stamp = \
+                    self.get_clock().now().to_msg()
+                response.annotated_crop.format = 'jpeg'
+                response.annotated_crop.data = build_annotated_crop(
+                    frame,
+                    detections.xyxy[best_index],
+                    f"{cls_name} {response.confidence:.2f}",
+                    self.crop_cfg,
+                )
+            except Exception as exc:   # noqa: BLE001 - degrade, never fail localize
+                self.get_logger().warn(f"Annotated crop failed: {exc}")
+                self.log.event('CROP_FAILED', f"reason={exc}")
 
         self.log.event('LOCALIZE_RESULT',
             f"success=true, lat={response.latitude:.6f}, lon={response.longitude:.6f}, "

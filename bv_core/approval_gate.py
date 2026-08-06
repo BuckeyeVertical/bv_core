@@ -24,17 +24,24 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 class ApprovalGate:
     """Holds at most one pending detection awaiting an operator verdict."""
 
-    def __init__(self, node, timeout_sec, log=None):
+    def __init__(self, node, timeout_sec, log=None, on_callback_error=None):
         """Create the gate's publisher and decision service.
 
         Args:
             node: the rclpy Node that owns the publisher, service and timer.
-            timeout_sec: seconds before auto-approving. 0 waits forever.
+            timeout_sec: seconds before auto-approving. mission_node clamps its
+                configured value to a floor; 0 arms no timer, which is why the
+                clamp exists.
             log: optional MissionLogger for structured mission events.
+            on_callback_error: called as on_callback_error(name, exc) when a
+                mission callback raises. By the time a callback runs the pending
+                is already cleared and the timer destroyed, so nothing is left
+                to fire — the owner must use this to get the FSM moving again.
         """
         self._node = node
         self._timeout_sec = float(timeout_sec)
         self._log = log
+        self._on_callback_error = on_callback_error
 
         self._pending = None      # dict describing the live detection
         self._timer = None
@@ -241,6 +248,11 @@ class ApprovalGate:
         exceptions raised in service or timer callbacks, so an unguarded raise
         would propagate out of rclpy.spin() and take mission_node down in
         flight. Log it and keep the node alive instead.
+
+        Staying alive is not enough on its own: the pending and the timer are
+        both gone before the callback runs, so a half-completed transition
+        leaves nothing to drive the FSM onward. Hand the failure to
+        on_callback_error so the owner can recover.
         """
         try:
             callback(*args)
@@ -253,6 +265,16 @@ class ApprovalGate:
                 self._log.event(
                     'APPROVAL_CALLBACK_FAILED',
                     f"id={pending['detection_id']}, callback={name}, error={exc!r}")
+            if self._on_callback_error is not None:
+                try:
+                    self._on_callback_error(name, exc)
+                except Exception as recovery_exc:  # noqa: BLE001
+                    # The recovery path is mission code too. If it also dies we
+                    # are out of options, but we still must not escape into
+                    # rclpy and kill the node.
+                    self._node.get_logger().error(
+                        f"approval recovery handler failed after {name}: "
+                        f"{recovery_exc!r}")
 
     def _clear(self):
         self._pending = None

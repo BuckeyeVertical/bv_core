@@ -274,8 +274,10 @@ class FilteringNode(Node):
             }
         self.log.frame_window(len(self.frame_history), 3, window_data)
         # Check for consistent detection across 3 frames
-        confirmed_class = self._check_3frame_confirmation()
-        
+        confirmed = self._check_3frame_confirmation()
+        confirmed_class, confirmed_positions = (
+            confirmed if confirmed is not None else (None, None))
+
         # Guard: confirm class is a valid target and still undetected
         if confirmed_class is not None and confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
             self.targets[confirmed_class]["state"] = "confirmed"
@@ -285,20 +287,22 @@ class FilteringNode(Node):
             # loiter-time estimate mission_node publishes: same projection,
             # altitude and angle, so cross-vantage error cancels and the
             # radius only has to cover frame-to-frame jitter.
-            centroid = self._frame_history_centroid(confirmed_class)
+            centroid = self._centroid(confirmed_positions)
             if centroid is not None:
                 self.targets[confirmed_class]["confirmed_lat"] = centroid[0]
                 self.targets[confirmed_class]["confirmed_lon"] = centroid[1]
             self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
 
-    def _frame_history_centroid(self, class_id):
-        """Mean (lat, lon) of this class across frame_history, or None."""
-        points = [
-            (lat, lon)
-            for frame_dets in self.frame_history
-            for lat, lon, cls in frame_dets
-            if int(cls) == int(class_id)
-        ]
+    @staticmethod
+    def _centroid(points):
+        """Mean (lat, lon) of the given points, or None if there are none.
+
+        The caller passes the exact per-frame positions that 3-frame
+        confirmation matched — one per frame, the first of that class. Averaging
+        *every* same-class detection instead would place the stored position
+        between a false positive and a real object standing in the same frame,
+        so the suppression circle would cover neither.
+        """
         if not points:
             return None
         return (sum(p[0] for p in points) / len(points),
@@ -309,7 +313,9 @@ class FilteringNode(Node):
         Check if any class appears in all 3 recent frames within spatial proximity.
         
         Returns:
-            class_id if confirmed, None otherwise
+            (class_id, positions) if confirmed, None otherwise. `positions` is
+            the one-per-frame list of (lat, lon) that actually satisfied the
+            proximity check, so callers store exactly what was validated.
         """
         # if len(self.frame_history) < 3:
             # self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
@@ -368,7 +374,7 @@ class FilteringNode(Node):
                     f"class={cls_name}({cls}), "
                     f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
                     f"thresh={thresh_m:.1f}m")
-                return cls
+                return cls, positions
             else:
                 self.log.event('REJECTED',
                     f"class={cls_name}({cls}), "
