@@ -1,15 +1,31 @@
 import os
-from launch import LaunchDescription
-from launch_ros.actions import Node
-# from launch.actions import ExecuteProcess, TimerAction
+
+import yaml
 from ament_index_python.packages import get_package_share_directory
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
+
+
+def _approval_required():
+    """Read Approval_required from mission_params.yaml.
+
+    Read at launch-generation time rather than passed as a launch argument
+    because mission_node reads all its configuration from this same YAML; a
+    launch argument would be a second source of truth for one setting.
+    """
+    config_path = os.path.join(
+        get_package_share_directory('bv_core'),
+        'config',
+        'mission_params.yaml'
+    )
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+    return bool(config.get('Approval_required', False))
+
 
 def generate_launch_description():
-    pkg = 'bv_core'
-
-    # Mission node
     mission_node = Node(
         package='bv_core',
         name='mission_node',
@@ -44,10 +60,22 @@ def generate_launch_description():
         name='bv_viz_node',
         output='both',
     )
-    return LaunchDescription([
+
+    actions = [
         mission_node,
         vision_node,
         filter_node,
         stitching_node,
         bv_viz_node,
-    ])
+    ]
+
+    # bv_gcs is only referenced when the gate is enabled, so an unbuilt bv_gcs
+    # can never break an autonomous launch.
+    if _approval_required():
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('bv_gcs'),
+                'launch', 'gcs.launch.py'))
+        ))
+
+    return LaunchDescription(actions)

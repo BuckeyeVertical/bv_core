@@ -34,6 +34,7 @@ setup(
             'test_servo = bv_core.test_servo:main',
             'camera_pipeline_test_node = bv_core.camera_pipeline_test_node:main',
             'test_obj_loc = bv_core.test_obj_loc:main',
+            'sim_approval_check = bv_core.sim_approval_check:main',
         ],
     },
 )
