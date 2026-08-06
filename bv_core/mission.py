@@ -41,6 +41,7 @@ from ament_index_python.packages import get_package_share_directory
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 from .mission_logger import MissionLogger
+from .approval_gate import ApprovalGate
 
 # Mission configuration
 DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
@@ -134,7 +135,12 @@ class MissionRunner(Node):
         self.lap_tolerance = config.get('Lap_tolerance', 2.0)
         self.scan_tolerance = config.get('Scan_tolerance', 1.0)
         self.deliver_tolerance = config.get('Deliver_tolerance', 1.0)
-        
+
+        # Human-in-the-loop approval gate
+        self.approval_required = bool(config.get('Approval_required', False))
+        self.approval_timeout_sec = float(
+            config.get('Approval_timeout_sec', 180.0))
+
         # Servo PWM configuration for payload deployment
         self.default_servo_pwms = config.get('Default_servo_pwms', [1500, 1500, 1500, 1500])
         self.deploy_initial_pwms = config.get('Deliver_initial_pwms', [1600, 1600, 1600, 1600])
@@ -185,7 +191,10 @@ class MissionRunner(Node):
         self.confirmed_detection_class_id = -1
         self._localize_retry_timer = None
         self.localization_retry_count = 0
-        
+
+        # Operator approval gate; None when flying fully autonomously
+        self.approval_gate = None
+
         # Deploy state machine
         self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
         self.deploy_state_start_time = 0.0
@@ -266,7 +275,15 @@ class MissionRunner(Node):
             self.on_object_detected,
             qos_profile=reliable_qos
         )
-        
+
+        # Locations the operator rejected, so filtering_node stops
+        # re-confirming the same false positive.
+        self.rejected_object_pub = self.create_publisher(
+            ObjectLocations,
+            '/rejected_object_locations',
+            qos_profile=reliable_qos
+        )
+
         
         # Service Clients
         
@@ -294,6 +311,16 @@ class MissionRunner(Node):
             LocalizeObject,
             'localize_object'
         )
+
+        if self.approval_required:
+            self.approval_gate = ApprovalGate(
+                self, self.approval_timeout_sec, self.log)
+            self.get_logger().info(
+                f"Human-in-the-loop approval ENABLED "
+                f"(timeout={self.approval_timeout_sec:.0f}s, fails open)")
+        else:
+            self.get_logger().info(
+                "Human-in-the-loop approval disabled - flying autonomously")
 
     def wait_for_gps_fix(self):
         """Block until we receive a GPS fix for the home position."""
@@ -570,6 +597,9 @@ class MissionRunner(Node):
         """
         Return to launch and land.
         """
+        if self.approval_gate is not None and self.approval_gate.is_pending():
+            self.approval_gate.cancel('rtl')
+
         self.current_state = STATE_RTL
         self.publish_mission_state()
         self.is_transitioning = True
@@ -968,8 +998,63 @@ class MissionRunner(Node):
             f"alt={response.altitude:.2f}m"
         )
         
-        # Proceed to delivery
+        # Proceed to delivery, or hold for an operator verdict first.
+        if self.approval_gate is None:
+            self.enter_deliver_state()
+            return
+
+        crop = bytes(response.annotated_crop.data)
+        if not crop:
+            self.get_logger().warn(
+                "Localization returned no annotated crop - the operator will "
+                "have to judge without an image")
+
+        self.approval_gate.request(
+            class_id=self.current_target_class_id,
+            lat=response.latitude,
+            lon=response.longitude,
+            alt=response.altitude,
+            confidence=response.confidence,
+            drone_lat=self.current_lat if self.current_lat is not None else 0.0,
+            drone_lon=self.current_lon if self.current_lon is not None else 0.0,
+            annotated_crop=crop,
+            on_approve=self._on_approval_granted,
+            on_reject=self._on_approval_rejected,
+        )
+
+    def _on_approval_granted(self):
+        """Operator approved, or the timeout expired. Deliver as normal."""
+        if self.current_state != STATE_LOCALIZE:
+            # The FSM moved on (RTL, abandon). Ignore a late verdict.
+            self.get_logger().warn(
+                f"Approval arrived in state '{self.current_state}' - ignoring")
+            return
         self.enter_deliver_state()
+
+    def _on_approval_rejected(self, lat, lon, class_id, reason):
+        """Operator rejected. Suppress this spot for this class, resume scan."""
+        if self.current_state != STATE_LOCALIZE:
+            self.get_logger().warn(
+                f"Rejection arrived in state '{self.current_state}' - ignoring")
+            return
+
+        rejected_msg = ObjectLocations()
+        rejected_msg.latitude = float(lat)
+        rejected_msg.longitude = float(lon)
+        rejected_msg.class_id = int(class_id)
+        self.rejected_object_pub.publish(rejected_msg)
+
+        cls_name = (CLASS_NAMES[int(class_id)]
+                    if 0 <= int(class_id) < len(CLASS_NAMES) else 'unknown')
+        self.get_logger().info(
+            f"Operator rejected {cls_name} at lat={lat:.6f}, lon={lon:.6f}"
+            + (f" ({reason})" if reason else "") + " - resuming scan")
+
+        # Same cleanup as the abandon-after-5-failures path.
+        self.current_target_coords = None
+        self.current_target_class_id = None
+        self.confirmed_detection_class_id = -1
+        self.enter_scan_state()
 
     # Callbacks - topic subscriptions
     def on_gps_received(self, msg):

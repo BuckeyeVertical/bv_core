@@ -102,3 +102,16 @@ Deliver_second_pwms: [1400, 1400, 1400, 1400]   # Retract position
 # MISSION LOGGING
 # Set to true to write detailed mission logs to bv_core/logs/
 enable_mission_log: true
+
+# ============================================================
+# Human-in-the-loop approval gate
+# ============================================================
+# When true, the drone holds in AUTO.LOITER after localizing and waits for an
+# operator verdict before flying to the object. Requires bv_gcs to be built.
+Approval_required: false
+
+# Seconds before auto-approving. FAILS OPEN: on expiry the drone deploys and
+# continues, so a dead link or an absent operator can never strand it. 0 waits
+# forever. The timer lives here, in mission_node, so it survives a ground
+# station crash.
+Approval_timeout_sec: 180.0
