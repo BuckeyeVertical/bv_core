@@ -62,18 +62,27 @@ target machines:
 
 Tier 1 and 2 differ by more than the element name: `nvvidconv` produces
 `video/x-raw(memory:NVMM)`, which only the Jetson encoder consumes, so each tier
-carries its own caps. Selection probes the registry once at `start()`.
+carries its own caps.
+
+**Selection is by trying, not by asking.** Registry presence is not sufficient —
+`nvh264enc` is present on the dev PC and still fails to initialise. `start()` walks the
+tiers in order and accepts the first that actually reaches `PLAYING`. Details under
+Components.
 
 Software encoding is not a compromise on the dev machine: `x264enc` was measured at
 roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — about 15× the 8 fps target.
 (`nvh264enc` is present there but fails to initialise under WSL2 with "Could not
 configure supporting library"; tier 3 covers it and nothing is lost.)
 
-**Transport is H.264 → fragmented MP4 → the existing WebSocket → MSE.** It reuses
-`approval_node`'s WebSocket, so there is no new port and no ICE. Latency lands around
-300–600 ms, which is acceptable for debugging. The encode half is identical to a
-WebRTC design, so if latency ever matters the browser transport can be swapped
-without touching the pipeline.
+**Transport is H.264 → fragmented MP4 → a dedicated WebSocket → MSE.** It reuses
+`approval_node`'s aiohttp server and port, so there is no new port and no ICE, but
+video gets its **own endpoint (`/video`) separate from control (`/ws`)**. Sharing one
+socket would let a backlog of H.264 delay a verdict — the aircraft would still be safe,
+since the timeout lives in `mission_node`, but the operator would be clicking Approve
+into a stalled pipe exactly when it matters. Latency lands around 300–600 ms, which is
+acceptable for debugging. The encode half is identical to a WebRTC design, so if
+latency ever matters the browser transport can be swapped without touching the
+pipeline.
 
 **The operator toggles it explicitly in the GCS**, defaulting off at startup. Because
 the vision pipeline only runs during `scan` and `localize`, a forgotten "on" is
@@ -112,10 +121,10 @@ capture loop
           → [probed encoder] → h264parse
           → mp4mux(fragmented) → appsink
               │
-              └─→ /preview_stream ──────────→ subscribe
-                  (std_msgs/UInt8MultiArray)     └──binary WS frames──→ MSE <video>
+              └─→ /preview_stream ──────────→ subscribe (drop if busy)
+                  (std_msgs/UInt8MultiArray)     └──binary on /video──→ MSE <video>
                                                                             ▲
-/obj_dets ─────────────────────────────────→ normalise ──JSON WS──→ canvas overlay
+/obj_dets ─────────────────────────────────→ normalise ──JSON on /ws──→ canvas overlay
 /preview_enabled ←──────────────────────────  toggle
 ```
 
@@ -188,9 +197,17 @@ appsrc ! video/x-raw,format=BGR ! videoconvert ! videoscale
 Tier 3 — software, any machine: `videoconvert ! videoscale ! x264enc tune=zerolatency
 speed-preset=ultrafast bitrate=<kbps>`, same tail.
 
-Selection probes `Gst.Registry` once at `start()` and logs which tier was chosen — on
-the Jetson, seeing tier 2 or 3 in the log means the hardware path silently regressed,
-which is exactly the failure worth noticing.
+**Selection is by trying, not by asking.** Registry presence is not sufficient:
+`nvh264enc` is present in the registry on the dev PC and still fails with "Could not
+configure supporting library". So `start()` walks the tiers in order, and for each one
+builds the pipeline and waits for it to actually reach `PLAYING` (with a short timeout,
+since `set_state` returns `ASYNC`). Only a tier that reaches `PLAYING` is used; failures
+tear down and fall through to the next.
+
+The chosen tier is logged. **On the Jetson, seeing tier 2 or 3 in the log means the
+hardware path silently regressed** — most likely the flight image missing the Tegra
+multimedia plugins — and that is the failure most worth noticing, because otherwise it
+shows up only as an unexplained hot CPU.
 
 ### Edits: `bv_core/pipelines/Vision_Pipeline.py` (~8 lines)
 
@@ -221,10 +238,13 @@ lifecycle without touching it.
 
 - Publish `/preview_enabled` (`std_msgs/Bool`, latched) from a WS message
   `{"type": "preview", "enabled": bool}`.
-- Subscribe `/preview_stream` (`std_msgs/UInt8MultiArray`, BEST_EFFORT depth 2) and
-  broadcast each chunk as a **binary** WebSocket frame. Chunks arriving with no WS
-  client are dropped rather than buffered, so nothing crosses the radio link when
-  nobody is watching.
+- Serve video on a **separate WebSocket endpoint, `/video`**, distinct from the control
+  socket at `/ws`. Subscribe `/preview_stream` (`std_msgs/UInt8MultiArray`, BEST_EFFORT
+  depth 2) and broadcast each chunk as a binary frame to `/video` clients only.
+- **Never `await` a video send behind a full buffer.** If a client's transport is
+  already busy, drop the chunk. Video is expendable; the next keyframe recovers it.
+  Chunks arriving with no `/video` client are dropped outright, so nothing crosses the
+  radio link when nobody is watching.
 - Subscribe `/obj_dets`, **normalise centres to 0–1** against the source frame
   dimensions, and broadcast
   `{"type":"detections","dets":[{"x":0.42,"y":0.31,"class_id":0,"class_name":"person"}],"stamp":…}`.
@@ -235,6 +255,9 @@ Existing JSON message handling is unaffected; binary frames are distinguished by
 
 ### Edits: `bv_gcs/web/` (~90 lines)
 
+- `src/net/videoClient.ts` — a second `WebSocket` to `/video`, opened only while the
+  toggle is on and closed when it is off, kept entirely separate from the control
+  client in `net/client.ts` so neither can stall the other.
 - `src/components/VideoPanel.tsx` — a `<video>` fed by `MediaSource` +
   `SourceBuffer.appendBuffer` on each binary frame, with a `<canvas>` overlaid at the
   same size. Draws a marker and class label per detection, holding the last set until
@@ -261,6 +284,35 @@ the same width. The default is 1024 rather than 1280 so the real camera's 4:3 ou
 lands near 0.8 MP and comfortably inside the 1.2 Mbps budget; at 1280 the real camera
 would produce 1280×960 (1.2 MP) and want roughly 1.6 Mbps. Raise it if the link
 proves to have headroom — this is the second field-tunable knob after `preview_fps`.
+
+## Isolation from the mission and the approval gate
+
+This is the property the feature is judged on, so it is stated explicitly rather than
+left implied.
+
+**`mission.py` is not modified.** No FSM change, no new state, no new callback, no new
+failure path. Neither are `approval_gate.py` or `filtering_node.py`. The only edit to
+flight-path code is the two-line hook in `Vision_Pipeline._enqueue_frame`.
+
+**Disabled cost is one branch per frame.** `self._preview is None` short-circuits before
+anything else happens — no thread, no pipeline, no allocation. To be exact rather than
+approximate: this is not byte-identical to today. The comparison executes (tens per
+second), `vision_node` holds one idle subscription, and a dormant `PreviewStream` object
+exists. None of it is measurable, but the claim is "indistinguishable", not "literally
+unchanged".
+
+**The mission cannot be affected by link congestion.** The approval timeout lives in
+`mission_node`, not in `approval_node` or the browser, so a saturated link, a wedged
+ground station, or a killed `approval_node` all resolve the same way the design already
+guarantees: the timeout fires and the aircraft deploys and continues. This was verified
+in flight in sim run 3.
+
+**The approval gate's UI is protected by socket separation.** Video and control share a
+radio link but not a WebSocket: control is `/ws`, video is `/video`. A backlog of H.264
+cannot delay an outbound `decision_ack` or an inbound Approve click, and video sends
+drop rather than queue. Without this split, an operator could click Approve and wait
+seconds behind megabytes of video — the aircraft would still be safe, but the
+interaction would be bad exactly when it matters most.
 
 ## Error handling
 
