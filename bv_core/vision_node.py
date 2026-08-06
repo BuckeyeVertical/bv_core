@@ -40,6 +40,7 @@ from collections import deque
 # Local - using factory functions for lazy imports
 from .detectors import create_detector
 from .pipelines import create_pipeline
+from .detection_crop import CropConfig, build_annotated_crop
 from .localizer import Localizer
 from .mission_logger import MissionLogger
 from .stitch_geometry import along_track_m, compute_step_m, distance_m
@@ -129,6 +130,14 @@ class VisionNode(Node):
         # Stitching capture
         self.stitch_overlap = float(cfg.get('stitch_overlap', 0.35))
         self.frame_width_px = int(cfg.get('frame_width_px', 4640))
+
+        # Operator review crop (human-in-the-loop approval gate)
+        self.crop_cfg = CropConfig(
+            margin_factor=float(cfg.get('crop_margin_factor', 2.5)),
+            min_px=int(cfg.get('crop_min_px', 320)),
+            max_px=int(cfg.get('crop_max_px', 1024)),
+            jpeg_quality=int(cfg.get('crop_jpeg_quality', 85)),
+        )
 
         # Scan waypoints + takeoff altitude come from mission_params.yaml
         mission_yaml = os.path.join(
@@ -574,11 +583,18 @@ class VisionNode(Node):
         else:
             self.get_logger().info("Localizing: any detected object")
 
+        # Pair each coordinate with the detection index that produced it.
+        # localizer.get_lat_lon appends one result per input in order, so
+        # index i of coords corresponds to detections.xyxy[i]. The index is
+        # needed to crop the correct box for operator review.
+        indexed_coords = list(enumerate(coords))
+
         # Filter for the requested class if specified
         if target_cls >= 0:
-            matched = [c for c in coords if int(c[2]) == target_cls]
+            matched = [pair for pair in indexed_coords
+                       if int(pair[1][2]) == target_cls]
             if matched:
-                coords = matched
+                indexed_coords = matched
             else:
                 available_class_names = [
                     CLASS_NAMES[int(c[2])] if 0 <= int(c[2]) < len(CLASS_NAMES) else f"class_{int(c[2])}"
@@ -599,11 +615,44 @@ class VisionNode(Node):
                 return response
 
         # At this point we have at least one coordinate to return
+        best_index, best_coord = indexed_coords[0]
         response.success = True
-        response.latitude = coords[0][0]
-        response.longitude = coords[0][1]
+        response.latitude = best_coord[0]
+        response.longitude = best_coord[1]
         response.altitude = drone_pose[2]
-        response.class_id = int(coords[0][2])
+        response.class_id = int(best_coord[2])
+
+        # Set outside the try below: confidence cannot fail to compute, and a
+        # crop failure must not silently zero it — the GCS displays this number.
+        response.confidence = (
+            float(detections.confidence[best_index])
+            if detections.confidence is not None
+            else 0.0
+        )
+
+        # Annotated crop for the human-in-the-loop gate. A failure here must
+        # never fail the localization: an encoding bug would silently turn into
+        # the aircraft abandoning real targets. The ground station renders an
+        # explicit "no image received" state instead.
+        try:
+            cls_name = (
+                CLASS_NAMES[response.class_id]
+                if 0 <= response.class_id < len(CLASS_NAMES)
+                else f"class_{response.class_id}"
+            )
+            response.annotated_crop.header.stamp = \
+                self.get_clock().now().to_msg()
+            response.annotated_crop.format = 'jpeg'
+            response.annotated_crop.data = build_annotated_crop(
+                frame,
+                detections.xyxy[best_index],
+                f"{cls_name} {response.confidence:.2f}",
+                self.crop_cfg,
+            )
+        except Exception as exc:   # noqa: BLE001 - degrade, never fail localize
+            self.get_logger().warn(f"Annotated crop failed: {exc}")
+            self.log.event('CROP_FAILED', f"reason={exc}")
+
         self.log.event('LOCALIZE_RESULT',
             f"success=true, lat={response.latitude:.6f}, lon={response.longitude:.6f}, "
             f"alt={response.altitude:.1f}, class={CLASS_NAMES[response.class_id] if 0 <= response.class_id < len(CLASS_NAMES) else 'unknown'}({response.class_id}) | "
