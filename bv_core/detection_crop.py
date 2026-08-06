@@ -135,7 +135,12 @@ def _annotate(image, box, label):
     label_bottom = y1 if y1 - text_h - 8 >= 0 else min(h, y2 + text_h + 8)
     label_top = max(0, label_bottom - text_h - 8)
 
-    cv2.rectangle(image, (x1, label_top), (x1 + text_w + 8, label_bottom),
+    # Slide the chip left rather than let OpenCV clip it: a chip running past the
+    # right edge silently truncates the text, so the operator reads "pers".
+    chip_w = text_w + 8
+    chip_left = int(max(0, min(x1, w - chip_w)))
+
+    cv2.rectangle(image, (chip_left, label_top), (chip_left + chip_w, label_bottom),
                   _BOX_BGR, -1)
-    cv2.putText(image, label, (x1 + 4, label_bottom - 5),
+    cv2.putText(image, label, (chip_left + 4, label_bottom - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, _TEXT_BGR, 2, cv2.LINE_AA)

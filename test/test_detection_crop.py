@@ -107,3 +107,68 @@ class TestBuildAnnotatedCrop:
         data = build_annotated_crop(_frame(), (2220, 1640, 2420, 1840),
                                     'person 0.94', CFG)
         assert len(data) < 400_000
+
+
+def _green_mask(image):
+    """Pixels close to the annotation green, tolerant of JPEG ringing."""
+    b = image[:, :, 0].astype(int)
+    g = image[:, :, 1].astype(int)
+    r = image[:, :, 2].astype(int)
+    return (g > 150) & (g - r > 80) & (g - b > 60)
+
+
+def _border_rows(mask):
+    """Green rows in a column crossing the box well right of the label chip."""
+    ys, xs = np.nonzero(mask)
+    assert len(xs) > 0, 'no annotation was drawn at all'
+    col = int(xs.min() + 0.6 * (xs.max() - xs.min()))
+    return np.nonzero(mask[:, col])[0]
+
+
+def _max_green_run(mask):
+    """Widest contiguous horizontal green run, i.e. the label chip width."""
+    best = 0
+    for row in mask:
+        run = 0
+        for value in row:
+            run = run + 1 if value else 0
+            best = max(best, run)
+    return best
+
+
+class TestAnnotation:
+    """The box and label actually reach the operator's pixels."""
+
+    def test_detection_box_is_drawn(self):
+        # 260x260 box -> 650x650 window, under max_px, so no rescale happens.
+        black = np.zeros((720, 1280, 3), dtype=np.uint8)
+        data = build_annotated_crop(black, (500, 300, 760, 560), 'person 0.94', CFG)
+        decoded = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        mask = _green_mask(decoded)
+        rows = _border_rows(mask)
+        # Two ~2 px horizontal borders, one at each end of the 260 px box.
+        assert 4 <= len(rows) <= 8
+        assert 255 <= (rows.max() - rows.min()) <= 265
+
+    def test_box_is_drawn_after_the_downscale(self):
+        # 2000x2000 box -> full-frame window -> 4640 downscaled to 1024. Drawn
+        # before the resize, a 2 px line would thin to well under one output
+        # pixel and INTER_AREA would wash it out; these bounds catch that.
+        black = np.zeros((3480, 4640, 3), dtype=np.uint8)
+        data = build_annotated_crop(black, (1320, 740, 3320, 2740), 'tent 0.80', CFG)
+        decoded = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        mask = _green_mask(decoded)
+        assert mask.sum() > 2000
+        rows = _border_rows(mask)
+        assert 4 <= len(rows) <= 8          # 2 px of line weight in output pixels
+        assert (rows.max() - rows.min()) > 300   # ...spanning the whole box
+
+    def test_right_edge_label_is_not_truncated(self):
+        # Box hard against the right of its crop: the chip must slide left
+        # instead of being clipped mid-label.
+        black = np.zeros((720, 1280, 3), dtype=np.uint8)
+        label = 'person 0.94'
+        data = build_annotated_crop(black, (1250, 330, 1279, 379), label, CFG)
+        decoded = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        (text_w, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        assert _max_green_run(_green_mask(decoded)) >= text_w + 8
