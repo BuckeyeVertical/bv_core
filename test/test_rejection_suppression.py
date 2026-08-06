@@ -126,3 +126,43 @@ class TestRejectionLoop:
         node.rejected_location_callback(rejection)
 
         assert _drive(node, class_id=0) == [0]
+
+
+class TestSuppressionReferenceFrame:
+    """Suppression must key off filtering's OWN confirmed position.
+
+    mission_node publishes the loiter-time localize estimate, produced from a
+    different altitude and angle than the scan leg. Both estimate the same
+    object but carry independent projection error (~4-4.6 m each in sim), so
+    the two can sit 5-9 m apart against a radius that is only ~8.7 m
+    east-west at 38.4 N. Consulting the stored confirmed position instead
+    cancels the cross-vantage error.
+    """
+
+    def test_suppresses_when_message_coords_diverge_from_confirmed(self, node):
+        # Filtering confirms the object at REJECT_LAT/REJECT_LON.
+        assert _drive(node, class_id=0) == [0]
+
+        # The operator rejects it, but mission_node's loiter-time estimate
+        # landed ~33 m away - far outside the suppression radius.
+        rejection = ObjectLocations()
+        rejection.latitude = REJECT_LAT + 0.0003
+        rejection.longitude = REJECT_LON
+        rejection.class_id = 0
+        node.rejected_location_callback(rejection)
+
+        # Suppression must still hold: the stored confirmed position wins.
+        assert _drive(node, class_id=0) == []
+
+    def test_falls_back_to_message_coords_when_never_confirmed(self, node):
+        # No stored confirmed position for this class.
+        assert node.targets[1].get('confirmed_lat') is None
+
+        rejection = ObjectLocations()
+        rejection.latitude = REJECT_LAT
+        rejection.longitude = REJECT_LON
+        rejection.class_id = 1
+        node.rejected_location_callback(rejection)
+
+        # The message coordinate is the fallback, and it still suppresses.
+        assert _drive(node, class_id=1) == []

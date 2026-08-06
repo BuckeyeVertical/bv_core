@@ -20,10 +20,15 @@ camera_orientation: [0.0, 0.0, 0.0]
 deployed_ignore_radius_deg: 0.0001
 
 # Ignore detections of the SAME CLASS within this radius of a location the
-# operator rejected. Degrees lat/lon; 0.0001 deg is about 11 m, which covers the
-# ~4 m localization error seen in sim while leaving a genuine second target
-# 20 m away still findable. A different class at the same spot is NOT
-# suppressed - the operator rejected a specific claim, not the ground.
+# operator rejected. Degrees lat/lon, compared unscaled (no cos(lat) term, to
+# match how proximity_threshold_deg is already used), so the region is an
+# ellipse: at 38.4 N, 0.0001 deg is ~11.1 m north-south but only ~8.7 m
+# east-west. That still covers the frame-to-frame jitter bounded by 3-frame
+# confirmation, because suppression is measured against filtering's OWN
+# confirmed position, not the loiter-time estimate from mission_node. A
+# genuine second target 20 m away stays findable on both axes. A different
+# class at the same spot is NOT suppressed - the operator rejected a
+# specific claim, not the ground.
 rejected_ignore_radius_deg: 0.0001
 
 # ============================================================

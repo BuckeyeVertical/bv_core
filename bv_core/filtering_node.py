@@ -112,7 +112,8 @@ class FilteringNode(Node):
         # === target tracking ===
         # One entry per competition target: person and tent
         self.targets = {
-            class_id: {"state": "undetected", "lat": None, "lon": None}
+            class_id: {"state": "undetected", "lat": None, "lon": None,
+                       "confirmed_lat": None, "confirmed_lon": None}
             for class_id in range(len(CLASS_NAMES))
         }
         
@@ -278,7 +279,30 @@ class FilteringNode(Node):
         # Guard: confirm class is a valid target and still undetected
         if confirmed_class is not None and confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
             self.targets[confirmed_class]["state"] = "confirmed"
+            # Record where FILTERING believes the object is, from the three
+            # frames that just agreed. Rejection suppression compares future
+            # scan-leg detections against this rather than against the
+            # loiter-time estimate mission_node publishes: same projection,
+            # altitude and angle, so cross-vantage error cancels and the
+            # radius only has to cover frame-to-frame jitter.
+            centroid = self._frame_history_centroid(confirmed_class)
+            if centroid is not None:
+                self.targets[confirmed_class]["confirmed_lat"] = centroid[0]
+                self.targets[confirmed_class]["confirmed_lon"] = centroid[1]
             self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
+
+    def _frame_history_centroid(self, class_id):
+        """Mean (lat, lon) of this class across frame_history, or None."""
+        points = [
+            (lat, lon)
+            for frame_dets in self.frame_history
+            for lat, lon, cls in frame_dets
+            if int(cls) == int(class_id)
+        ]
+        if not points:
+            return None
+        return (sum(p[0] for p in points) / len(points),
+                sum(p[1] for p in points) / len(points))
 
     def _check_3frame_confirmation(self):
         """
@@ -363,18 +387,35 @@ class FilteringNode(Node):
 
     def rejected_location_callback(self, msg: ObjectLocations):
         """Record a location the operator rejected for a specific class."""
-        entry = (msg.latitude, msg.longitude, int(msg.class_id))
+        cls = int(msg.class_id)
+        # Prefer the position filtering itself confirmed: future detections
+        # arrive in that same frame, so the cross-vantage projection error
+        # against mission_node's loiter-time estimate cancels. The message
+        # coordinates are the fallback when this class was never confirmed
+        # here (filtering restarted, or a rejection for an unseen class).
+        target = self.targets.get(cls)
+        if target is not None and target.get("confirmed_lat") is not None:
+            lat, lon = target["confirmed_lat"], target["confirmed_lon"]
+            source = 'confirmed'
+        else:
+            lat, lon = msg.latitude, msg.longitude
+            source = 'message'
+
+        entry = (lat, lon, cls)
         self.rejected_locations.append(entry)
-        cls_name = (CLASS_NAMES[entry[2]]
-                    if 0 <= entry[2] < len(CLASS_NAMES) else 'unknown')
+        cls_name = (CLASS_NAMES[cls]
+                    if 0 <= cls < len(CLASS_NAMES) else 'unknown')
         self.get_logger().info(
             f"Suppressing {cls_name} within "
             f"{self.rejected_ignore_radius_deg * 111320.0:.1f}m of "
-            f"lat={entry[0]:.6f}, lon={entry[1]:.6f}")
+            f"lat={lat:.6f}, lon={lon:.6f} (source={source})")
         self.log.event('REJECTED_LOCATION',
-                       f"lat={entry[0]:.6f}, lon={entry[1]:.6f}, "
-                       f"class={cls_name}({entry[2]}), "
-                       f"radius={self.rejected_ignore_radius_deg}deg")
+                       f"lat={lat:.6f}, lon={lon:.6f}, "
+                       f"class={cls_name}({cls}), "
+                       f"radius={self.rejected_ignore_radius_deg}deg, "
+                       f"source={source}, "
+                       f"msg_lat={msg.latitude:.6f}, "
+                       f"msg_lon={msg.longitude:.6f}")
 
     def _is_rejected(self, lat, lon, class_id):
         """True when this class was rejected by the operator near this point."""
