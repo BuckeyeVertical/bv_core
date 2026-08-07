@@ -46,3 +46,14 @@ crop_margin_factor: 2.5    # context multiplier on the bounding box
 crop_min_px: 320           # floor, so a small sim detection still gets context
 crop_max_px: 1024          # ceiling on the longest output side
 crop_jpeg_quality: 85
+
+# ============================================================
+# Debug preview stream (GCS live feed)
+# Off until the operator toggles it on in the ground station. See
+# docs/superpowers/specs/2026-08-06-debug-video-stream-design.md
+# ============================================================
+# Deliberately conservative: the Herelink budget is unknown and this is a debug
+# feed, not a camera downlink. Raise once the link has actually been measured.
+preview_width: 640           # output width; height follows source aspect
+preview_fps: 8.0             # decimation target — the knob for CPU and bitrate
+preview_bitrate_bps: 400000  # encoder target bitrate

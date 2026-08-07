@@ -29,7 +29,7 @@ from rclpy.qos import (
 )
 
 # ROS2 messages
-from std_msgs.msg import String, Int8, Float64
+from std_msgs.msg import String, Int8, Float64, Bool, UInt8MultiArray
 from sensor_msgs.msg import CompressedImage, NavSatFix
 from bv_msgs.msg import ObjectDetections
 from bv_msgs.srv import LocalizeObject
@@ -43,6 +43,7 @@ from .pipelines import create_pipeline
 from .detection_crop import CropConfig, build_annotated_crop
 from .localizer import Localizer
 from .mission_logger import MissionLogger
+from .preview_stream import PreviewConfig, PreviewStream
 from .stitch_geometry import along_track_m, compute_step_m, distance_m
 
 # ROS2 utilities
@@ -131,6 +132,13 @@ class VisionNode(Node):
         self.det_thresh = cfg.get('detection_threshold', 0.5)
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
         self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
+
+        # Debug preview stream
+        self.preview_cfg = PreviewConfig(
+            width=int(cfg.get('preview_width', 640)),
+            fps=float(cfg.get('preview_fps', 8.0)),
+            bitrate_bps=int(cfg.get('preview_bitrate_bps', 400_000)),
+        )
 
         # Detector configuration
         self.detector_type = cfg.get('detector_type', 'ml')
@@ -252,6 +260,28 @@ class VisionNode(Node):
         )
 
         self.pipeline_running = False
+
+        # Debug preview: constructed dormant. Nothing runs until the operator
+        # toggles it on, and the hook costs one comparison per frame until then.
+        preview_qos = QoSProfile(depth=2)
+        preview_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        preview_qos.history = HistoryPolicy.KEEP_LAST
+        self.preview_pub = self.create_publisher(
+            UInt8MultiArray, '/preview_stream', preview_qos)
+
+        self.preview = PreviewStream(
+            self.preview_cfg, self._publish_preview_chunk, self.get_logger())
+
+        # Toggle plumbing. The worker thread is spawned lazily on the first
+        # toggle, so a run that never enables the preview never creates it.
+        self._preview_want = False
+        self._preview_wake = threading.Event()
+        self._preview_shutdown = threading.Event()
+        self._preview_worker = None
+        self._preview_worker_lock = threading.Lock()
+
+        self.create_subscription(
+            Bool, '/preview_enabled', self._on_preview_toggle, 10)
 
     def _init_threading(self):
         """Initialize threading primitives."""
@@ -931,12 +961,96 @@ class VisionNode(Node):
 
         self.obj_dets_pub.publish(detections_msg)
 
-    
+    # Debug preview stream
+    def _publish_preview_chunk(self, chunk):
+        """Publish one fMP4 chunk. Called from the GStreamer streaming thread.
+
+        Publish and return. This must never call self.preview.stop(): that would
+        have the streaming thread block on the encoder's internal lock while the
+        shutdown waits for this very thread to exit.
+        """
+        msg = UInt8MultiArray()
+        msg.data = chunk
+        self.preview_pub.publish(msg)
+
+    def _on_preview_toggle(self, msg):
+        """Operator turned the debug preview on or off. MUST return immediately.
+
+        This runs on the single-threaded executor that also serves
+        localize_object on the mission's critical path, and PreviewStream's
+        start()/stop() can each take 12-18 s building or tearing down the
+        GStreamer tier ladder. Blocking here would stall localize long enough
+        for mission_node to exhaust its retries and abandon a real target, so a
+        debug toggle would cost a delivery. Record the wish, wake the worker,
+        return; the worker does the slow part and owns the logging.
+        """
+        self._preview_want = bool(msg.data)
+        self._ensure_preview_worker()
+        self._preview_wake.set()
+
+    def _ensure_preview_worker(self):
+        """Start the toggle worker on first use. Never runs if never toggled."""
+        with self._preview_worker_lock:
+            if self._preview_worker is None or not self._preview_worker.is_alive():
+                self._preview_worker = threading.Thread(
+                    target=self._preview_worker_loop,
+                    name='preview_toggle',
+                    daemon=True,
+                )
+                self._preview_worker.start()
+
+    def _preview_worker_loop(self):
+        """Converge the preview on the latest requested state, one call at a time.
+
+        A single thread, so start() and stop() can never run concurrently against
+        the same PreviewStream. It reads the desired state fresh on every pass
+        rather than draining a queue of toggles, so a rapid on/off/on settles on
+        "on" with at most one lifecycle call instead of three.
+        """
+        while not self._preview_shutdown.is_set():
+            self._preview_wake.wait()
+            self._preview_wake.clear()
+            if self._preview_shutdown.is_set():
+                break
+            try:
+                self._apply_preview_state(self._preview_want)
+            except Exception as exc:        # noqa: BLE001
+                # A debug feature must never take the node down with it.
+                self.get_logger().error(f'debug preview toggle failed: {exc}')
+
+    def _apply_preview_state(self, want):
+        """Bring the preview to `want`. Slow; only ever called from the worker."""
+        if want == self.preview.is_running():
+            return
+
+        if want:
+            if self.preview.start():
+                self.pipeline.set_preview(self.preview)
+                self.get_logger().info('debug preview ON')
+            else:
+                self.get_logger().warn('debug preview requested but unavailable')
+        else:
+            # Detach first so no frame is offered to a stream being torn down.
+            self.pipeline.set_preview(None)
+            self.preview.stop()
+            self.get_logger().info('debug preview OFF')
+
+
     # Lifecycle
     def destroy_node(self):
         """Clean up resources before shutdown."""
         self.shutdown_flag.set()
         self.scan_active.set()  # Unblock any waiting threads
+
+        # Retire the preview before the pipeline goes away. Blocking is fine
+        # here: we are already shutting down, nothing is left to starve.
+        self._preview_shutdown.set()
+        self._preview_wake.set()
+        if self._preview_worker is not None:
+            self._preview_worker.join(timeout=15.0)
+        self.pipeline.set_preview(None)
+        if self.preview.is_running():
+            self.preview.stop()
 
         if self.pipeline_running:
             self.pipeline.stop()

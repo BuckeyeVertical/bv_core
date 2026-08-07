@@ -13,6 +13,14 @@ class VisionPipeline(ABC):
     def __init__(self, max_queue_size=2):
 
         self._frame_queue = queue.Queue(maxsize=max_queue_size)
+        self._preview = None
+
+    def set_preview(self, preview):
+        """Attach a preview sink, or None to detach.
+
+        The sink must expose offer(frame) and must not block.
+        """
+        self._preview = preview
 
     @abstractmethod
     def start(self):
@@ -49,6 +57,15 @@ class VisionPipeline(ABC):
 
     def _enqueue_frame(self, frame):
         """Push a new frame into the bounded queue, dropping the oldest if full"""
+        # Debug preview. When detached this is a single comparison; when attached,
+        # offer() is non-blocking. Wrapped because a debug feature must never cost
+        # the detection path a frame.
+        if self._preview is not None:
+            try:
+                self._preview.offer(frame)
+            except Exception:       # noqa: BLE001
+                pass
+
         if self._frame_queue.full():
             try:
                 self._frame_queue.get_nowait()
