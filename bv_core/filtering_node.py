@@ -2,7 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy,
+                       HistoryPolicy)
 
 from std_msgs.msg import String, Float64, Int8
 from .localizer import Localizer
@@ -20,6 +21,7 @@ import os
 from collections import deque
 from rclpy.time import Time
 import math
+import json
 from .mission_logger import MissionLogger
 
 CLASS_NAMES = ("person", "tent")
@@ -30,11 +32,67 @@ def is_within_radius(lat, lon, ref_lat, ref_lon, radius_deg):
 
     Euclidean in degrees — the mission area is small enough that treating
     degrees as a flat plane is well within the localization error, and it
-    matches how proximity_threshold_deg is already used for 3-frame clustering.
+    matches how proximity_threshold_deg is already used for confirmation clustering.
     """
     d_lat = lat - ref_lat
     d_lon = lon - ref_lon
     return (d_lat * d_lat + d_lon * d_lon) <= (radius_deg * radius_deg)
+
+
+def window_presence(frame_history):
+    """Per-frame presence of each class in the window, oldest first.
+
+    ``{class_id: [bool, ...]}`` with one entry per frame currently held. Feeds the
+    ground station's confirmation panel, so an operator can see *why* something is
+    not confirming — a run of ``[True, False, True]`` is a flickering detector, not
+    a missing object.
+    """
+    classes = {int(c) for frame in frame_history for _, _, c in frame}
+    return {
+        cls: [any(int(c) == cls for _, _, c in frame) for frame in frame_history]
+        for cls in classes
+    }
+
+
+def evaluate_window(frame_history, required_hits, proximity_threshold_deg):
+    """Assess every candidate class in the window.
+
+    Yields ``(class_id, positions, dists_m, ok)`` per class seen at least
+    ``required_hits`` times, where ``positions`` holds one (lat, lon) per *hitting*
+    frame in order and ``ok`` says whether they agree spatially.
+
+    Hits need not be consecutive. Requiring a consecutive run meant one missed frame
+    discarded a real object, and it did not buy false-positive rejection: a spurious
+    detection that recurs in the same place satisfies a consecutive rule just as
+    easily, while one that flickers between places is caught below by proximity
+    regardless of how the hits are spaced.
+
+    Yielding rather than returning the winner keeps the caller's CONFIRMED/REJECTED
+    logging, which reports the near-misses too.
+    """
+    presence = window_presence(frame_history)
+    for cls, hits in presence.items():
+        if sum(hits) < required_hits:
+            continue
+
+        positions = []
+        for frame in frame_history:
+            for lat, lon, c in frame:
+                if int(c) == cls:
+                    positions.append((lat, lon))
+                    break       # first detection of this class per frame
+
+        dists_m = []
+        ok = True
+        for i in range(len(positions) - 1):
+            (lat1, lon1), (lat2, lon2) = positions[i], positions[i + 1]
+            dist = math.sqrt((lat2 - lat1) ** 2 + (lon2 - lon1) ** 2)
+            dists_m.append(dist * 111320.0)
+            if dist > proximity_threshold_deg:
+                ok = False
+                break
+
+        yield cls, positions, dists_m, ok
 
 
 class FilteringNode(Node):
@@ -92,7 +150,7 @@ class FilteringNode(Node):
         )
 
         # Locations the operator rejected. Detections of the SAME class near
-        # one of these are dropped before 3-frame confirmation, so a rejected
+        # one of these are dropped before confirmation, so a rejected
         # false positive cannot immediately re-confirm and re-interrupt.
         self.rejected_location_sub = self.create_subscription(
             ObjectLocations,
@@ -117,10 +175,20 @@ class FilteringNode(Node):
             for class_id in range(len(CLASS_NAMES))
         }
         
-        # === 3-frame confirmation tracking ===
+        # === M-of-N confirmation tracking ===
         self.frame_history = []  # list of recent detection sets [(lat, lon, class_id), ...]
         self._last_frame_window_summary = None
-        
+        # Live window state for the ground station's confirmation panel. Plain JSON
+        # on a String so this needs no new bv_msgs type. Latched so a GCS that
+        # connects mid-scan sees the current window immediately.
+        window_qos = QoSProfile(depth=1)
+        window_qos.reliability = ReliabilityPolicy.RELIABLE
+        window_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        window_qos.history = HistoryPolicy.KEEP_LAST
+        self.window_pub = self.create_publisher(
+            String, '/confirmation_window', window_qos)
+        self._last_window_payload = None
+
         # === publisher for confirmed detections ===
         # Use same reliable QoS pattern for /global_obj_dets
         global_dets_qos = QoSProfile(depth=10)
@@ -152,6 +220,20 @@ class FilteringNode(Node):
         self.proximity_threshold_deg = 0.0001
         self.rejected_ignore_radius_deg = float(
             cfg.get('rejected_ignore_radius_deg', 0.0001))
+
+        # Hits need not be consecutive; see evaluate_window for why. Read from
+        # config so this can be tuned in sim without a code change.
+        self.confirmation_hits = int(cfg.get('confirmation_hits', 3))
+        self.confirmation_window = int(cfg.get('confirmation_window', 5))
+        if self.confirmation_window < self.confirmation_hits:
+            self.get_logger().warn(
+                f'confirmation_window ({self.confirmation_window}) is below '
+                f'confirmation_hits ({self.confirmation_hits}); nothing could ever '
+                f'confirm. Raising the window to match.')
+            self.confirmation_window = self.confirmation_hits
+        self.get_logger().info(
+            f'confirmation: {self.confirmation_hits} hits within a '
+            f'{self.confirmation_window}-frame window')
 
     def handle_gps(self, msg: NavSatFix):
         self.gps_buffer.append(msg)
@@ -226,17 +308,18 @@ class FilteringNode(Node):
             and not self._is_rejected(lat, lon, cls)
         ]
         
-        # Only run 3-frame confirmation during scan state
+        # Only run confirmation during scan state
         if self.state != 'scan':
             return
 
-        # === 3-frame confirmation logic ===
+        # === M-of-N confirmation logic ===
         # Add current frame's detections to history
         self.frame_history.append(filtered_detections)
-        if len(self.frame_history) > 3:
+        while len(self.frame_history) > self.confirmation_window:
             self.frame_history.pop(0)
+        self._publish_window()
 
-        # Print the current 3-frame detection window in plain English.
+        # Print the current detection window in plain English.
         frame_summaries = []
         for i, frame_dets in enumerate(self.frame_history):
             class_names = sorted(
@@ -272,9 +355,10 @@ class FilteringNode(Node):
                 'dists': dists,
                 'thresh': self.proximity_threshold_deg * 111320.0,
             }
-        self.log.frame_window(len(self.frame_history), 3, window_data)
-        # Check for consistent detection across 3 frames
-        confirmed = self._check_3frame_confirmation()
+        self.log.frame_window(len(self.frame_history),
+                              self.confirmation_hits, window_data)
+        # Check for a class seen confirmation_hits times in the window
+        confirmed = self._check_confirmation()
         confirmed_class, confirmed_positions = (
             confirmed if confirmed is not None else (None, None))
 
@@ -297,7 +381,7 @@ class FilteringNode(Node):
     def _centroid(points):
         """Mean (lat, lon) of the given points, or None if there are none.
 
-        The caller passes the exact per-frame positions that 3-frame
+        The caller passes the exact per-frame positions that
         confirmation matched — one per frame, the first of that class. Averaging
         *every* same-class detection instead would place the stored position
         between a false positive and a real object standing in the same frame,
@@ -308,80 +392,57 @@ class FilteringNode(Node):
         return (sum(p[0] for p in points) / len(points),
                 sum(p[1] for p in points) / len(points))
 
-    def _check_3frame_confirmation(self):
+    def _check_confirmation(self):
+        """First class confirmed in the current window, or None.
+
+        Returns (class_id, positions) where positions holds one (lat, lon) per
+        frame that saw the class, so callers store exactly what was validated.
         """
-        Check if any class appears in all 3 recent frames within spatial proximity.
-        
-        Returns:
-            (class_id, positions) if confirmed, None otherwise. `positions` is
-            the one-per-frame list of (lat, lon) that actually satisfied the
-            proximity check, so callers store exactly what was validated.
-        """
-        # if len(self.frame_history) < 3:
-            # self.get_logger().debug(f"[DEBUG] Not enough frames yet: {len(self.frame_history)}/3")
-            # return None
-        
-        # Get classes present in each frame
-        frame_classes = []
-        for frame_dets in self.frame_history:
-            classes_in_frame = set(int(cls) for _, _, cls in frame_dets)
-            frame_classes.append(classes_in_frame)
-        
-        # Debug: Log classes in each frame
-        # self.get_logger().info(f"[DEBUG] Classes per frame: {[list(c) for c in frame_classes]}")
-
-        if len(frame_classes) < 3:
-            return
-        
-        # Find classes present in all 3 frames
-        common_classes = frame_classes[0] & frame_classes[1] & frame_classes[2]
-        # self.get_logger().info(f"[DEBUG] Common classes across all 3 frames: {list(common_classes)}")
-        
-        if not common_classes:
-            return None
-        
-        # For each common class, check spatial proximity
-        PROXIMITY_THRESHOLD_DEG = self.proximity_threshold_deg
-        
-        for cls in common_classes:
-            # Get positions for this class in each frame
-            positions = []
-            for frame_dets in self.frame_history:
-                for lat, lon, c in frame_dets:
-                    if int(c) == cls:
-                        positions.append((lat, lon))
-                        break  # Take first detection of this class per frame
-
-            if len(positions) < 3:
-                continue
-
-            # Check if CONSECUTIVE positions are within proximity
-            all_close = True
-            dists_m = []
-            for i in range(len(positions) - 1):
-                lat1, lon1 = positions[i]
-                lat2, lon2 = positions[i + 1]
-                dist = math.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
-                dists_m.append(dist * 111320.0)
-                if dist > PROXIMITY_THRESHOLD_DEG:
-                    all_close = False
-                    break
-
-            cls_name = CLASS_NAMES[int(cls)] if 0 <= int(cls) < len(CLASS_NAMES) else "unknown"
-            thresh_m = PROXIMITY_THRESHOLD_DEG * 111320.0
-            if all_close:
-                self.log.event('CONFIRMED',
-                    f"class={cls_name}({cls}), "
-                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
-                    f"thresh={thresh_m:.1f}m")
+        thresh = self.proximity_threshold_deg
+        for cls, positions, dists_m, ok in evaluate_window(
+                self.frame_history, self.confirmation_hits, thresh):
+            cls_name = (CLASS_NAMES[int(cls)]
+                        if 0 <= int(cls) < len(CLASS_NAMES) else "unknown")
+            detail = (f"class={cls_name}({cls}), "
+                      f"hits={len(positions)}/{self.confirmation_hits} "
+                      f"in {len(self.frame_history)}-frame window, "
+                      f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
+                      f"thresh={thresh * 111320.0:.1f}m")
+            if ok:
+                self.log.event('CONFIRMED', detail)
                 return cls, positions
-            else:
-                self.log.event('REJECTED',
-                    f"class={cls_name}({cls}), "
-                    f"dists=[{','.join(f'{d:.1f}m' for d in dists_m)}], "
-                    f"thresh={thresh_m:.1f}m, reason=proximity_fail")
-
+            self.log.event('REJECTED', detail + ", reason=proximity_fail")
         return None
+
+    def _publish_window(self):
+        """Publish the confirmation window for the ground station panel.
+
+        Best-effort and fully isolated: this is a debug view, and nothing about it
+        may disturb the confirmation path that decides what the aircraft chases.
+        Only publishes on change — the window is unchanged for most frames and a
+        constrained radio link should not carry repeats.
+        """
+        try:
+            presence = window_presence(self.frame_history)
+            payload = json.dumps({
+                'required': self.confirmation_hits,
+                'window': self.confirmation_window,
+                'frames': len(self.frame_history),
+                'classes': sorted(
+                    ({'class_id': cls,
+                      'name': (CLASS_NAMES[cls]
+                               if 0 <= cls < len(CLASS_NAMES) else 'unknown'),
+                      'hits': [bool(h) for h in hits],
+                      'confirmed':
+                          self.targets.get(cls, {}).get('state') != 'undetected'}
+                     for cls, hits in presence.items()),
+                    key=lambda d: d['class_id']),
+            }, separators=(',', ':'))
+            if payload != self._last_window_payload:
+                self._last_window_payload = payload
+                self.window_pub.publish(String(data=payload))
+        except Exception as e:       # noqa: BLE001 - never break confirmation
+            self.get_logger().debug(f'confirmation window publish skipped: {e}')
 
     def deployed_location_callback(self, msg: ObjectLocations):
         # Mark target as deployed and store its final location

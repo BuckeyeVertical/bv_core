@@ -41,3 +41,15 @@ rejected_ignore_radius_deg: 0.0001
 #            0.0, 0.0, 1.0]
 # dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
 #camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
+
+# Detection confirmation: a class must be seen `confirmation_hits` times within the
+# last `confirmation_window` frames, with those sightings agreeing spatially, before
+# mission_node is told to go and look at it.
+#
+# Hits need NOT be consecutive. They used to have to be (a 3-of-3 rule), which meant
+# one missed frame discarded a real object — at a 50% per-frame detection rate that
+# lost ~30% of real targets. It bought little in return: a false positive that recurs
+# in the same spot satisfies a consecutive rule just as easily, and one that flickers
+# between spots is caught by the proximity check either way.
+confirmation_hits: 3
+confirmation_window: 5

@@ -193,7 +193,7 @@ def _drive_multi(node, per_frame, class_id, frames=3):
 class TestConfirmedCentroidMatchesTheConfirmedDetection:
     """The stored position must be the one 3-frame confirmation validated.
 
-    `_check_3frame_confirmation` takes only the FIRST same-class detection per
+    `evaluate_window` takes only the FIRST same-class detection per
     frame. If the stored centroid averages every same-class detection instead,
     a frame holding a false positive AND a real object stores a point between
     them: the ~11 m suppression circle then lands on empty ground, so the false
