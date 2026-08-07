@@ -53,6 +53,13 @@ import supervision as sv
 
 CLASS_NAMES = ("person", "tent")
 
+# How long destroy_node waits for the preview toggle worker. Above
+# PreviewStream.start()'s 12-18 s worst case (three tiers x a 3 s get_state,
+# plus shutdown waits) so a toggle in flight completes rather than being
+# abandoned half-built. Correctness does not rest on this number: destroy_node
+# re-checks whether the worker outlasted it and stops the stream again if so.
+PREVIEW_WORKER_JOIN_SEC = 25.0
+
 
 # Fail on the ground, not in the air.
 #
@@ -263,8 +270,16 @@ class VisionNode(Node):
 
         # Debug preview: constructed dormant. Nothing runs until the operator
         # toggles it on, and the hook costs one comparison per frame until then.
-        preview_qos = QoSProfile(depth=2)
-        preview_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        #
+        # RELIABLE, not BEST_EFFORT. This topic never crosses the radio: both
+        # vision_node and approval_node run on the drone, and the constrained
+        # hop is approval_node -> browser over TCP. So reliability is nearly
+        # free here, and it is required rather than merely nice: fMP4 chunks are
+        # not independently droppable the way video frames are, and a lost
+        # moof/mdat can stall the browser's MSE SourceBuffer instead of just
+        # skipping a frame. Depth 10 gives headroom for encoder burstiness.
+        preview_qos = QoSProfile(depth=10)
+        preview_qos.reliability = ReliabilityPolicy.RELIABLE
         preview_qos.history = HistoryPolicy.KEEP_LAST
         self.preview_pub = self.create_publisher(
             UInt8MultiArray, '/preview_stream', preview_qos)
@@ -272,13 +287,7 @@ class VisionNode(Node):
         self.preview = PreviewStream(
             self.preview_cfg, self._publish_preview_chunk, self.get_logger())
 
-        # Toggle plumbing. The worker thread is spawned lazily on the first
-        # toggle, so a run that never enables the preview never creates it.
-        self._preview_want = False
-        self._preview_wake = threading.Event()
-        self._preview_shutdown = threading.Event()
-        self._preview_worker = None
-        self._preview_worker_lock = threading.Lock()
+        self._init_preview_state()
 
         self.create_subscription(
             Bool, '/preview_enabled', self._on_preview_toggle, 10)
@@ -962,6 +971,20 @@ class VisionNode(Node):
         self.obj_dets_pub.publish(detections_msg)
 
     # Debug preview stream
+    def _init_preview_state(self):
+        """Toggle plumbing for the debug preview.
+
+        Deliberately inert: no thread, no GStreamer, no pipeline. The worker is
+        spawned lazily on the first toggle, so a run that never enables the
+        preview never creates one.
+        """
+        self._preview_want = False        # latest operator request
+        self._preview_engaged = False     # state the worker last applied
+        self._preview_wake = threading.Event()
+        self._preview_shutdown = threading.Event()
+        self._preview_worker = None
+        self._preview_worker_lock = threading.Lock()
+
     def _publish_preview_chunk(self, chunk):
         """Publish one fMP4 chunk. Called from the GStreamer streaming thread.
 
@@ -1019,22 +1042,50 @@ class VisionNode(Node):
                 self.get_logger().error(f'debug preview toggle failed: {exc}')
 
     def _apply_preview_state(self, want):
-        """Bring the preview to `want`. Slow; only ever called from the worker."""
-        if want == self.preview.is_running():
-            return
+        """Bring the preview to `want`. Slow; only ever called from the worker.
 
-        if want:
-            if self.preview.start():
-                self.pipeline.set_preview(self.preview)
-                self.get_logger().info('debug preview ON')
-            else:
-                self.get_logger().warn('debug preview requested but unavailable')
-        else:
+        `_preview_engaged` is the state we last applied, tracked separately from
+        PreviewStream.is_running() because the stream self-disables on a bus
+        error. Reading liveness as intent would make an OFF click after such a
+        fault early-return: the pipeline would stay attached to a dead stream,
+        nothing would log, and the operator's click would appear to do nothing.
+        A debug tool that silently ignores its own toggle is worse than useless.
+        """
+        if not want:
+            if not self._preview_engaged:
+                return
+            self._preview_engaged = False
             # Detach first so no frame is offered to a stream being torn down.
             self.pipeline.set_preview(None)
             self.preview.stop()
             self.get_logger().info('debug preview OFF')
+            return
 
+        if self._preview_engaged and self.preview.is_running():
+            return
+
+        if self._preview_engaged:
+            # Engaged but dead: the stream faulted off the bus. Clear it down
+            # before rebuilding, so ON acts as the retry the operator meant.
+            self._preview_engaged = False
+            self.pipeline.set_preview(None)
+            self.preview.stop()
+
+        if self.preview.start():
+            self._preview_engaged = True
+            self.pipeline.set_preview(self.preview)
+            self.get_logger().info('debug preview ON')
+        else:
+            self.get_logger().warn('debug preview requested but unavailable')
+
+
+    def _join_preview_worker(self):
+        """Wait for the toggle worker. Returns True if it outlasted the join."""
+        worker = self._preview_worker
+        if worker is None or not worker.is_alive():
+            return False
+        worker.join(timeout=PREVIEW_WORKER_JOIN_SEC)
+        return worker.is_alive()
 
     # Lifecycle
     def destroy_node(self):
@@ -1045,11 +1096,20 @@ class VisionNode(Node):
         # Retire the preview before the pipeline goes away. Blocking is fine
         # here: we are already shutting down, nothing is left to starve.
         self._preview_shutdown.set()
+        self._preview_want = False
         self._preview_wake.set()
-        if self._preview_worker is not None:
-            self._preview_worker.join(timeout=15.0)
+        outlasted = self._join_preview_worker()
         self.pipeline.set_preview(None)
-        if self.preview.is_running():
+        # Unconditional, NOT `if self.preview.is_running()`. If shutdown lands
+        # while the worker is inside start(), is_running() is False right now
+        # but an encoder is about to exist; skipping stop() would leave it
+        # running past the node's life. stop() is idempotent and clears the
+        # running flag, so a build that lands late tears itself down.
+        self.preview.stop()
+        if outlasted:
+            # The worker outlasted the first join, so it may have finished a
+            # start() after that stop(). Wait it out and kill what it built.
+            self._join_preview_worker()
             self.preview.stop()
 
         if self.pipeline_running:

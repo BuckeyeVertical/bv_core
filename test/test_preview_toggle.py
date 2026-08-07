@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from bv_core import vision_node  # noqa: E402
 from bv_core.pipelines.Vision_Pipeline import VisionPipeline  # noqa: E402
 from bv_core.vision_node import VisionNode  # noqa: E402
 
@@ -117,22 +118,22 @@ class _Node:
     """Carries exactly the attributes the preview methods touch."""
 
     # The real, unbound implementations under test.
+    _init_preview_state = VisionNode._init_preview_state
     _on_preview_toggle = VisionNode._on_preview_toggle
     _ensure_preview_worker = VisionNode._ensure_preview_worker
     _preview_worker_loop = VisionNode._preview_worker_loop
     _apply_preview_state = VisionNode._apply_preview_state
     _publish_preview_chunk = VisionNode._publish_preview_chunk
+    _join_preview_worker = VisionNode._join_preview_worker
 
     def __init__(self, preview):
         self.preview = preview
         self.pipeline = _Pipe(max_queue_size=2)
         self.preview_pub = _PublishRecorder()
         self.logger = _StubLogger()
-        self._preview_want = False
-        self._preview_wake = threading.Event()
-        self._preview_shutdown = threading.Event()
-        self._preview_worker = None
-        self._preview_worker_lock = threading.Lock()
+        # The REAL initialiser, not a hand-copied set of attributes. A local
+        # copy silently drifts from _init_pipeline; this fails loudly instead.
+        self._init_preview_state()
 
     def get_logger(self):
         return self.logger
@@ -248,10 +249,106 @@ class TestToggleNeverBlocksTheExecutor:
         finally:
             node.shutdown()
 
-    def test_no_worker_thread_before_any_toggle(self):
+    def test_real_init_spawns_no_worker_and_engages_nothing(self):
+        # Exercises VisionNode._init_preview_state itself (via _Node.__init__),
+        # so it fails if initialisation ever starts a thread eagerly. The
+        # disabled path is the property the whole feature is gated on.
+        before = threading.active_count()
         node = _Node(_SlowPreview())
         assert node._preview_worker is None
-        assert threading.active_count() >= 1
+        assert node._preview_want is False
+        assert node._preview_engaged is False
+        assert node._preview_shutdown.is_set() is False
+        assert node._preview_wake.is_set() is False
+        assert threading.active_count() == before
+        assert node.pipeline._preview is None
+        assert node.preview.calls == []
+
+
+class TestStateAfterAStreamFault:
+    """PreviewStream self-disables on a bus error; the toggle must still work.
+
+    If the node read is_running() as intent, an OFF click after such a fault
+    would early-return: the pipeline would stay attached to a dead stream and
+    nothing would log, so the operator's click would appear to do nothing.
+    """
+
+    def test_off_still_detaches_and_logs_after_the_stream_died(self):
+        preview = _SlowPreview(delay=0.05)
+        node = _Node(preview)
+        try:
+            node._on_preview_toggle(_Msg(True))
+            assert _wait_for(lambda: node.pipeline._preview is preview)
+
+            preview._running = False        # bus error: stream self-disabled
+            node.logger.lines.clear()
+
+            node._on_preview_toggle(_Msg(False))
+            assert _wait_for(lambda: 'debug preview OFF' in node.logger.text())
+            assert node.pipeline._preview is None
+            assert 'stop' in preview.calls
+        finally:
+            node.shutdown()
+
+    def test_on_after_a_fault_rebuilds_rather_than_doing_nothing(self):
+        preview = _SlowPreview(delay=0.05)
+        node = _Node(preview)
+        try:
+            node._on_preview_toggle(_Msg(True))
+            assert _wait_for(lambda: node.pipeline._preview is preview)
+
+            preview._running = False        # bus error
+            node.logger.lines.clear()
+
+            # The operator clicking ON again means "retry", not "no-op".
+            node._on_preview_toggle(_Msg(True))
+            assert _wait_for(lambda: 'debug preview ON' in node.logger.text())
+            assert preview.is_running()
+            assert node.pipeline._preview is preview
+            assert not preview.overlapped
+        finally:
+            node.shutdown()
+
+
+class TestShutdownJoin:
+    """destroy_node stops the stream a second time iff the worker outlasted the join.
+
+    That second stop is what stops a start() landing after we gave up from
+    leaving an encoder alive past the node's life, so the True/False return is
+    load-bearing, not informational.
+    """
+
+    def test_no_worker_means_nothing_outlasted(self):
+        node = _Node(_SlowPreview(delay=0.05))
+        assert node._join_preview_worker() is False
+
+    def test_reports_true_while_the_worker_is_still_inside_start(self, monkeypatch):
+        monkeypatch.setattr(vision_node, 'PREVIEW_WORKER_JOIN_SEC', 0.1)
+        # A start() far longer than the join: destroy_node must be told.
+        node = _Node(_SlowPreview(delay=5.0))
+        try:
+            node._on_preview_toggle(_Msg(True))
+            assert _wait_for(lambda: node.preview.calls == ['start'])
+            assert node._join_preview_worker() is True
+        finally:
+            node.shutdown()
+
+    def test_reports_false_once_the_worker_has_finished(self, monkeypatch):
+        monkeypatch.setattr(vision_node, 'PREVIEW_WORKER_JOIN_SEC', 5.0)
+        node = _Node(_SlowPreview(delay=0.05))
+        try:
+            node._on_preview_toggle(_Msg(True))
+            assert _wait_for(lambda: node.pipeline._preview is not None)
+            node._preview_shutdown.set()
+            node._preview_wake.set()
+            assert node._join_preview_worker() is False
+        finally:
+            node.shutdown()
+
+    def test_the_join_budget_exceeds_a_worst_case_start(self):
+        # start() can take 12-18 s (three tiers x a 3 s get_state plus shutdown
+        # waits). A join below that would routinely abandon a live build.
+        assert vision_node.PREVIEW_WORKER_JOIN_SEC > 18.0
 
 
 class TestChunkPublisher:

@@ -10,6 +10,7 @@ rate-limits, keeps at most one frame, and returns immediately. When the encoder 
 slow the preview loses framerate; capture and detection are untouched.
 """
 
+import ctypes
 import threading
 import time
 from dataclasses import dataclass
@@ -120,12 +121,43 @@ class FrameGate:
 Gst = None
 
 
+def _pin_libgcc_unwinder():
+    """Load libgcc's unwinder before GStreamer can bring in libunwind.
+
+    DO NOT REMOVE. Loading GStreamer plugins pulls in libunwind.so.8, which
+    exports the same _Unwind_* symbols as libgcc_s.so.1. Whichever object lands
+    first wins for every later lookup, so if libunwind arrives first, C++
+    exception unwinding inside Fast-DDS resolves _Unwind_Resume to libunwind
+    while the frame's personality routine is still libgcc's __gcc_personality_v0.
+    That mismatch calls abort(). Fast-DDS throws and catches internally as normal
+    control flow (e.g. UDPv4Transport::OpenInputChannel), so the process dies at
+    the next rclpy node creation with no Python traceback:
+
+        from bv_core.preview_stream import PreviewConfig, PreviewStream
+        s = PreviewStream(PreviewConfig(width=640, fps=0.0), lambda c: None)
+        s.start(); s.stop()
+        import rclpy; rclpy.init()
+        from rclpy.node import Node
+        Node('probe')            # SIGABRT/SIGSEGV in __gcc_personality_v0
+
+    Loading libgcc_s RTLD_GLOBAL first makes its unwinder authoritative and the
+    repro above exits cleanly. This matters in flight, not just in the test
+    suite: enabling the preview mid-mission would otherwise leave every
+    subsequent Fast-DDS exception a potential process abort in vision_node.
+    """
+    try:
+        ctypes.CDLL('libgcc_s.so.1', mode=ctypes.RTLD_GLOBAL)
+    except OSError:         # noqa: BLE001 - best effort; absence is not fatal
+        pass
+
+
 def _init_gst():
     """Import and initialise GStreamer once. Returns the Gst module or None."""
     global Gst
     if Gst is not None:
         return Gst
     try:
+        _pin_libgcc_unwinder()
         import gi
         gi.require_version('Gst', '1.0')
         from gi.repository import Gst as _Gst
