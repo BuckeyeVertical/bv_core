@@ -780,7 +780,7 @@ visible rather than showing up as an unexplained hot CPU."
 
 **Interfaces:**
 - Consumes: `PreviewStream`, `PreviewConfig` (Task 2).
-- Produces: `/preview_stream` (`std_msgs/UInt8MultiArray`, BEST_EFFORT depth 2), consumed by Task 4. Subscribes `/preview_enabled` (`std_msgs/Bool`).
+- Produces: `/preview_stream` (`std_msgs/UInt8MultiArray`, RELIABLE depth 10), consumed by Task 4. Subscribes `/preview_enabled` (`std_msgs/Bool`).
 
 - [ ] **Step 1: Write the failing test for the hook**
 
@@ -957,8 +957,11 @@ In `_init_pipeline`, after `self.pipeline_running = False`, add:
 ```python
         # Debug preview: constructed dormant. Nothing runs until the operator
         # toggles it on, and the hook costs one comparison per frame until then.
-        preview_qos = QoSProfile(depth=2)
-        preview_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        # RELIABLE, not BEST_EFFORT: both nodes are on the drone with no radio
+        # between them, and fMP4 chunks are not independently droppable — losing
+        # one can stall the browser's MSE decoder, not merely skip a frame.
+        preview_qos = QoSProfile(depth=10)
+        preview_qos.reliability = ReliabilityPolicy.RELIABLE
         preview_qos.history = HistoryPolicy.KEEP_LAST
         self.preview_pub = self.create_publisher(
             UInt8MultiArray, '/preview_stream', preview_qos)
@@ -1052,8 +1055,11 @@ because a debug feature must never cost the detection path a frame."
 In `ApprovalNode.__init__`, after the existing subscriptions, add:
 
 ```python
-        preview_qos = QoSProfile(depth=2)
-        preview_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        # RELIABLE, not BEST_EFFORT: both nodes are on the drone with no radio
+        # between them, and fMP4 chunks are not independently droppable — losing
+        # one can stall the browser's MSE decoder, not merely skip a frame.
+        preview_qos = QoSProfile(depth=10)
+        preview_qos.reliability = ReliabilityPolicy.RELIABLE
         preview_qos.history = HistoryPolicy.KEEP_LAST
 
         self.create_subscription(
