@@ -11,7 +11,7 @@ stitch_overlap: 0.35     # Horizontal overlap fraction between consecutive frame
 frame_width_px: 4640     # Camera frame width used for ground-footprint math; must match gst_pipeline
 
 # Detector configuration
-detector_type: "ml"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
+detector_type: "gazebo_bbox"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
 ml_model_path: "ltdetr.pt"  # LTDETR checkpoint path when detector_type is "ml"
 gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
 
@@ -20,7 +20,7 @@ gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (onl
 # ============================================================
 
 # Pipeline type: 'sim', 'real', or 'ros'
-pipeline_type: 'real'
+pipeline_type: 'sim'
 
 # Gazebo simulation settings (used when pipeline_type: 'sim')
 # Change this if drone or world changes

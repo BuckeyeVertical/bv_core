@@ -36,23 +36,23 @@ points:
 # localizes, and delivers before resuming from where it left off.
 
 #SIM POINTS
-# scan_points:
-#   - [38.3877010611175, -76.4190542, *TAKEOFF]
-#   - [38.3878597611175, -76.4188516343129, *TAKEOFF]
-#   - [38.3880187211175, -76.41864906862581, *TAKEOFF]
-#   - [38.3881776811175, -76.41844649293871, *TAKEOFF]
-#   - [38.3883366411175, -76.41824391725162, *TAKEOFF]
-#   - [38.3884956011175, -76.41804134156452, *TAKEOFF]
-#   - [38.3886545611175, -76.41783876587742, *TAKEOFF]
-
-#Glacier Park
 scan_points:
-  - [40.159520, -83.197420, *TAKEOFF]  # 1
-  - [40.159520, -83.196820, *TAKEOFF]  # 2
-  - [40.159421, -83.196820, *TAKEOFF]  # 3
-  - [40.159421, -83.197420, *TAKEOFF]  # 4
-  - [40.159322, -83.197420, *TAKEOFF]  # 5
-  - [40.159322, -83.196820, *TAKEOFF]  # 6
+  - [38.3877010611175, -76.4190542, *TAKEOFF]
+  - [38.3878597611175, -76.4188516343129, *TAKEOFF]
+  - [38.3880187211175, -76.41864906862581, *TAKEOFF]
+  - [38.3881776811175, -76.41844649293871, *TAKEOFF]
+  - [38.3883366411175, -76.41824391725162, *TAKEOFF]
+  - [38.3884956011175, -76.41804134156452, *TAKEOFF]
+  - [38.3886545611175, -76.41783876587742, *TAKEOFF]
+
+# #Glacier Park
+# scan_points:
+#   - [40.159520, -83.197420, *TAKEOFF]  # 1
+#   - [40.159520, -83.196820, *TAKEOFF]  # 2
+#   - [40.159421, -83.196820, *TAKEOFF]  # 3
+#   - [40.159421, -83.197420, *TAKEOFF]  # 4
+#   - [40.159322, -83.197420, *TAKEOFF]  # 5
+#   - [40.159322, -83.196820, *TAKEOFF]  # 6
 
 
 
@@ -108,7 +108,7 @@ enable_mission_log: true
 # ============================================================
 # When true, the drone holds in AUTO.LOITER after localizing and waits for an
 # operator verdict before flying to the object. Requires bv_gcs to be built.
-Approval_required: false
+Approval_required: true
 
 # Seconds before auto-approving. FAILS OPEN: on expiry the drone deploys and
 # continues, so a dead link or an absent operator can never strand it. The timer
