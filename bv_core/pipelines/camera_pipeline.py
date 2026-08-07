@@ -1,5 +1,10 @@
 """Camera (real or GStreamer) based vision pipeline"""
 
+# MUST STAY FIRST, above cv2. This module opens a CAP_GSTREAMER capture, but
+# the load-order race is already lost by `import cv2` on a GStreamer-built
+# OpenCV. See bv_core/_unwinder.py.
+import bv_core._unwinder  # noqa: F401  (side-effect import; do not reorder)
+
 import threading
 import time
 import cv2
@@ -7,7 +12,7 @@ import numpy as np
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CompressedImage
 from .Vision_Pipeline import VisionPipeline
-from ..preview_stream import pin_libgcc_unwinder
+from .._unwinder import pin_libgcc_unwinder
 
 
 class CameraPipeline(VisionPipeline):

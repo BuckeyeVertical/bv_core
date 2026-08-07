@@ -9,6 +9,13 @@ and detection processing.
 
 # Imports
 
+# MUST STAY FIRST, above cv2 and everything else. Importing it pins libgcc's
+# C++ unwinder before OpenCV/GStreamer can map libunwind and break Fast-DDS
+# exception handling for the rest of the process. On a GStreamer-built OpenCV
+# (the Jetson) `import cv2` alone maps libunwind, so a pin placed any lower is
+# already too late. See bv_core/_unwinder.py.
+import bv_core._unwinder  # noqa: F401  (side-effect import; do not reorder)
+
 import os
 import queue
 import threading

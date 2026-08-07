@@ -10,8 +10,12 @@ and the mismatch calls abort(). Fast-DDS throws and catches internally as
 ordinary control flow, so the process died at the next rclpy node creation with
 no Python traceback at all — just SIGABRT.
 
-`_pin_libgcc_unwinder()` in bv_core/preview_stream.py fixes it by loading
-libgcc_s RTLD_GLOBAL before gi is imported. These tests pin that.
+`bv_core/_unwinder.py` fixes it by loading libgcc_s RTLD_GLOBAL at import time,
+and being imported FIRST - above cv2 - everywhere that can reach GStreamer.
+Import-time is not fussiness: on a GStreamer-built OpenCV, libopencv_videoio
+lists libgstreamer-1.0 in DT_NEEDED, so `import cv2` alone maps libunwind with
+no cv2.VideoCapture call anywhere. A pin below `import cv2` is already too late.
+These tests pin both the effect and that load order.
 
 Each case runs in a SUBPROCESS on purpose. The failure mode is a native abort,
 not an exception, so an in-process test would take the whole pytest run down
@@ -116,15 +120,26 @@ class TestOpenCvRoute:
                         reason='OpenCV built without GStreamer (this box reports '
                                'GStreamer: NO), so CAP_GSTREAMER cannot init it')
     def test_node_creation_survives_an_opencv_gstreamer_capture(self):
+        # Asserts the route was ACTUALLY exercised before asserting it survived.
+        # Without the libunwind check this passes vacuously wherever the capture
+        # fails to open (missing plugin, no videotestsrc), and on the Jetson it
+        # is the only test that covers this route - a false green there would be
+        # worse than no test.
         rc, out = _run("""
     import bv_core.vision_node          # must pin at import, before any capture
     import cv2
     cap = cv2.VideoCapture('videotestsrc num-buffers=1 ! videoconvert ! appsink',
                            cv2.CAP_GSTREAMER)
+    print('CAP_OPENED', cap.isOpened())
     cap.release()
-    print('CV_GST_OK')
+    mapped = any('libunwind' in l for l in open('/proc/self/maps'))
+    print('LIBUNWIND_MAPPED', mapped)
 """ + _MAKE_NODE)
-        assert 'CV_GST_OK' in out, out
+        assert 'CAP_OPENED True' in out, (
+            'capture never opened, so the GStreamer route was not exercised:\n' + out)
+        assert 'LIBUNWIND_MAPPED True' in out, (
+            'libunwind never loaded, so this run proves nothing about the '
+            'unwinder conflict:\n' + out)
         assert rc == 0, f'exited {rc} (negative = fatal signal):\n{out}'
         assert 'RCLPY_OK' in out, out
 
@@ -179,6 +194,51 @@ class TestOpenCvRoute:
         assert "ORDER ['pin', 'capture']" in out, (
             'CameraPipeline must pin the unwinder BEFORE cv2.VideoCapture '
             'initialises GStreamer:\n' + out)
+
+
+class TestLoadOrder:
+    """The pin must precede cv2, not merely precede GStreamer calls.
+
+    On a GStreamer-built OpenCV, `import cv2` maps libunwind by itself via
+    libopencv_videoio's DT_NEEDED on libgstreamer-1.0. So a pin sitting below
+    `import cv2` runs after the arrival it exists to precede. These assert the
+    ordering directly and need no GStreamer to do it.
+
+    CPython's sys.modules preserves insertion order, so the index of a module
+    name is the order in which it was first imported.
+    """
+
+    @pytest.mark.parametrize('module', [
+        'bv_core.vision_node',
+        'bv_core.preview_stream',
+        'bv_core.pipelines.camera_pipeline',
+    ])
+    def test_unwinder_is_imported_before_cv2(self, module):
+        rc, out = _run("""
+    import sys
+    import {mod}
+    order = list(sys.modules)
+    print('UNWINDER_IDX', order.index('bv_core._unwinder'))
+    print('CV2_IDX', order.index('cv2'))
+""".format(mod=module))
+        assert rc == 0, out
+        unwinder = int(out.split('UNWINDER_IDX')[1].split()[0])
+        cv2_idx = int(out.split('CV2_IDX')[1].split()[0])
+        assert unwinder < cv2_idx, (
+            f'{module} imports cv2 (index {cv2_idx}) before bv_core._unwinder '
+            f'(index {unwinder}). On a GStreamer-built OpenCV that means '
+            f'libunwind is already mapped by the time the pin runs.\n' + out)
+
+    def test_the_unwinder_module_pulls_in_nothing_heavy(self):
+        # Its whole job is to win a race, so it must not drag in cv2/gi itself.
+        rc, out = _run("""
+    import sys
+    import bv_core._unwinder
+    heavy = [m for m in ('cv2', 'gi', 'numpy', 'rclpy') if m in sys.modules]
+    print('HEAVY', heavy)
+""")
+        assert rc == 0, out
+        assert 'HEAVY []' in out, out
 
 
 class TestTheFixIsActuallyLoadBearing:
