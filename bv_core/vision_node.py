@@ -70,11 +70,11 @@ pin_libgcc_unwinder()
 
 CLASS_NAMES = ("person", "tent")
 
-# How long destroy_node waits for the preview toggle worker. Above
-# PreviewStream.start()'s 12-18 s worst case (three tiers x a 3 s get_state,
-# plus shutdown waits) so a toggle in flight completes rather than being
-# abandoned half-built. Correctness does not rest on this number: destroy_node
-# re-checks whether the worker outlasted it and stops the stream again if so.
+# How long destroy_node waits for the preview toggle worker. Comfortably above
+# PreviewStream.start()'s worst case (one encoder tier x a 3 s get_state, plus
+# shutdown waits) so a toggle in flight completes rather than being abandoned
+# half-built. Correctness does not rest on this number: destroy_node re-checks
+# whether the worker outlasted it and stops the stream again if so.
 PREVIEW_WORKER_JOIN_SEC = 25.0
 
 
@@ -155,7 +155,6 @@ class VisionNode(Node):
         # Detection settings
         self.det_thresh = cfg.get('detection_threshold', 0.5)
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
-        self.capture_interval = float(cfg.get('capture_interval', 1.5e9))
 
         # Debug preview stream
         self.preview_cfg = PreviewConfig(
@@ -1018,9 +1017,9 @@ class VisionNode(Node):
 
         This runs on the single-threaded executor that also serves
         localize_object on the mission's critical path, and PreviewStream's
-        start()/stop() can each take 12-18 s building or tearing down the
-        GStreamer tier ladder. Blocking here would stall localize long enough
-        for mission_node to exhaust its retries and abandon a real target, so a
+        start()/stop() spend seconds building or tearing down a GStreamer
+        pipeline. Blocking here would stall localize long enough for
+        mission_node to exhaust its retries and abandon a real target, so a
         debug toggle would cost a delivery. Record the wish, wake the worker,
         return; the worker does the slow part and owns the logging.
         """

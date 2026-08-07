@@ -154,16 +154,29 @@ class PreviewConfig:
     bitrate_bps: int = 400_000
 
 
-# Ordered best-first. The Jetson tier is the deployment target; the others exist
-# so the feature can be developed against sim. Python has already downscaled the
-# frame to its final size, so these differ only in colour conversion and encoder.
+# Ordered best-first, and currently one entry on purpose.
+#
+# The deployment target is a Jetson Orin Nano, on which NVIDIA removed the hardware
+# video encoder entirely — there is no NVENC, so a hardware tier could never win.
+#
+# It would also not fail cheaply there. A tier whose elements are absent from the
+# registry fails at parse in microseconds (measured: the old three-tier ladder cost
+# 0.43 s total on a desktop with neither NVIDIA plugin installed). But JetPack ships
+# the nvv4l2 plugins on Orin Nano regardless of the missing silicon, so that tier
+# would parse, then burn up to the full 3 s get_state timeout in _build before
+# failing — on every toggle-on, in flight. That cost is unmeasured on the actual
+# hardware; the tier is removed because it is dead code for this chip, and the
+# latency is a bonus rather than the justification.
+#
+# Software encoding is not a compromise at this workload: 640x360 at 8 fps is
+# 1.8 Mpixel/s, roughly 1/45th of 1080p30, and x264 on ultrafast handles it in a small
+# slice of one of the Orin's six A78AE cores without touching the GPU the detector
+# needs.
+#
+# To support a chip that *does* have NVENC (Orin NX, AGX, or the original Maxwell
+# Nano), add its tier above this one — the probe already selects by trying to reach
+# PLAYING, so a tier that cannot run is skipped without further changes.
 _TIERS = (
-    ('jetson',
-     'nvvidconv ! nvv4l2h264enc bitrate={bps} insert-sps-pps=true '
-     'iframeinterval={gop} maxperf-enable=true'),
-    ('nvidia',
-     'videoconvert ! nvh264enc bitrate={kbps} preset=low-latency-hq '
-     'gop-size={gop}'),
     ('software',
      'videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
      'bitrate={kbps} key-int-max={gop}'),
@@ -264,10 +277,12 @@ class PreviewStream:
         self._running = False
         thread = self._thread
         if was_running and thread is not None:
-            # Longer than the ladder's worst case (3 tiers x 3 s in get_state) so
-            # a build in flight finishes before we tear down. Correctness does not
-            # depend on it: a build that lands late re-checks _running under the
-            # lock and shuts its own pipeline down rather than adopting it.
+            # Comfortably longer than a build's worst case (one tier x 3 s in
+            # get_state, plus shutdown) so a build in flight finishes before we tear
+            # down. Deliberately not trimmed to the current single tier: correctness
+            # does not depend on it — a build that lands late re-checks _running under
+            # the lock and shuts its own pipeline down rather than adopting it — and
+            # the slack costs nothing on a path that only runs at toggle-off.
             thread.join(timeout=12.0)
         if thread is not None and not thread.is_alive():
             self._thread = None

@@ -4,8 +4,6 @@
 
 # Detection settings
 detection_threshold: 0.5
-capture_interval: 1.5e9
-estimated_camera_latency: 0.5  # Seconds to pause after stopping before capturing frame
 num_scan_wp: 3
 
 # Stitching frame capture
