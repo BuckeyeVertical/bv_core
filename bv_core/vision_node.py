@@ -43,13 +43,23 @@ from .pipelines import create_pipeline
 from .detection_crop import CropConfig, build_annotated_crop
 from .localizer import Localizer
 from .mission_logger import MissionLogger
-from .preview_stream import PreviewConfig, PreviewStream
+from .preview_stream import PreviewConfig, PreviewStream, pin_libgcc_unwinder
 from .stitch_geometry import along_track_m, compute_step_m, distance_m
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
 
 import supervision as sv
+
+# Before any GStreamer can load, and before rclpy builds anything. GStreamer
+# maps libunwind, which hijacks the _Unwind_* symbols Fast-DDS needs from
+# libgcc and turns its internal exceptions into an abort() with no traceback.
+# This cannot live only in preview_stream._init_gst: on the Jetson, OpenCV is
+# built with GStreamer, so cv2.VideoCapture(..., CAP_GSTREAMER) in
+# CameraPipeline initialises GStreamer during _init_pipeline without ever
+# reaching _init_gst — on an ordinary flight with the preview never enabled.
+# See pin_libgcc_unwinder's docstring for the full mechanism and repro.
+pin_libgcc_unwinder()
 
 CLASS_NAMES = ("person", "tent")
 
@@ -1077,7 +1087,6 @@ class VisionNode(Node):
             self.get_logger().info('debug preview ON')
         else:
             self.get_logger().warn('debug preview requested but unavailable')
-
 
     def _join_preview_worker(self):
         """Wait for the toggle worker. Returns True if it outlasted the join."""

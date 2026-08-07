@@ -121,17 +121,21 @@ class FrameGate:
 Gst = None
 
 
-def _pin_libgcc_unwinder():
-    """Load libgcc's unwinder before GStreamer can bring in libunwind.
+def pin_libgcc_unwinder():
+    """Load libgcc's unwinder before anything can bring in libunwind.
 
-    DO NOT REMOVE. Loading GStreamer plugins pulls in libunwind.so.8, which
-    exports the same _Unwind_* symbols as libgcc_s.so.1. Whichever object lands
-    first wins for every later lookup, so if libunwind arrives first, C++
-    exception unwinding inside Fast-DDS resolves _Unwind_Resume to libunwind
-    while the frame's personality routine is still libgcc's __gcc_personality_v0.
-    That mismatch calls abort(). Fast-DDS throws and catches internally as normal
-    control flow (e.g. UDPv4Transport::OpenInputChannel), so the process dies at
-    the next rclpy node creation with no Python traceback:
+    DO NOT REMOVE. Call this before ANY route that may initialise GStreamer,
+    and call it as early in the process as you can. It is idempotent and costs
+    one dlopen of an already-present library.
+
+    Initialising GStreamer maps libunwind.so.8, which exports the same _Unwind_*
+    symbols as libgcc_s.so.1. Whichever object lands first wins for every later
+    lookup, so if libunwind arrives first, C++ exception unwinding inside
+    Fast-DDS resolves _Unwind_Resume to libunwind while the frame's personality
+    routine is still libgcc's __gcc_personality_v0. That mismatch calls abort().
+    Fast-DDS throws and catches internally as ordinary control flow (e.g.
+    UDPv4Transport::OpenInputChannel), so the process dies inside a later rclpy
+    node, publisher or subscription creation with no Python traceback at all:
 
         from bv_core.preview_stream import PreviewConfig, PreviewStream
         s = PreviewStream(PreviewConfig(width=640, fps=0.0), lambda c: None)
@@ -141,9 +145,13 @@ def _pin_libgcc_unwinder():
         Node('probe')            # SIGABRT/SIGSEGV in __gcc_personality_v0
 
     Loading libgcc_s RTLD_GLOBAL first makes its unwinder authoritative and the
-    repro above exits cleanly. This matters in flight, not just in the test
-    suite: enabling the preview mid-mission would otherwise leave every
-    subsequent Fast-DDS exception a potential process abort in vision_node.
+    repro above exits cleanly.
+
+    Note that bare Gst.init(None) is enough to map libunwind - no encoder
+    pipeline required - so this is NOT only a preview concern. OpenCV's
+    cv2.VideoCapture(..., cv2.CAP_GSTREAMER) initialises GStreamer inside
+    OpenCV, entirely bypassing _init_gst below, which is why callers pin
+    explicitly rather than relying on this module's own use of it.
     """
     try:
         ctypes.CDLL('libgcc_s.so.1', mode=ctypes.RTLD_GLOBAL)
@@ -157,7 +165,7 @@ def _init_gst():
     if Gst is not None:
         return Gst
     try:
-        _pin_libgcc_unwinder()
+        pin_libgcc_unwinder()
         import gi
         gi.require_version('Gst', '1.0')
         from gi.repository import Gst as _Gst

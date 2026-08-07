@@ -93,6 +93,94 @@ class TestRclpyThenGst:
         assert 'SECOND_NODE_OK' in out, out
 
 
+def _opencv_has_gstreamer():
+    """True if this OpenCV can initialise GStreamer via CAP_GSTREAMER."""
+    import cv2
+    for line in cv2.getBuildInformation().splitlines():
+        if 'GStreamer' in line:
+            return 'YES' in line.upper()
+    return False
+
+
+class TestOpenCvRoute:
+    """The route that actually runs on the drone.
+
+    CameraPipeline does cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER), which
+    initialises GStreamer INSIDE OpenCV without ever touching
+    preview_stream._init_gst. On the Jetson OpenCV is built with GStreamer (it
+    must be, or pipeline_type 'real' could not work), so on an ordinary flight
+    with the preview never enabled, libunwind can still land first.
+    """
+
+    @pytest.mark.skipif(not _opencv_has_gstreamer(),
+                        reason='OpenCV built without GStreamer (this box reports '
+                               'GStreamer: NO), so CAP_GSTREAMER cannot init it')
+    def test_node_creation_survives_an_opencv_gstreamer_capture(self):
+        rc, out = _run("""
+    import bv_core.vision_node          # must pin at import, before any capture
+    import cv2
+    cap = cv2.VideoCapture('videotestsrc num-buffers=1 ! videoconvert ! appsink',
+                           cv2.CAP_GSTREAMER)
+    cap.release()
+    print('CV_GST_OK')
+""" + _MAKE_NODE)
+        assert 'CV_GST_OK' in out, out
+        assert rc == 0, f'exited {rc} (negative = fatal signal):\n{out}'
+        assert 'RCLPY_OK' in out, out
+
+    def test_importing_vision_node_pins_the_unwinder(self):
+        # Hardware-independent gate for the pin that covers the OpenCV route.
+        #
+        # It spies on pin_libgcc_unwinder rather than checking whether libgcc_s
+        # is mapped: cv2, numpy and rclpy all map libgcc_s on their own, so a
+        # /proc/self/maps assertion would pass with the pin deleted. Patching
+        # the attribute BEFORE vision_node is imported works because
+        # vision_node does `from .preview_stream import ... pin_libgcc_unwinder`
+        # at import time, so it binds whatever the module holds then.
+        rc, out = _run("""
+    import bv_core.preview_stream as ps
+    calls = []
+    ps.pin_libgcc_unwinder = lambda: calls.append(1)
+    import bv_core.vision_node
+    print('PIN_CALLS', len(calls))
+""")
+        assert rc == 0, out
+        assert 'PIN_CALLS 0' not in out, (
+            'vision_node no longer pins the unwinder at import; the OpenCV '
+            'CAP_GSTREAMER route is unprotected again:\n' + out)
+        assert 'PIN_CALLS 1' in out, out
+
+    def test_camera_pipeline_pins_before_it_opens_a_capture(self):
+        # The ordering is the whole point: pinning after cv2 has already
+        # initialised GStreamer is too late. Stubs VideoCapture so this runs
+        # without GStreamer, and records whether the pin came first.
+        rc, out = _run("""
+    import cv2
+    import bv_core.pipelines.camera_pipeline as cp
+
+    order = []
+    cp.pin_libgcc_unwinder = lambda: order.append('pin')
+
+    class _Cap:
+        def isOpened(self):
+            return False
+    def _fake_capture(*a, **k):
+        order.append('capture')
+        return _Cap()
+    cv2.VideoCapture = _fake_capture
+
+    try:
+        cp.CameraPipeline('videotestsrc ! appsink')
+    except RuntimeError:
+        pass                     # expected: our stub reports not-opened
+    print('ORDER', order)
+""")
+        assert rc == 0, out
+        assert "ORDER ['pin', 'capture']" in out, (
+            'CameraPipeline must pin the unwinder BEFORE cv2.VideoCapture '
+            'initialises GStreamer:\n' + out)
+
+
 class TestTheFixIsActuallyLoadBearing:
     def test_libunwind_arrives_with_gstreamer(self):
         # If this ever stops being true the guard may be obsolete - but check

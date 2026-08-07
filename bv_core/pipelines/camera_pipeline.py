@@ -7,6 +7,7 @@ import numpy as np
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CompressedImage
 from .Vision_Pipeline import VisionPipeline
+from ..preview_stream import pin_libgcc_unwinder
 
 
 class CameraPipeline(VisionPipeline):
@@ -32,6 +33,12 @@ class CameraPipeline(VisionPipeline):
         self._running = False
         self._thread = None
 
+        # Where OpenCV is built with GStreamer (it is on the Jetson, or
+        # pipeline_type 'real' could not work), the next line initialises
+        # GStreamer inside OpenCV and maps libunwind, which breaks Fast-DDS
+        # exception unwinding for the rest of the process. Pin libgcc's
+        # unwinder first. Idempotent; see pin_libgcc_unwinder's docstring.
+        pin_libgcc_unwinder()
         self._cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
         if not self._cap.isOpened():
             raise RuntimeError(f"Failed to open GStreamer pipeline:\n{gst_pipeline}")
