@@ -234,7 +234,7 @@ Configuration files:
 	- Waypoint lists: `points` (lap), `scan_points`, `stitch_points`, `deliver_points`
 	- Velocities/tolerances: `Lap_velocity`, `Scan_velocity`, `Stitch_velocity`, `*_tolerance`
 - `config/vision_params.yaml`
-	- `detection_threshold`, `capture_interval`, `num_scan_wp`, `detector_type`, `ml_model_path`
+	- `detection_threshold`, `num_scan_wp`, `detector_type`, `ml_model_path`
 - `config/filtering_params.yaml`
 	- `c_matrix` (intrinsics 3x3), `dist_coefficients` (k1…k5), `camera_orientation` (mount euler xyz in radians)
 

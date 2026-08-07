@@ -145,6 +145,7 @@ Optional operator confirmation between LOCALIZE and DELIVER. Off by default; whe
 
 - **Object confirmation and deployment**
   - **`/global_obj_dets` (`std_msgs/Int8`)**: Published by `filtering_node` after 3-frame confirmation; subscribed by `mission_node`. Each message is the confirmed COCO `class_id` that should trigger a localize/deliver/deploy sequence.
+  - **`/confirmation_window` (`std_msgs/String`, JSON)**: Published by `filtering_node` whenever its M-of-N window changes; subscribed by `bv_gcs/approval_node`, which relays it to the browser's confirmation panel. Latched, published only on change. Purely informational — nothing reads it back into the confirmation decision.
   - **`/deployed_object_locations` (`bv_msgs/ObjectLocations`)**: Published by `mission_node` after a successful payload deployment; subscribed by `filtering_node` so it can ignore future detections near already-serviced locations.
 
 - **Visualization**
@@ -180,7 +181,12 @@ YAML config files in `config/` define **mission behavior**, **vision/detector se
     - `gz_topic`, `ros_image_topic` — topics for Gazebo or ROS image sources.
     - `gst_pipeline`, `camera_fps`, `record_video` — GStreamer string and timing for real cameras, plus optional recording to `/image_compressed`.
   - **Scan behavior**:
-    - `capture_interval`, `estimated_camera_latency`, `num_scan_wp` — control how often frames are captured during scan and how many waypoints are considered part of the scan leg.
+    - `num_scan_wp` — how many waypoints are considered part of the scan leg.
+    - Capture rate is **not** configurable: the fetcher thread grabs frames as fast as the
+      pipeline supplies them into a latest-wins single-slot queue, and the detection worker
+      consumes them back-to-back, so detection runs at whatever rate inference sustains. To
+      slow it down, reduce `Scan_velocity` — a rate limit here would cut the number of
+      sightings per pass and can break filtering's 3-frame confirmation.
 
 - **`filtering_params.yaml`** — camera intrinsics and localization tuning
   - **Intrinsics/distortion**:
@@ -188,6 +194,8 @@ YAML config files in `config/` define **mission behavior**, **vision/detector se
     - `dist_coefficients` — distortion coefficients; used to undistort pixels before geolocation.
   - **Camera pose**:
     - `camera_orientation` — camera mount orientation (Euler, radians) relative to the vehicle body; critical for mapping rays into world coordinates.
+  - **Confirmation**:
+    - `confirmation_hits` / `confirmation_window` — a class must be seen `hits` times within the last `window` frames, with those sightings agreeing spatially, before `mission_node` is sent to investigate. Defaults 3 and 5. Hits need **not** be consecutive: the old all-of-3 rule discarded a real object on a single missed frame (~30% of targets lost at a 50% per-frame detection rate) while buying little, since a false positive recurring in one spot satisfies a consecutive rule just as easily and a flickering one is caught by the proximity check either way.
   - **Filtering**:
     - `deployed_ignore_radius_deg` — angular radius around previously deployed locations within which new detections are ignored.
 
