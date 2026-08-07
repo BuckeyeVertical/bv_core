@@ -14,7 +14,7 @@ and detection processing.
 # exception handling for the rest of the process. On a GStreamer-built OpenCV
 # (the Jetson) `import cv2` alone maps libunwind, so a pin placed any lower is
 # already too late. See bv_core/_unwinder.py.
-import bv_core._unwinder  # noqa: F401  (side-effect import; do not reorder)
+import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
 
 import os
 import queue

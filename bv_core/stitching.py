@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+# MUST STAY FIRST, above cv2: pins libgcc's unwinder before OpenCV can map
+# libunwind and break Fast-DDS exception handling for this process. This node
+# is launched by mission.launch.py. See bv_core/_unwinder.py.
+import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor

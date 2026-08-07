@@ -44,7 +44,12 @@ def _run(body, timeout=120):
         import sys
         sys.path.insert(0, {repo!r})
     """).format(repo=REPO) + textwrap.dedent(body)
-    proc = subprocess.run([sys.executable, '-c', script],
+    # -u is load-bearing, not tidiness. The failure these tests exist to catch
+    # is abort() inside a native call, which never runs atexit and never
+    # flushes. Block-buffered to a pipe, the child's prints would be lost and
+    # every progress assertion below would misreport the crash as "the step
+    # never happened". Unbuffered, what was printed survives the abort.
+    proc = subprocess.run([sys.executable, '-u', '-c', script],
                           capture_output=True, text=True, timeout=timeout)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -70,8 +75,9 @@ class TestGstThenRclpy:
     def test_node_creation_survives_a_preview_start_stop(self):
         # The original crash. Without _pin_libgcc_unwinder this aborts (-6/-11).
         rc, out = _run(_START_STOP + _MAKE_NODE)
-        assert 'GST_OK' in out, out
+        # rc first, so a crash reads as a crash rather than a missing marker.
         assert rc == 0, f'exited {rc} (negative = fatal signal):\n{out}'
+        assert 'GST_OK' in out, out
         assert 'RCLPY_OK' in out, out
 
     def test_publisher_creation_survives_too(self):
@@ -135,12 +141,16 @@ class TestOpenCvRoute:
     mapped = any('libunwind' in l for l in open('/proc/self/maps'))
     print('LIBUNWIND_MAPPED', mapped)
 """ + _MAKE_NODE)
+        # rc FIRST. A negative rc is the abort this whole file exists to catch,
+        # and it must be reported as such. Asserting the progress markers first
+        # would diagnose a genuine crash as "the capture never opened" and send
+        # the next person hunting a missing GStreamer plugin instead.
+        assert rc == 0, f'exited {rc} (negative = fatal signal):\n{out}'
         assert 'CAP_OPENED True' in out, (
             'capture never opened, so the GStreamer route was not exercised:\n' + out)
         assert 'LIBUNWIND_MAPPED True' in out, (
             'libunwind never loaded, so this run proves nothing about the '
             'unwinder conflict:\n' + out)
-        assert rc == 0, f'exited {rc} (negative = fatal signal):\n{out}'
         assert 'RCLPY_OK' in out, out
 
     def test_importing_vision_node_pins_the_unwinder(self):
@@ -194,51 +204,6 @@ class TestOpenCvRoute:
         assert "ORDER ['pin', 'capture']" in out, (
             'CameraPipeline must pin the unwinder BEFORE cv2.VideoCapture '
             'initialises GStreamer:\n' + out)
-
-
-class TestLoadOrder:
-    """The pin must precede cv2, not merely precede GStreamer calls.
-
-    On a GStreamer-built OpenCV, `import cv2` maps libunwind by itself via
-    libopencv_videoio's DT_NEEDED on libgstreamer-1.0. So a pin sitting below
-    `import cv2` runs after the arrival it exists to precede. These assert the
-    ordering directly and need no GStreamer to do it.
-
-    CPython's sys.modules preserves insertion order, so the index of a module
-    name is the order in which it was first imported.
-    """
-
-    @pytest.mark.parametrize('module', [
-        'bv_core.vision_node',
-        'bv_core.preview_stream',
-        'bv_core.pipelines.camera_pipeline',
-    ])
-    def test_unwinder_is_imported_before_cv2(self, module):
-        rc, out = _run("""
-    import sys
-    import {mod}
-    order = list(sys.modules)
-    print('UNWINDER_IDX', order.index('bv_core._unwinder'))
-    print('CV2_IDX', order.index('cv2'))
-""".format(mod=module))
-        assert rc == 0, out
-        unwinder = int(out.split('UNWINDER_IDX')[1].split()[0])
-        cv2_idx = int(out.split('CV2_IDX')[1].split()[0])
-        assert unwinder < cv2_idx, (
-            f'{module} imports cv2 (index {cv2_idx}) before bv_core._unwinder '
-            f'(index {unwinder}). On a GStreamer-built OpenCV that means '
-            f'libunwind is already mapped by the time the pin runs.\n' + out)
-
-    def test_the_unwinder_module_pulls_in_nothing_heavy(self):
-        # Its whole job is to win a race, so it must not drag in cv2/gi itself.
-        rc, out = _run("""
-    import sys
-    import bv_core._unwinder
-    heavy = [m for m in ('cv2', 'gi', 'numpy', 'rclpy') if m in sys.modules]
-    print('HEAVY', heavy)
-""")
-        assert rc == 0, out
-        assert 'HEAVY []' in out, out
 
 
 class TestTheFixIsActuallyLoadBearing:

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+# MUST STAY FIRST, above cv2: pins libgcc's unwinder before OpenCV can map
+# libunwind and break Fast-DDS exception handling. This module is how cv2
+# reaches filtering_node, which imports no cv2 of its own, so the pin has to
+# live here to cover that process. See bv_core/_unwinder.py.
+import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
+
 import os
 import numpy as np
 import yaml

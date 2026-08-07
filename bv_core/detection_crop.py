@@ -10,6 +10,10 @@ cannot serve both, so the window adapts to the bounding box.
 Pure numpy/cv2 — no ROS — so the geometry is testable without a camera.
 """
 
+# MUST STAY FIRST, above cv2: pins libgcc's unwinder before OpenCV can map
+# libunwind and break Fast-DDS exception handling. See bv_core/_unwinder.py.
+import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
+
 from dataclasses import dataclass
 
 import cv2

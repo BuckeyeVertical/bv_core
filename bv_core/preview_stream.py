@@ -12,7 +12,7 @@ slow the preview loses framerate; capture and detection are untouched.
 
 # MUST STAY FIRST, above cv2. Pins libgcc's unwinder before OpenCV or
 # GStreamer can map libunwind. See bv_core/_unwinder.py for the mechanism.
-import bv_core._unwinder  # noqa: F401  (side-effect import; do not reorder)
+import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
 
 import threading
 import time
