@@ -346,7 +346,7 @@ the dominant per-frame cost, not the encode."
 **Interfaces:**
 - Consumes: `FrameGate`, `downscale` (Task 1).
 - Produces:
-  - `PreviewConfig(width: int = 1024, fps: float = 8.0, bitrate_bps: int = 1_200_000)`
+  - `PreviewConfig(width: int = 640, fps: float = 4.0, bitrate_bps: int = 400_000)`
   - `PreviewStream(cfg: PreviewConfig, on_chunk: Callable[[bytes], None], logger=None)`
     with `.start() -> bool`, `.stop() -> None`, `.is_running() -> bool`,
     `.offer(frame) -> None`, `.stats() -> dict`, `.tier -> str | None`
@@ -511,9 +511,9 @@ def _init_gst():
 class PreviewConfig:
     """Tunables, mirrored in config/vision_params.yaml."""
 
-    width: int = 1024
-    fps: float = 8.0
-    bitrate_bps: int = 1_200_000
+    width: int = 640
+    fps: float = 4.0
+    bitrate_bps: int = 400_000
 
 
 # Ordered best-first. The Jetson tier is the deployment target; the others exist
@@ -919,9 +919,11 @@ Append to `config/vision_params.yaml`:
 # Off until the operator toggles it on in the ground station. See
 # docs/superpowers/specs/2026-08-06-debug-video-stream-design.md
 # ============================================================
-preview_width: 1024          # output width; height follows source aspect
-preview_fps: 8.0             # decimation target — the knob for CPU and bitrate
-preview_bitrate_bps: 1200000 # encoder target bitrate
+# Deliberately conservative: the Herelink budget is unknown and this is a debug
+# feed, not a camera downlink. Raise once the link has actually been measured.
+preview_width: 640           # output width; height follows source aspect
+preview_fps: 4.0             # decimation target — the knob for CPU and bitrate
+preview_bitrate_bps: 400000  # encoder target bitrate
 ```
 
 - [ ] **Step 6: Wire vision_node**
@@ -937,9 +939,9 @@ Add to the config loader, after `self.capture_interval` is read:
 ```python
         # Debug preview stream
         self.preview_cfg = PreviewConfig(
-            width=int(cfg.get('preview_width', 1024)),
-            fps=float(cfg.get('preview_fps', 8.0)),
-            bitrate_bps=int(cfg.get('preview_bitrate_bps', 1_200_000)),
+            width=int(cfg.get('preview_width', 640)),
+            fps=float(cfg.get('preview_fps', 4.0)),
+            bitrate_bps=int(cfg.get('preview_bitrate_bps', 400_000)),
         )
 ```
 

@@ -70,9 +70,10 @@ tiers in order and accepts the first that actually reaches `PLAYING`. Details un
 Components.
 
 Software encoding is not a compromise on the dev machine: `x264enc` was measured at
-roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — about 15× the 8 fps target.
-(`nvh264enc` is present there but fails to initialise under WSL2 with "Could not
-configure supporting library"; tier 3 covers it and nothing is lost.)
+roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — over 30× the 4 fps default, and
+the default output is smaller still at 640 wide. (`nvh264enc` is present there but
+fails to initialise under WSL2 with "Could not configure supporting library"; tier 3
+covers it and nothing is lost.)
 
 **Transport is H.264 → fragmented MP4 → a dedicated WebSocket → MSE.** It reuses
 `approval_node`'s aiohttp server and port, so there is no new port and no ICE, but
@@ -141,9 +142,9 @@ never retried, since late video is worse than missing video.
 ```python
 @dataclass
 class PreviewConfig:
-    width: int = 1024
-    fps: float = 8.0
-    bitrate_bps: int = 1_200_000
+    width: int = 640
+    fps: float = 4.0
+    bitrate_bps: int = 400_000
 
 class PreviewStream:
     def __init__(self, cfg: PreviewConfig, on_chunk, log=None)
@@ -281,7 +282,7 @@ the aircraft is looking at *now* while judging a frame captured a moment ago.
 │ lat/lon  │  │   detection markers │  │  └────────────────┘  │
 │          │  │                     │  │  PERSON      94%     │
 │ ── ── ── │  └─────────────────────┘  │  lat/lon/alt/dist    │
-│ STREAM   │  live · 1024×768 · 8fps   │  auto-deploys 2:41   │
+│ STREAM   │  live · 640×480 · 4fps    │  auto-deploys 2:41   │
 │ [ on/off]│                           │  [APPROVE] [REJECT]  │
 └──────────┴───────────────────────────┴──────────────────────┘
    260px            flex: 1                    360px
@@ -303,17 +304,28 @@ them.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `preview_width` | `1024` | Output width; height follows source aspect |
-| `preview_fps` | `8.0` | Decimation target; the knob for CPU and bitrate |
-| `preview_bitrate_bps` | `1200000` | Encoder target bitrate |
+| `preview_width` | `640` | Output width; height follows source aspect |
+| `preview_fps` | `4.0` | Decimation target; the knob for CPU and bitrate |
+| `preview_bitrate_bps` | `400000` | Encoder target bitrate |
 
-**Aspect ratio differs between sources and this affects the bitrate.** The real
-sensor is 4640×3480 — **4:3**, not 16:9 — so `preview_width: 1024` gives 1024×768.
-The Gazebo camera is 1280×720 (16:9) and gives 1024×576, about 25% fewer pixels for
-the same width. The default is 1024 rather than 1280 so the real camera's 4:3 output
-lands near 0.8 MP and comfortably inside the 1.2 Mbps budget; at 1280 the real camera
-would produce 1280×960 (1.2 MP) and want roughly 1.6 Mbps. Raise it if the link
-proves to have headroom — this is the second field-tunable knob after `preview_fps`.
+**The defaults are deliberately conservative because the Herelink budget is unknown.**
+The operator does not care about picture quality — this is a debug feed, not a camera
+downlink — so the defaults are set well under any plausible ceiling and raised only if
+measurement shows headroom. Starting low and raising beats discovering contention in
+flight.
+
+At 640 wide, a 1.8 m person that occupies ~430 px in the 4640 px sensor still occupies
+~59 px in the preview: unmistakable. 4 fps is stepped but shows where the aircraft is.
+Roughly 400 kbps fits even if Herelink's native video downlink is running at the same
+time.
+
+**Aspect ratio differs between sources.** The real sensor is 4640×3480 — **4:3**, not
+16:9 — so `preview_width: 640` gives 640×480. The Gazebo camera is 1280×720 (16:9) and
+gives 640×360. Nothing derives height from width; both are handled from the actual
+frame shape.
+
+Both `preview_width` and `preview_fps` are field-tunable without code changes. Raise
+them once the link has been measured.
 
 ## Isolation from the mission and the approval gate
 
