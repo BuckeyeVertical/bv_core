@@ -346,7 +346,7 @@ the dominant per-frame cost, not the encode."
 **Interfaces:**
 - Consumes: `FrameGate`, `downscale` (Task 1).
 - Produces:
-  - `PreviewConfig(width: int = 640, fps: float = 4.0, bitrate_bps: int = 400_000)`
+  - `PreviewConfig(width: int = 640, fps: float = 8.0, bitrate_bps: int = 400_000)`
   - `PreviewStream(cfg: PreviewConfig, on_chunk: Callable[[bytes], None], logger=None)`
     with `.start() -> bool`, `.stop() -> None`, `.is_running() -> bool`,
     `.offer(frame) -> None`, `.stats() -> dict`, `.tier -> str | None`
@@ -512,7 +512,7 @@ class PreviewConfig:
     """Tunables, mirrored in config/vision_params.yaml."""
 
     width: int = 640
-    fps: float = 4.0
+    fps: float = 8.0
     bitrate_bps: int = 400_000
 
 
@@ -922,7 +922,7 @@ Append to `config/vision_params.yaml`:
 # Deliberately conservative: the Herelink budget is unknown and this is a debug
 # feed, not a camera downlink. Raise once the link has actually been measured.
 preview_width: 640           # output width; height follows source aspect
-preview_fps: 4.0             # decimation target — the knob for CPU and bitrate
+preview_fps: 8.0             # decimation target — the knob for CPU and bitrate
 preview_bitrate_bps: 400000  # encoder target bitrate
 ```
 
@@ -940,7 +940,7 @@ Add to the config loader, after `self.capture_interval` is read:
         # Debug preview stream
         self.preview_cfg = PreviewConfig(
             width=int(cfg.get('preview_width', 640)),
-            fps=float(cfg.get('preview_fps', 4.0)),
+            fps=float(cfg.get('preview_fps', 8.0)),
             bitrate_bps=int(cfg.get('preview_bitrate_bps', 400_000)),
         )
 ```

@@ -70,7 +70,7 @@ tiers in order and accepts the first that actually reaches `PLAYING`. Details un
 Components.
 
 Software encoding is not a compromise on the dev machine: `x264enc` was measured at
-roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — over 30× the 4 fps default, and
+roughly 125 fps for 1024×576 on the RTX 3070 Ti PC — over 15× the 8 fps default, and
 the default output is smaller still at 640 wide. (`nvh264enc` is present there but
 fails to initialise under WSL2 with "Could not configure supporting library"; tier 3
 covers it and nothing is lost.)
@@ -143,7 +143,7 @@ never retried, since late video is worse than missing video.
 @dataclass
 class PreviewConfig:
     width: int = 640
-    fps: float = 4.0
+    fps: float = 8.0
     bitrate_bps: int = 400_000
 
 class PreviewStream:
@@ -282,7 +282,7 @@ the aircraft is looking at *now* while judging a frame captured a moment ago.
 │ lat/lon  │  │   detection markers │  │  └────────────────┘  │
 │          │  │                     │  │  PERSON      94%     │
 │ ── ── ── │  └─────────────────────┘  │  lat/lon/alt/dist    │
-│ STREAM   │  live · 640×480 · 4fps    │  auto-deploys 2:41   │
+│ STREAM   │  live · 640×480 · 8fps    │  auto-deploys 2:41   │
 │ [ on/off]│                           │  [APPROVE] [REJECT]  │
 └──────────┴───────────────────────────┴──────────────────────┘
    260px            flex: 1                    360px
@@ -305,7 +305,7 @@ them.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `preview_width` | `640` | Output width; height follows source aspect |
-| `preview_fps` | `4.0` | Decimation target; the knob for CPU and bitrate |
+| `preview_fps` | `8.0` | Decimation target; the knob for CPU and bitrate |
 | `preview_bitrate_bps` | `400000` | Encoder target bitrate |
 
 **The defaults are deliberately conservative because the Herelink budget is unknown.**
@@ -315,9 +315,15 @@ measurement shows headroom. Starting low and raising beats discovering contentio
 flight.
 
 At 640 wide, a 1.8 m person that occupies ~430 px in the 4640 px sensor still occupies
-~59 px in the preview: unmistakable. 4 fps is stepped but shows where the aircraft is.
-Roughly 400 kbps fits even if Herelink's native video downlink is running at the same
-time.
+~59 px in the preview: unmistakable. 8 fps matches the capture rate the camera config
+currently delivers (`framerate=8/1`), so no temporal decimation happens at the default
+— raising it further needs the capture config changed first. Roughly 400 kbps fits even
+if Herelink's native video downlink is running at the same time.
+
+Note that framerate and link cost are independent: the encoder targets
+`preview_bitrate_bps`, so 8 fps costs the same as 4 fps and simply spends the budget
+across more, softer frames. Raise the bitrate, not the framerate, if the picture is too
+mushy.
 
 **Aspect ratio differs between sources.** The real sensor is 4640×3480 — **4:3**, not
 16:9 — so `preview_width: 640` gives 640×480. The Gazebo camera is 1280×720 (16:9) and
