@@ -35,17 +35,32 @@ class TestEncoder:
         finally:
             s.stop()
 
+    def test_start_alone_emits_nothing(self):
+        # Probing proves a tier can run; it must not leak a chunk. A chunk here
+        # would be a second, conflicting fMP4 init segment at the consumer.
+        chunks = []
+        s = PreviewStream(PreviewConfig(width=640, fps=0.0), chunks.append)
+        assert s.start() is True
+        try:
+            time.sleep(0.5)
+            assert chunks == []
+            assert s.stats()['encoded'] == 0
+        finally:
+            s.stop()
+
     def test_offered_frames_produce_encoded_chunks(self):
         chunks = []
         s = PreviewStream(PreviewConfig(width=640, fps=0.0), chunks.append)
         assert s.start() is True
         try:
-            for _ in range(12):
+            assert chunks == [], 'output before any frame was offered'
+            # Keep offering inside the wait: mp4mux will not close a fragment
+            # without further buffers, so a fixed burst then a bare sleep flakes
+            # on a slow machine.
+            deadline = time.time() + 10
+            while not chunks and time.time() < deadline:
                 s.offer(_frame())
                 time.sleep(0.02)
-            deadline = time.time() + 5
-            while not chunks and time.time() < deadline:
-                time.sleep(0.05)
         finally:
             s.stop()
         assert chunks, 'encoder produced no output'
@@ -55,17 +70,57 @@ class TestEncoder:
         # fMP4 starts with an ftyp box; the browser needs it to initialise MSE.
         chunks = []
         s = PreviewStream(PreviewConfig(width=640, fps=0.0), chunks.append)
-        s.start()
+        assert s.start() is True
         try:
-            for _ in range(12):
+            deadline = time.time() + 10
+            while not chunks and time.time() < deadline:
                 s.offer(_frame())
                 time.sleep(0.02)
-            deadline = time.time() + 5
-            while not chunks and time.time() < deadline:
-                time.sleep(0.05)
         finally:
             s.stop()
+        assert chunks, 'encoder produced no output'
         assert b'ftyp' in bytes(chunks[0])
+
+    def test_only_one_init_segment_is_emitted(self):
+        # The consumer's MSE SourceBuffer initialises once. A rebuild on the
+        # first real frame would hand it a second ftyp/moov and stall playback.
+        chunks = []
+        s = PreviewStream(PreviewConfig(width=640, fps=0.0), chunks.append)
+        assert s.start() is True
+        try:
+            deadline = time.time() + 10
+            while len(chunks) < 3 and time.time() < deadline:
+                s.offer(_frame())
+                time.sleep(0.02)
+        finally:
+            s.stop()
+        assert chunks, 'encoder produced no output'
+        inits = [c for c in chunks if b'ftyp' in bytes(c)]
+        assert len(inits) == 1, f'{len(inits)} init segments in {len(chunks)} chunks'
+
+    def test_encoded_count_only_grows_once_frames_are_offered(self):
+        s = PreviewStream(PreviewConfig(width=640, fps=0.0), lambda c: None)
+        assert s.start() is True
+        try:
+            assert s.stats()['encoded'] == 0
+            deadline = time.time() + 10
+            while s.stats()['encoded'] == 0 and time.time() < deadline:
+                s.offer(_frame())
+                time.sleep(0.02)
+            assert s.stats()['encoded'] > 0
+        finally:
+            s.stop()
+
+    def test_stop_during_a_build_leaves_no_pipeline_behind(self):
+        # The build runs on the encoder thread; stop() must not race it into
+        # stranding a PLAYING pipeline that holds the hardware encoder.
+        s = PreviewStream(PreviewConfig(width=640, fps=0.0), lambda c: None)
+        assert s.start() is True
+        s.offer(_frame())
+        s.stop()
+        assert s.is_running() is False
+        assert s._pipeline is None
+        assert s._appsrc is None
 
     def test_offer_before_start_is_a_noop(self):
         s = PreviewStream(PreviewConfig(), lambda c: None)

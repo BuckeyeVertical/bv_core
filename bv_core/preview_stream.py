@@ -177,13 +177,19 @@ class PreviewStream:
         self._on_chunk = on_chunk
         self._log = logger
         self._gate = FrameGate(cfg.fps)
+        # Guards the pipeline lifecycle triple below. It is written from the
+        # caller thread (start/stop) and the encoder thread (lazy build), and an
+        # unguarded write can strand a PLAYING pipeline holding the hardware
+        # encoder for the life of the process.
+        self._lock = threading.Lock()
         self._pipeline = None
         self._appsrc = None
+        self._dims = None
         self._thread = None
         self._running = False
         self._tier = None
         self._encoded = 0
-        self._dims = None
+        self._flow_ok = 0       # GST_FLOW_OK; real value cached once Gst loads.
 
     @property
     def tier(self):
@@ -191,7 +197,7 @@ class PreviewStream:
         return self._tier
 
     def is_running(self):
-        """Return True while the encoder thread and pipeline are up."""
+        """Return True while the encoder thread is up and the pipeline is sound."""
         return self._running
 
     def stats(self):
@@ -208,7 +214,15 @@ class PreviewStream:
         self._gate.offer(frame)
 
     def start(self):
-        """Bring up the first encoder tier that actually works. Returns success."""
+        """Prove an encoder tier works, then run. Returns success.
+
+        Probing only establishes capability: each candidate is built at a nominal
+        size with the sample callback disconnected and torn down again, so no
+        chunk ever escapes a probe. The pipeline that actually streams is built
+        lazily on the first offered frame, at that frame's real dimensions —
+        guessing the shape here would mean a teardown/rebuild on the first frame
+        of every run and two conflicting fMP4 init segments at the consumer.
+        """
         if self._running:
             return True
 
@@ -216,13 +230,11 @@ class PreviewStream:
         if gst is None:
             self._warn('GStreamer/PyGObject unavailable; preview disabled')
             return False
+        self._flow_ok = gst.FlowReturn.OK
 
-        # A probe frame fixes the caps. Real dimensions are learned on the first
-        # offered frame, so start() uses the configured width and a 4:3 guess;
-        # _ensure_dims rebuilds if the source turns out to be a different shape.
+        width, height = self._probe_dims()
         for name, segment in _TIERS:
-            if self._try_tier(gst, name, segment,
-                              self._cfg.width, int(self._cfg.width * 3 / 4)):
+            if self._probe_tier(gst, name, segment, width, height):
                 self._tier = name
                 self._running = True
                 self._thread = threading.Thread(target=self._encode_loop,
@@ -239,24 +251,47 @@ class PreviewStream:
 
     def stop(self):
         """Tear down. Idempotent."""
-        if not self._running:
-            self._teardown()
-            return
+        was_running = self._running
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        thread = self._thread
+        if was_running and thread is not None:
+            # Longer than the ladder's worst case (3 tiers x 3 s in get_state) so
+            # a build in flight finishes before we tear down. Correctness does not
+            # depend on it: a build that lands late re-checks _running under the
+            # lock and shuts its own pipeline down rather than adopting it.
+            thread.join(timeout=12.0)
+        if thread is not None and not thread.is_alive():
             self._thread = None
         self._teardown()
 
     # -- internals ------------------------------------------------------------
 
-    def _try_tier(self, gst, name, segment, width, height):
-        """Build one tier and wait for it to actually reach PLAYING.
+    def _probe_dims(self):
+        """Nominal, even dimensions used only to prove a tier can run."""
+        width = max(2, int(self._cfg.width) - int(self._cfg.width) % 2)
+        height = max(2, int(width * 3 / 4))
+        return width, height - height % 2
+
+    def _probe_tier(self, gst, name, segment, width, height):
+        """Return True if this tier can actually reach PLAYING.
 
         Registry presence is NOT sufficient: nvh264enc is present on desktop
-        machines where it fails to initialise. Only a pipeline that reaches
-        PLAYING is accepted. A tier that does not is returned to NULL before the
-        next is tried, so no half-open pipeline keeps hold of the encoder.
+        machines where it fails to initialise. The probe pipeline is always torn
+        down, success or failure — it proves capability and nothing more.
+        """
+        pipeline, _ = self._build(gst, name, segment, width, height,
+                                  bytes(width * height * 3), connect=False)
+        if pipeline is None:
+            return False
+        self._shutdown(gst, pipeline)
+        return True
+
+    def _build(self, gst, name, segment, width, height, prime, connect):
+        """Build one tier at a fixed size and wait for it to reach PLAYING.
+
+        Returns (pipeline, appsrc), or (None, None). A tier that does not reach
+        PLAYING is returned to NULL before the caller tries the next, so no
+        half-open pipeline keeps hold of the encoder.
         """
         gop = max(1, int(self._cfg.fps * 2)) if self._cfg.fps else 16
         enc = segment.format(bps=self._cfg.bitrate_bps,
@@ -276,41 +311,85 @@ class PreviewStream:
             pipeline = gst.parse_launch(desc)
         except Exception as exc:    # noqa: BLE001 - missing elements land here
             self._info(f"tier '{name}' parse failed: {exc}")
-            return False
+            return None, None
 
-        sink = pipeline.get_by_name('sink')
-        sink.connect('new-sample', self._on_sample)
+        if connect:
+            pipeline.get_by_name('sink').connect('new-sample', self._on_sample)
 
         if pipeline.set_state(gst.State.PLAYING) == gst.StateChangeReturn.FAILURE:
-            self._info(f"tier '{name}' refused PLAYING")
+            self._info(f"tier '{name}' refused PLAYING: {self._bus_error(pipeline)}")
             self._shutdown(gst, pipeline)
-            return False
+            return None, None
 
-        # One black probe frame. Nothing downstream can preroll until a buffer
-        # has been through the encoder, so without this the pipeline sits in
-        # PAUSED and every tier — including a working one — looks unavailable.
+        # A priming buffer. Nothing downstream can preroll until a buffer has been
+        # through the encoder, so without this the pipeline sits in PAUSED and
+        # every tier -- including a working one -- looks unavailable.
         appsrc = pipeline.get_by_name('src')
         try:
-            appsrc.emit('push-buffer',
-                        gst.Buffer.new_wrapped(bytes(width * height * 3)))
+            appsrc.emit('push-buffer', gst.Buffer.new_wrapped(prime))
         except Exception as exc:    # noqa: BLE001 - a broken tier lands here
-            self._info(f"tier '{name}' probe push failed: {exc}")
+            self._info(f"tier '{name}' priming push failed: {exc}")
             self._shutdown(gst, pipeline)
-            return False
+            return None, None
 
         # set_state may return ASYNC; wait for the real answer.
         state_ret, cur, _ = pipeline.get_state(3 * gst.SECOND)
         if state_ret != gst.StateChangeReturn.SUCCESS:
-            self._info(f"tier '{name}' never reached PLAYING "
-                       f"(stuck at {cur.value_nick}); its elements are in the "
-                       f"registry but do not run here")
+            self._info(f"tier '{name}' never reached PLAYING (stuck at "
+                       f"{cur.value_nick}); its elements are in the registry but "
+                       f"do not run here: {self._bus_error(pipeline)}")
             self._shutdown(gst, pipeline)
-            return False
+            return None, None
 
-        self._pipeline = pipeline
-        self._appsrc = appsrc
-        self._dims = (width, height)
-        return True
+        return pipeline, appsrc
+
+    def _build_ladder(self, width, height, prime):
+        """Walk the whole tier ladder for a streaming pipeline at (width, height).
+
+        The tier proved in start() is tried first — re-probing a tier that has
+        already failed once costs seconds — but the whole ladder is available, so
+        a tier that cannot handle this particular size falls through instead of
+        killing the preview.
+
+        Adopts the winner under the lock, but only if a stop() has not landed
+        meanwhile; otherwise it shuts the new pipeline down itself. Returns
+        success.
+        """
+        gst = Gst
+        ladder = sorted(_TIERS, key=lambda t: t[0] != self._tier)
+        for name, segment in ladder:
+            pipeline, appsrc = self._build(gst, name, segment, width, height,
+                                           prime, connect=True)
+            if pipeline is None:
+                continue
+            with self._lock:
+                if not self._running:
+                    self._shutdown(gst, pipeline)
+                    return False
+                self._pipeline = pipeline
+                self._appsrc = appsrc
+                self._dims = (width, height)
+                self._tier = name
+            self._info(f"preview encoder: streaming {width}x{height} "
+                       f"on tier '{name}'")
+            return True
+
+        self._warn(f'preview: no tier could encode {width}x{height}; '
+                   f'preview disabled')
+        self._running = False
+        return False
+
+    @staticmethod
+    def _bus_error(pipeline):
+        """Return the first error text on a pipeline's bus, for diagnostics."""
+        try:
+            msg = pipeline.get_bus().poll(Gst.MessageType.ERROR, 0)
+            if msg is None:
+                return 'no bus error'
+            err, dbg = msg.parse_error()
+            return f'{err.message} [{dbg}]'
+        except Exception:       # noqa: BLE001 - diagnostics must not raise
+            return 'bus unreadable'
 
     @staticmethod
     def _shutdown(gst, pipeline):
@@ -323,28 +402,27 @@ class PreviewStream:
 
     def _on_sample(self, sink):
         """Handle an appsink sample: hand the encoded chunk to the consumer."""
-        gst = Gst
         try:
             sample = sink.emit('pull-sample')
-            if sample is None:
-                return gst.FlowReturn.OK
-            buf = sample.get_buffer()
-            ok, info = buf.map(gst.MapFlags.READ)
-            if ok:
-                try:
-                    self._encoded += 1
-                    self._on_chunk(bytes(info.data))
-                except Exception as exc:    # noqa: BLE001 - consumer must not kill us
-                    self._warn(f"preview chunk consumer raised: {exc}")
-                finally:
-                    buf.unmap(info)
-        except Exception as exc:    # noqa: BLE001 - nothing here may reach GStreamer
+            if sample is not None:
+                buf = sample.get_buffer()
+                ok, info = buf.map(Gst.MapFlags.READ)
+                if ok:
+                    try:
+                        self._encoded += 1
+                        self._on_chunk(bytes(info.data))
+                    except Exception as exc:    # noqa: BLE001 - consumer is not fatal
+                        self._warn(f"preview chunk consumer raised: {exc}")
+                    finally:
+                        buf.unmap(info)
+        except Exception as exc:    # noqa: BLE001 - nothing may reach GStreamer
             self._warn(f"preview sample handling failed: {exc}")
-        return gst.FlowReturn.OK
+        return self._flow_ok
 
     def _encode_loop(self):
-        gst = Gst
         while self._running:
+            if not self._check_bus():
+                break
             frame = self._gate.take()
             if frame is None:
                 time.sleep(0.005)
@@ -353,33 +431,67 @@ class PreviewStream:
                 # downscale may hand back the caller's array by reference, so the
                 # copy made by tobytes() is the last use of it.
                 small = downscale(frame, self._cfg.width)
-                if not self._ensure_dims(small):
+                height, width = small.shape[:2]
+                payload = small.tobytes()
+                if self._needs_build(width, height):
+                    # The priming push carries this frame, so it is not sent twice.
+                    self._rebuild(width, height, payload)
                     continue
-                buf = gst.Buffer.new_wrapped(small.tobytes())
-                self._appsrc.emit('push-buffer', buf)
+                appsrc = self._appsrc
+                if appsrc is not None:
+                    appsrc.emit('push-buffer', Gst.Buffer.new_wrapped(payload))
             except Exception as exc:    # noqa: BLE001 - keep the thread alive
                 self._warn(f"preview encode failed: {exc}")
                 time.sleep(0.1)
 
-    def _ensure_dims(self, small):
-        """Restart the pipeline if the real frame shape differs from the guess."""
-        h, w = small.shape[:2]
-        if self._dims == (w, h):
-            return True
-        self._info(f"preview: source is {w}x{h}, rebuilding encoder")
-        tier, segment = next(t for t in _TIERS if t[0] == self._tier)
+    def _needs_build(self, width, height):
+        """True when there is no pipeline, or it is the wrong shape."""
+        with self._lock:
+            return self._pipeline is None or self._dims != (width, height)
+
+    def _rebuild(self, width, height, payload):
+        """Build (or rebuild) the streaming pipeline at real frame dimensions."""
+        with self._lock:
+            known = self._dims
+        if known is not None:
+            self._info(f"preview: source changed to {width}x{height}, rebuilding")
         self._teardown()
-        if not self._try_tier(Gst, tier, segment, w, h):
-            self._running = False
-            self._warn('preview: rebuild at real dimensions failed')
-            return False
-        return True
+        return self._build_ladder(width, height, payload)
+
+    def _check_bus(self):
+        """Watch for a pipeline that dies after start. False means it did.
+
+        Without this a fault after PLAYING -- encoder error, device removed,
+        failed renegotiation -- leaves is_running() lying while chunks silently
+        stop.
+        """
+        pipeline = self._pipeline
+        if pipeline is None:
+            return True
+        try:
+            msg = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR
+                                                  | Gst.MessageType.EOS)
+        except Exception:       # noqa: BLE001 - never fatal
+            return True
+        if msg is None:
+            return True
+        if msg.type == Gst.MessageType.EOS:
+            self._warn('preview pipeline ended (EOS); preview stopped')
+        else:
+            err, dbg = msg.parse_error()
+            self._warn(f'preview pipeline error: {err.message} [{dbg}]; '
+                       f'preview stopped')
+        self._running = False
+        self._teardown()
+        return False
 
     def _teardown(self):
-        if self._pipeline is not None:
-            self._shutdown(Gst, self._pipeline)
-        self._pipeline = None
-        self._appsrc = None
+        with self._lock:
+            pipeline, self._pipeline = self._pipeline, None
+            self._appsrc = None
+            self._dims = None
+        if pipeline is not None:
+            self._shutdown(Gst, pipeline)
 
     def _info(self, msg):
         if self._log:
