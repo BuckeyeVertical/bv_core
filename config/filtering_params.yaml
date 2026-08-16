@@ -32,7 +32,7 @@ deployed_ignore_radius_deg: 0.0001
 rejected_ignore_radius_deg: 0.0001
 
 # ============================================================
-# SIMULATION CAMERA INTRINSICS (Gazebo 1280x720)
+# SIMULATION CAMERA INTRINSICS (Bevy 1280x720, 114.5916-degree HFOV)
 # Uncomment these and comment out the real camera values for sim
 # ============================================================
 
@@ -40,7 +40,7 @@ c_matrix: [410.93927419797154, 0.0, 640.0,
            0.0, 410.9392741979716, 360.0,
            0.0, 0.0, 1.0]
 dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
+camera_orientation: [3.1416, 0.0, -1.5708] # Downward simulation camera
 
 # Detection confirmation: a class must be seen `confirmation_hits` times within the
 # last `confirmation_window` frames, with those sightings agreeing spatially, before
@@ -51,5 +51,5 @@ camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
 # lost ~30% of real targets. It bought little in return: a false positive that recurs
 # in the same spot satisfies a consecutive rule just as easily, and one that flickers
 # between spots is caught by the proximity check either way.
-confirmation_hits: 3
+confirmation_hits: 2
 confirmation_window: 5

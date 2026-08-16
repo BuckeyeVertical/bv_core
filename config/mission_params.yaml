@@ -12,8 +12,8 @@ enable_mission_log: true
 # Number of objects to detect and deliver payloads to
 num_objects: 2
 
-# Takeoff altitude used as anchor for all waypoints
-takeoff_alt: &TAKEOFF 15.24
+# Takeoff altitude used as anchor for all waypoints (300 ft)
+takeoff_alt: &TAKEOFF 60.96
 
 
 

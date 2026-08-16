@@ -8,23 +8,33 @@ num_scan_wp: 3
 
 # Stitching frame capture
 stitch_overlap: 0.35     # Horizontal overlap fraction between consecutive frames in a row
-frame_width_px: 4640     # Camera frame width used for ground-footprint math; must match gst_pipeline
+frame_width_px: 1280     # Camera frame width used for ground-footprint math
 
 # Detector configuration
-detector_type: "gazebo_bbox"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
-ml_model_path: "ltdetr.pt"  # LTDETR checkpoint path when detector_type is "ml"
+detector_type: "ml"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
+ml_model_path: "/bv_ws/ltdetr.pt"  # LTDETR checkpoint inside the mission container
 gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
+sahi_slice_sizes:
+  bevy: [530, 397]       # Same slice count as the real camera
+  real: [1920, 1920]
+  ros: [1920, 1920]
+  sim: [530, 397]
+sahi_overlap: 0.2
 
 # ============================================================
 # PIPELINE CONFIGURATION
 # ============================================================
 
-# Pipeline type: 'sim', 'real', or 'ros'
-pipeline_type: 'sim'
+# Pipeline type: 'sim', 'bevy', 'real', or 'ros'
+pipeline_type: 'bevy'
 
 # Gazebo simulation settings (used when pipeline_type: 'sim')
 # Change this if drone or world changes
 gz_topic: '/camera/bounding_boxes_image'
+
+# Bevy camera stream settings (used when pipeline_type: 'bevy')
+bevy_host: 'host.docker.internal'
+bevy_port: 7002
 
 # Real camera settings (used when pipeline_type: 'real')
 gst_pipeline: 'v4l2src device=/dev/video0 ! image/jpeg, width=4640, height=3480, framerate=8/1 ! jpegdec ! videoconvert ! appsink drop=true sync=false'
@@ -53,5 +63,5 @@ crop_jpeg_quality: 85
 # Deliberately conservative: the Herelink budget is unknown and this is a debug
 # feed, not a camera downlink. Raise once the link has actually been measured.
 preview_width: 640           # output width; height follows source aspect
-preview_fps: 8.0             # decimation target — the knob for CPU and bitrate
-preview_bitrate_bps: 400000  # encoder target bitrate
+preview_fps: 12.0             # decimation target — the knob for CPU and bitrate
+preview_bitrate_bps: 500000  # encoder target bitrate

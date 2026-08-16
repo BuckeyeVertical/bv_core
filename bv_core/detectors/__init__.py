@@ -41,6 +41,11 @@ def create_detector(detector_type: str, **config) -> BaseDetector:
                 "ml_model_path",
                 "/Users/allenthomas/Code/Personal/inference/ltdetr.pt",
             ),
+            source_tile_size=tuple(
+                config.get("sahi_source_tile_size", (1920, 1920))
+            ),
+            overlap=float(config.get("sahi_overlap", 0.2)),
+            progress_callback=config.get("sahi_progress_callback"),
         )
     elif detector_type == "gazebo_bbox":
         from .gazebo_bbox_detector import GazeboBBoxDetector

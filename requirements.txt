@@ -19,3 +19,4 @@ numpy<2,>=1.23
 scikit-learn
 opencv-python
 geographiclib
+pytest>=8,<9

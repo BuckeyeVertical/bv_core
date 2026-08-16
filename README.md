@@ -66,7 +66,7 @@ High-level services (“microservices”) and data flow:
 	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs LTDETR when `detector_type: "ml"` is selected, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
 
 - **filtering_node** (bv_core.filtering_node.FilteringNode)
-	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after 3-frame consistency, excluding areas near already-deployed locations
+	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after the configured M-of-N window, excluding areas near already-deployed locations
 	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
 	- Role: Time-aligns detections with pose/GPS, projects to lat/lon using camera intrinsics/orientation from `filtering_params.yaml`. Confirms detections in scan state and publishes `/global_obj_dets`; does not provide a service — mission uses `localize_object` on vision_node for per-object GPS.
 
@@ -526,7 +526,7 @@ You can now proceed to run the BV stack (`ros2 launch bv_core mission.launch.py`
 	- `takeoff` → `lap` → `stitching` → `scan` → `localize` → `deliver` → `deploy` → `return`
 - Mission publishes `/deployed_object_locations` (bv_msgs/ObjectLocations) after each successful payload deployment; filtering_node uses this to ignore detections near serviced locations.
 - Vision publishes `/obj_dets` and queue state on `/queue_state` (1=empty/ready, 0=busy). Vision provides `localize_object` (bv_msgs/srv/LocalizeObject) for mission_node to get object GPS during localize state.
-- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (3-frame consistency) during scan; mission_node subscribes and triggers localize/deliver/deploy per detection.
+- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (currently 2 hits within 5 frames) during scan; mission_node subscribes and triggers localize/deliver/deploy per detection.
 - MAVROS bridges:
 	- Topics: `/mavros/mission/reached`, `/mavros/state`, `/mavros/global_position/global`, `/mavros/global_position/rel_alt`, `/mavros/local_position/pose`
 	- Services: `/mavros/mission/push`, `/mavros/cmd/arming`, `/mavros/set_mode`, `/mavros/cmd/command`, `/mavros/param/set`
