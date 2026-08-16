@@ -16,6 +16,7 @@ and detection processing.
 # already too late. See bv_core/_unwinder.py.
 import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
 
+import json
 import os
 import queue
 import threading
@@ -52,6 +53,7 @@ from .localizer import Localizer
 from .mission_logger import MissionLogger
 from .preview_stream import PreviewConfig, PreviewStream, pin_libgcc_unwinder
 from .stitch_geometry import along_track_m, compute_step_m, distance_m
+from .frame_metadata import SimulationFrameMetadata, apply_simulation_metadata
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -184,6 +186,14 @@ class VisionNode(Node):
         self.camera_fps = cfg.get('camera_fps', 30.0)
         self.record_video = cfg.get('record_video', False)
         self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
+        self.bevy_host = cfg.get('bevy_host', '127.0.0.1')
+        self.bevy_port = int(cfg.get('bevy_port', 7002))
+        sahi_slice_sizes = cfg.get('sahi_slice_sizes', {})
+        self.sahi_slice_size = tuple(
+            int(value)
+            for value in sahi_slice_sizes.get(self.pipeline_type, [1920, 1920])
+        )
+        self.sahi_overlap = float(cfg.get('sahi_overlap', 0.2))
 
         # Stitching capture
         self.stitch_overlap = float(cfg.get('stitch_overlap', 0.35))
@@ -275,6 +285,8 @@ class VisionNode(Node):
             self.pipeline_type,
             gz_topic=self.gz_topic,
             ros_topic=self.ros_image_topic,
+            bevy_host=self.bevy_host,
+            bevy_port=self.bevy_port,
             node=self,
             gst_pipeline=self.gst_pipeline_str,
             record=self.record_video,
@@ -381,6 +393,13 @@ class VisionNode(Node):
             qos_queue_state
         )
 
+        progress_qos = QoSProfile(depth=1)
+        progress_qos.reliability = ReliabilityPolicy.RELIABLE
+        progress_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        progress_qos.history = HistoryPolicy.KEEP_LAST
+        self.sahi_progress_pub = self.create_publisher(
+            String, '/sahi_progress', progress_qos)
+
         # Timer for queue state publishing
         self.timer = self.create_timer(0.1, self._on_timer)
 
@@ -389,9 +408,16 @@ class VisionNode(Node):
         self.detector = create_detector(
             detector_type=self.detector_type,
             ml_model_path=self.ml_model_path,
+            sahi_source_tile_size=self.sahi_slice_size,
+            sahi_overlap=self.sahi_overlap,
+            sahi_progress_callback=self._publish_sahi_progress,
             gazebo_bbox_topic=self.gazebo_bbox_topic,
         )
         self.detector.start()
+
+    def _publish_sahi_progress(self, progress: dict) -> None:
+        payload = json.dumps(progress, separators=(',', ':'))
+        self.sahi_progress_pub.publish(String(data=payload))
 
     def _init_localizer(self):
         """Initialize the localizer for GPS coordinate conversion."""
@@ -803,15 +829,21 @@ class VisionNode(Node):
                 continue
 
             # Try to get a frame from the camera
-            frame = self._try_get_frame()
-            if frame is None:
+            packet = self._try_get_frame()
+            if packet is None:
                 continue
+            frame, metadata = packet
 
             # Only queue if we're in scan state (no waypoint gate)
             if self.state != 'scan':
                 time.sleep(0.05)
                 continue
 
+            try:
+                simulation_metadata = SimulationFrameMetadata.from_mapping(metadata)
+            except ValueError as error:
+                self.get_logger().warn(f"Ignoring invalid frame metadata: {error}")
+                simulation_metadata = None
             stamp = self.get_clock().now()
             # Discard stale frame if present ("latest wins")
             try:
@@ -819,12 +851,12 @@ class VisionNode(Node):
                 self.queue.task_done()
             except queue.Empty:
                 pass
-            self.queue.put_nowait((frame, stamp))
+            self.queue.put_nowait((frame, stamp, simulation_metadata))
 
     def _try_get_frame(self):
         """Attempt to get a frame from the pipeline with error handling."""
         try:
-            return self.pipeline.get_frame(timeout=0.1)
+            return self.pipeline.get_frame_with_metadata(timeout=0.1)
         except RuntimeError:
             time.sleep(0.05)
             return None
@@ -847,10 +879,10 @@ class VisionNode(Node):
             if item is None:
                 continue
 
-            frame, stamp = item
+            frame, stamp, simulation_metadata = item
 
             try:
-                self._process_frame(frame, stamp)
+                self._process_frame(frame, stamp, simulation_metadata)
             except Exception as e:
                 tb = traceback.format_exc()
                 self.get_logger().error(f"Processing failed: {e}\n{tb}")
@@ -880,7 +912,7 @@ class VisionNode(Node):
 
         return item
 
-    def _process_frame(self, frame, stamp):
+    def _process_frame(self, frame, stamp, simulation_metadata=None):
         """Run detection on a frame and publish results."""
 
         # Convert grayscale to BGR if needed
@@ -963,14 +995,15 @@ class VisionNode(Node):
         annotated_frame = sv.LabelAnnotator().annotate(annotated_frame, detections, labels)
 
         # Publish detection results
-        self._publish_detections(detections, stamp)
+        self._publish_detections(detections, stamp, simulation_metadata)
 
-    def _publish_detections(self, detections, stamp):
+    def _publish_detections(self, detections, stamp, simulation_metadata=None):
         """Publish object detections message."""
         detections_msg = ObjectDetections()
         detections_msg.dets = []
         detections_msg.header.stamp = stamp.to_msg()
         detections_msg.header.frame_id = self.pipeline_topic
+        apply_simulation_metadata(detections_msg, simulation_metadata)
 
         for (x1, y1, x2, y2), score, cls in zip(
             detections.xyxy,

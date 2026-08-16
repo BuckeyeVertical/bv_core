@@ -43,9 +43,20 @@ class GzTransportPipeline(VisionPipeline):
     def get_frame(self, timeout=None):
         """Return the newest buffered frame"""
         if not self._running:
-            raise RuntimeError("GzTransportPipeline must be started before getting frames")
+            raise RuntimeError(
+                "GzTransportPipeline must be started before getting frames"
+            )
 
         return super().get_frame(timeout=timeout)
+
+    def get_frame_with_metadata(self, timeout=None):
+        """Return the newest frame with an empty metadata mapping."""
+        if not self._running:
+            raise RuntimeError(
+                "GzTransportPipeline must be started before getting frames"
+            )
+
+        return super().get_frame_with_metadata(timeout=timeout)
 
     def stop(self):
         """Cancel the Gazebo transport subscription and clear buffered frames"""

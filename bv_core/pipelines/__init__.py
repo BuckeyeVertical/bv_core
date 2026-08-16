@@ -17,9 +17,11 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
         pipeline_type: Type of pipeline to create. Options:
             - "ros": ROS2 CompressedImage topic subscription
             - "sim" / "gazebo": Gazebo transport image subscription
+            - "bevy": BV camera TCP stream
             - "real" / "camera": Physical camera or GStreamer pipeline
         **config: All configuration parameters. Factory picks what it needs.
             - gz_topic: Gazebo transport topic (used by sim/gazebo)
+            - bevy_host, bevy_port: Camera stream endpoint (used by bevy)
             - ros_topic: ROS image topic (used by ros)
             - node: ROS2 node instance (used by ros, camera)
             - gst_pipeline: GStreamer pipeline string (used by real/camera)
@@ -61,6 +63,18 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
         )
         return pipeline, topic
 
+    elif pipeline_type == "bevy":
+        from .bevy_pipeline import BevyPipeline
+
+        host = config.get("bevy_host", "127.0.0.1")
+        port = int(config.get("bevy_port", 7002))
+        pipeline = BevyPipeline(
+            host=host,
+            port=port,
+            queue_size=queue_size,
+        )
+        return pipeline, f"tcp://{host}:{port}"
+
     elif pipeline_type in ("real", "camera"):
         from .camera_pipeline import CameraPipeline
 
@@ -80,5 +94,5 @@ def create_pipeline(pipeline_type: str, **config) -> Tuple[VisionPipeline, str]:
     else:
         raise ValueError(
             f"Unknown pipeline type: '{pipeline_type}'. "
-            f"Valid options: 'ros', 'sim', 'gazebo', 'real', 'camera'"
+            f"Valid options: 'ros', 'sim', 'gazebo', 'bevy', 'real', 'camera'"
         )

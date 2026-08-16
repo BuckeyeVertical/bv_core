@@ -1,11 +1,8 @@
-FROM arm64v8/ros:humble-ros-base-jammy
+FROM ros:humble-ros-base-jammy
 SHELL ["/bin/bash", "-lc"]
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV CXXFLAGS="-std=c++14"
 
-# Base tools, Gazebo repo bootstrap, and ROS development tooling needed to
-# install workspace deps and support the mission launch simulation stack.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-colcon-common-extensions \
@@ -29,58 +26,44 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rosdep update \
  && rm -rf /var/lib/apt/lists/*
 
-# Runtime/system packages called for by the Linux README's baseline flow.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gz-harmonic \
+    gz-sim8-cli \
+    libgz-sim8-plugins \
     python3-gz-transport13 \
     ros-humble-mavros \
     ros-humble-mavros-msgs \
     ros-humble-cv-bridge \
+    ros-humble-sensor-msgs \
+    ros-humble-std-msgs \
+    python3-aiohttp \
+    python3-gi \
     python3-opencv \
     python3-pil \
+    gir1.2-gstreamer-1.0 \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
     geographiclib-tools \
  && /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh \
  && rm -rf /var/lib/apt/lists/*
 
-# foxglove_bridge is no longer available as a Humble apt package, so build it
-# from the official source tarball into a dedicated overlay.
-RUN mkdir -p /opt/foxglove-sdk \
- && cd /opt/foxglove-sdk \
- && curl -L https://github.com/foxglove/foxglove-sdk/archive/refs/heads/main.tar.gz -o sdk.tar.gz \
- && tar -xzf sdk.tar.gz \
- && source /opt/ros/humble/setup.bash \
- && apt-get update \
- && rosdep install --from-paths /opt/foxglove-sdk/foxglove-sdk-main/ros/src --ignore-src -r -y \
- && colcon build \
-      --base-paths /opt/foxglove-sdk/foxglove-sdk-main/ros/src \
-      --merge-install \
-      --install-base /opt/foxglove-sdk/install \
-      --cmake-args -DBUILD_TESTING=OFF \
- && rm -rf /opt/foxglove-sdk/sdk.tar.gz /root/.ros/log /var/lib/apt/lists/*
-
 WORKDIR /bv_ws
 RUN mkdir -p /bv_ws/src
 
-# Build with the bv_core repo as the Docker build context.
 COPY requirements.txt /tmp/bv_core-requirements.txt
 RUN python3 -m pip install --upgrade pip && \
+    pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.11.0+cpu \
+      torchvision==0.26.0+cpu && \
     pip install --no-cache-dir -r /tmp/bv_core-requirements.txt
 
 COPY container/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && \
-    printf '%s\n' \
-      'source /opt/ros/humble/setup.bash' \
-      '' \
-      '# Foxglove Bridge overlay' \
-      'if [ -f /opt/foxglove-sdk/install/setup.bash ]; then' \
-      '    source /opt/foxglove-sdk/install/setup.bash' \
-      'fi' \
-      '' \
-      '# BV workspace overlay' \
-      'if [ -f /bv_ws/install/local_setup.bash ]; then' \
-      '    source /bv_ws/install/local_setup.bash' \
-      'fi' \
-      >> /root/.bashrc
+COPY container/ros_setup.sh /opt/bv/ros_setup.sh
+RUN chmod +x /entrypoint.sh /opt/bv/ros_setup.sh && \
+    printf '%s\n' 'source /opt/bv/ros_setup.sh' >> /root/.bashrc
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]

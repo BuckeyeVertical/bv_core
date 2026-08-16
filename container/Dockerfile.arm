@@ -66,18 +66,13 @@ RUN source /opt/ros/humble/setup.bash && \
         -DBUILD_TESTING=OFF \
         -DGeographicLib_DIR=${GeographicLib_DIR}
 
-ARG ROS_DISTRO=humble
-RUN apt-get update && \
-    apt-get install -y ros-${ROS_DISTRO}-foxglove-bridge && \
-    rm -rf /var/lib/apt/lists/*
-
 WORKDIR /bv_ws
 
 # Entrypoint & env
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && \
-    echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
-    echo "source /bv_ws/install/setup.bash" >> /root/.bashrc
+COPY ros_setup.sh /opt/bv/ros_setup.sh
+RUN chmod +x /entrypoint.sh /opt/bv/ros_setup.sh && \
+    echo "source /opt/bv/ros_setup.sh" >> /root/.bashrc
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]
