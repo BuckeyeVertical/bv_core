@@ -34,16 +34,16 @@ def detector_with_fake_model(source_tile_size, progress_callback=None):
 
 
 def test_bevy_frame_uses_same_three_by_three_grid_as_real_camera():
-    detector = detector_with_fake_model((530, 397))
+    detector = detector_with_fake_model((530, 530))
 
-    results = detector._predict_sahi(Image.new("RGB", (1280, 720)), threshold=0.5)
+    results = detector._predict_sahi(Image.new("RGB", (1280, 960)), threshold=0.5)
 
     assert detector.model.predict_call is None
-    assert detector.model.sahi_call == ((1546, 1161), 0.5, 0.2)
+    assert detector.model.sahi_call == ((1546, 1159), 0.5, 0.2)
     np.testing.assert_allclose(
         results["bboxes"],
-        [[100.0 * 1280 / 1546, 200.0 * 720 / 1161,
-          300.0 * 1280 / 1546, 400.0 * 720 / 1161]],
+        [[100.0 * 1280 / 1546, 200.0 * 960 / 1159,
+          300.0 * 1280 / 1546, 400.0 * 960 / 1159]],
     )
 
 
@@ -61,9 +61,9 @@ def test_large_frame_uses_1920_pixel_sahi_tiles_and_restores_coordinates():
 
 def test_progress_reports_the_full_sahi_batch():
     progress = []
-    detector = detector_with_fake_model((530, 397), progress.append)
+    detector = detector_with_fake_model((530, 530), progress.append)
 
-    detector._predict_sahi(Image.new("RGB", (1280, 720)), threshold=0.5)
+    detector._predict_sahi(Image.new("RGB", (1280, 960)), threshold=0.5)
 
     assert len(progress) == 2
     assert progress[0]["status"] == "running"

@@ -48,12 +48,11 @@ class TestDownscale:
         out = downscale(frame, 1024)
         assert out.shape[0] == 768
 
-    def test_sixteen_by_nine_source(self):
-        # Gazebo is 1280x720 -> 1024x576.
-        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    def test_bevy_camera_frame_matches_real_aspect_ratio(self):
+        frame = np.zeros((960, 1280, 3), dtype=np.uint8)
         out = downscale(frame, 1024)
         assert out.shape[1] == 1024
-        assert out.shape[0] == 576
+        assert out.shape[0] == 768
 
     def test_output_dimensions_are_even(self):
         # H.264 encoders reject odd dimensions.

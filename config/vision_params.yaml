@@ -7,18 +7,17 @@ detection_threshold: 0.5
 num_scan_wp: 3
 
 # Stitching frame capture
-stitch_overlap: 0.35     # Horizontal overlap fraction between consecutive frames in a row
-frame_width_px: 1280     # Camera frame width used for ground-footprint math
+stitch_overlap: 0.35
 
 # Detector configuration
 detector_type: "ml"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
 ml_model_path: "/bv_ws/ltdetr.pt"  # LTDETR checkpoint inside the mission container
 gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
 sahi_slice_sizes:
-  bevy: [530, 397]       # Same slice count as the real camera
+  bevy: [530, 530]       # Real-camera 1920px tiles scaled to Bevy resolution
   real: [1920, 1920]
   ros: [1920, 1920]
-  sim: [530, 397]
+  sim: [530, 530]
 sahi_overlap: 0.2
 
 # ============================================================

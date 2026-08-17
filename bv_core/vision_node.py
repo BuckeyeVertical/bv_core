@@ -38,7 +38,7 @@ from rclpy.qos import (
 
 # ROS2 messages
 from std_msgs.msg import String, Int8, Float64, Bool, UInt8MultiArray
-from sensor_msgs.msg import CompressedImage, NavSatFix
+from sensor_msgs.msg import NavSatFix
 from bv_msgs.msg import ObjectDetections
 from bv_msgs.srv import LocalizeObject
 from geometry_msgs.msg import Vector3, PoseStamped
@@ -51,8 +51,11 @@ from .pipelines import create_pipeline
 from .detection_crop import CropConfig, build_annotated_crop
 from .localizer import Localizer
 from .mission_logger import MissionLogger
+from .mission_config import mission_config_path
 from .preview_stream import PreviewConfig, PreviewStream, pin_libgcc_unwinder
-from .stitch_geometry import along_track_m, compute_step_m, distance_m
+from .stitch_geometry import distance_m
+from .scan_plan import load_scan_plan
+from .stitch_capture import StitchCaptureScheduler
 from .frame_metadata import SimulationFrameMetadata, apply_simulation_metadata
 
 # ROS2 utilities
@@ -78,6 +81,29 @@ CLASS_NAMES = ("person", "tent")
 # half-built. Correctness does not rest on this number: destroy_node re-checks
 # whether the worker outlasted it and stops the stream again if so.
 PREVIEW_WORKER_JOIN_SEC = 25.0
+
+# Mission states that keep the camera pipeline connected: everything except
+# 'return'. Connecting the stream is slow and the cost always lands somewhere
+# useless, so it is paid once, before the aircraft leaves the ground.
+#
+# Two measurements from the 2026-08-17 flight drove this. Starting the stream
+# at scan entry cost 7.1 s before the first frame arrived — roughly 21 m of the
+# transit flown blind. Far worse, tearing it down on 'deliver' and rebuilding
+# it on the scan resume cost 200 s: the aircraft flew the rest of one row and
+# the whole of the next before a frame arrived, so that row produced no stitch
+# captures and — the real damage — no detections either, and a target there
+# would have been flown over unseen.
+#
+# Holding it open costs ~10-15 MiB and one JPEG decode per frame (~11 ms on
+# a dev machine, more on the Jetson) during phases that consume nothing. That
+# CPU lands where there is headroom: no inference runs before 'scan'. Frames
+# arriving outside 'scan' are dropped by the fetch loop, so nothing reaches
+# detection or stitch capture.
+#
+# Listed as an allowlist rather than excluding 'return', so a mission state
+# added later defaults to releasing the pipeline, as every state did before.
+PIPELINE_ACTIVE_STATES = (
+    'takeoff', 'lap', 'scan', 'localize', 'deliver', 'deploy')
 
 
 # Fail on the ground, not in the air.
@@ -195,10 +221,6 @@ class VisionNode(Node):
         )
         self.sahi_overlap = float(cfg.get('sahi_overlap', 0.2))
 
-        # Stitching capture
-        self.stitch_overlap = float(cfg.get('stitch_overlap', 0.35))
-        self.frame_width_px = int(cfg.get('frame_width_px', 4640))
-
         # Operator review crop (human-in-the-loop approval gate)
         self.crop_cfg = CropConfig(
             margin_factor=float(cfg.get('crop_margin_factor', 2.5)),
@@ -207,16 +229,12 @@ class VisionNode(Node):
             jpeg_quality=int(cfg.get('crop_jpeg_quality', 85)),
         )
 
-        # Scan waypoints + takeoff altitude come from mission_params.yaml
-        mission_yaml = os.path.join(
-            get_package_share_directory('bv_core'),
-            'config',
-            'mission_params.yaml'
-        )
+        # Scan geometry and altitude use the same mission config as mission_node.
+        mission_yaml = mission_config_path()
         with open(mission_yaml, 'r') as f:
             mcfg = yaml.safe_load(f)
-        self.scan_points = mcfg.get('scan_points', [])
-        self.takeoff_alt = float(mcfg.get('takeoff_alt', 15.24))
+        self.scan_plan = load_scan_plan()
+        self.scan_points = self.scan_plan.waypoints
         self.scan_tolerance = float(mcfg.get('Scan_tolerance', 2.0))
 
     def _init_state(self):
@@ -233,36 +251,34 @@ class VisionNode(Node):
         self.last_rel_alt = None
 
         # Stitch capture state
-        fx = self._read_fx_from_filtering_yaml()
-        self.step_m = compute_step_m(
-            frame_width_px=self.frame_width_px,
-            fx=fx,
-            altitude_m=self.takeoff_alt,
-            overlap=self.stitch_overlap,
+        self.step_m = self.scan_plan.capture_spacing_m
+        # Half the cross-track ground footprint. Past that a frame no longer
+        # overlaps the strip this row is meant to cover, so it is a delivery
+        # deviation rather than tracking error — see StitchCaptureScheduler.
+        # `stitch_paused` already suppresses most of that travel, but it is
+        # cleared by a BEST_EFFORT waypoint message; this is the geometric
+        # backstop that does not depend on any message arriving.
+        #
+        # None when the geometry is unavailable: a missing stitch guard must
+        # never be the reason vision_node fails to start.
+        self.stitch_cross_limit_m = (
+            self.scan_plan.cross_footprint_m / 2.0
+            if self.scan_plan.cross_footprint_m > 0.0
+            else None
         )
-        self.row_anchor_ll = None   # (lat, lon) of active row anchor, or None
-        self.row_next_ll = None     # (lat, lon) of active row endpoint
-        self.next_capture_m = 0.0
-        self.col_idx = 1
+        self.stitch_capture = StitchCaptureScheduler(
+            self.step_m, max_cross_track_m=self.stitch_cross_limit_m)
         self.raw_frames_cleared = False
         self.curr_wp = -1
         self.stitch_paused = False
         self.get_logger().info(
-            f"Stitch capture: step_m={self.step_m:.2f} "
-            f"(overlap={self.stitch_overlap}, alt={self.takeoff_alt}, fx={fx:.1f})"
+            f"Stitch plan: rows={self.scan_plan.row_count}, "
+            f"capture_spacing={self.step_m:.2f}m, "
+            f"row_spacing={self.scan_plan.row_spacing_m:.2f}m, "
+            f"overlap={self.scan_plan.overlap:.2f}, "
+            f"altitude={self.scan_plan.altitude_m:.2f}m, "
+            f"max_cross_track={self.stitch_cross_limit_m}"
         )
-
-    def _read_fx_from_filtering_yaml(self) -> float:
-        """Read fx (c_matrix[0]) from filtering_params.yaml."""
-        filtering_yaml = os.path.join(
-            get_package_share_directory('bv_core'),
-            'config',
-            'filtering_params.yaml'
-        )
-        with open(filtering_yaml, 'r') as f:
-            cfg = yaml.safe_load(f)
-        c_mat = cfg.get('c_matrix', [1.0] * 9)
-        return float(c_mat[0])
 
     def _clear_raw_frames_dir(self):
         """Delete all files in raw_frames/ at first SCAN entry per mission."""
@@ -325,17 +341,30 @@ class VisionNode(Node):
         self.scan_active = threading.Event()
         self.shutdown_flag = threading.Event()
         self.queue = queue.Queue(maxsize=1)
+        self.stitch_lock = threading.Lock()
+        self.stitch_write_queue = queue.Queue(maxsize=8)
+        self.latest_stitch_frame = None
+        self.stitch_frame_id = 0
 
     def _init_subscribers(self):
         """Set up ROS2 subscriptions."""
         qos_best_effort = QoSProfile(depth=10)
         qos_best_effort.reliability = ReliabilityPolicy.BEST_EFFORT
 
+        # RELIABLE, matching mission_node's subscription to this same topic.
+        # Waypoint-reached is an event, not a sample: each waypoint is announced
+        # once, and losing the one for the loiter-return point leaves
+        # stitch_paused set for the rest of the interrupted row. The pose and GPS
+        # subscriptions below stay best-effort — those are streams, where a
+        # dropped message is replaced a moment later.
+        qos_reliable = QoSProfile(depth=10)
+        qos_reliable.reliability = ReliabilityPolicy.RELIABLE
+
         self.reached_sub = self.create_subscription(
             WaypointReached,
             '/mavros/mission/reached',
             self._on_waypoint_reached,
-            qos_best_effort
+            qos_reliable
         )
 
         self.mission_state_sub = self.create_subscription(
@@ -453,6 +482,12 @@ class VisionNode(Node):
 
     def _start_worker_threads(self):
         """Start background worker threads."""
+        self.stitch_writer = threading.Thread(
+            target=self._stitch_writer_loop,
+            daemon=True
+        )
+        self.stitch_writer.start()
+
         self.frame_fetcher = threading.Thread(
             target=self._frame_fetch_loop,
             daemon=True
@@ -480,8 +515,7 @@ class VisionNode(Node):
         leaving_scan_mid_row = (
             self.prev_state == 'scan'
             and new_state != 'scan'
-            and self.row_anchor_ll is not None
-            and self.row_next_ll is not None
+            and self.stitch_capture.active
             and self.curr_wp % 2 == 0
         )
 
@@ -491,20 +525,47 @@ class VisionNode(Node):
         self.state = new_state
         if self.prev_state == 'scan' and new_state != 'scan':
             self.stitch_paused = leaving_scan_mid_row
+            if self.stitch_paused:
+                # Drop the pre-deviation frame. It is not refreshed while paused,
+                # so if the unpause is ever missed _finish_stitch_row would write
+                # this mid-row frame, minutes stale by then, as the row's
+                # endpoint. Clearing routes that case into cancel_row instead: a
+                # row missing its endpoint is recoverable, a row with the wrong
+                # endpoint silently corrupts the panorama. Costs nothing on the
+                # happy path, where the return leg refreshes this well before the
+                # row ends.
+                with self.stitch_lock:
+                    self.latest_stitch_frame = None
 
-        # Keep pipeline running in both scan and localize states
-        if new_state in ('scan', 'localize'):
+        # Keep the pipeline connected across the whole delivery excursion.
+        if new_state in PIPELINE_ACTIVE_STATES:
             if new_state == 'scan' and not self.raw_frames_cleared:
                 self._clear_raw_frames_dir()
                 self.raw_frames_cleared = True
             if (new_state == 'scan'
-                    and self.row_anchor_ll is None
+                    and not self.stitch_capture.active
                     and self.curr_wp + 1 >= len(self.scan_points)):
                 self.curr_wp = -1
                 self.stitch_paused = False
             self._start_scanning()
         else:
             self._stop_scanning()
+            if new_state == 'return':
+                # Free the ~2.4 GiB LTDETR model. From RTL onward nothing can
+                # need it: the scan is over, and localize_object is only called
+                # from the localize state. Meanwhile stitching_node starts its
+                # work on this same state and holds several full-resolution
+                # images at once, so peak memory demand lands exactly where the
+                # detector's is pure waste. On an 8 GB Jetson that overlap is
+                # the difference between finishing and meeting the OOM killer.
+                #
+                # Ordered after _stop_scanning so the fetch loop is parked and
+                # the worker discards whatever is still queued — it drops any
+                # frame outside 'scan' — rather than reaching process_frame,
+                # which would lazily reload the model it just released.
+                self.detector.stop()
+                self.get_logger().info(
+                    'detector released at RTL; model memory freed for stitching')
 
         self.prev_state = new_state
 
@@ -548,20 +609,18 @@ class VisionNode(Node):
         self.stitch_paused = False
 
         if self.curr_wp % 2 == 0 and self.curr_wp + 1 < len(self.scan_points):
-            # Anchor at current GPS (drone is at scan_points[curr_wp]); next is scan_points[curr_wp+1]
-            self.row_anchor_ll = current_ll
             sp_next = self.scan_points[self.curr_wp + 1]
-            self.row_next_ll = (float(sp_next[0]), float(sp_next[1]))
-            self.col_idx = 1
-            self.next_capture_m = self.step_m
+            endpoint_ll = (float(sp_next[0]), float(sp_next[1]))
+            row = (self.curr_wp // 2) + 1
+            with self.stitch_lock:
+                self.stitch_capture.start_row(row, current_ll, endpoint_ll)
+                self.latest_stitch_frame = None
             self.get_logger().info(
                 f"Stitch row entry: curr_wp={self.curr_wp}, "
-                f"anchor={self.row_anchor_ll}, next={self.row_next_ll}"
+                f"anchor={current_ll}, next={endpoint_ll}"
             )
         else:
-            # Odd curr_wp or past the scan plan: row complete.
-            self.row_anchor_ll = None
-            self.row_next_ll = None
+            self._finish_stitch_row()
             self.stitch_paused = False
 
     def _on_timer(self):
@@ -845,6 +904,7 @@ class VisionNode(Node):
                 self.get_logger().warn(f"Ignoring invalid frame metadata: {error}")
                 simulation_metadata = None
             stamp = self.get_clock().now()
+            self._capture_stitch_frame(frame)
             # Discard stale frame if present ("latest wins")
             try:
                 self.queue.get_nowait()
@@ -860,6 +920,70 @@ class VisionNode(Node):
         except RuntimeError:
             time.sleep(0.05)
             return None
+
+    def _capture_stitch_frame(self, frame):
+        if self.stitch_paused or len(self.gps_buffer) == 0:
+            return
+
+        gps = self.gps_buffer[-1]
+        position = (gps.latitude, gps.longitude)
+        with self.stitch_lock:
+            self.stitch_frame_id += 1
+            frame_id = self.stitch_frame_id
+            self.latest_stitch_frame = (frame, position, frame_id)
+            capture = self.stitch_capture.consider(position, frame_id)
+
+        if capture is not None:
+            self._queue_stitch_capture(frame, capture)
+
+    def _finish_stitch_row(self):
+        with self.stitch_lock:
+            latest = self.latest_stitch_frame
+            if latest is None:
+                self.stitch_capture.cancel_row()
+                return
+            frame, position, frame_id = latest
+            capture = self.stitch_capture.finish_row(position, frame_id)
+            self.latest_stitch_frame = None
+
+        if capture is not None:
+            self._queue_stitch_capture(frame, capture)
+
+    def _queue_stitch_capture(self, frame, capture):
+        path = f"raw_frames/row{capture.row}_{capture.column}.jpg"
+        try:
+            self.stitch_write_queue.put_nowait((path, frame.copy(), capture))
+        except queue.Full:
+            self.get_logger().error(f"Stitch writer queue full; dropped {path}")
+
+    def _stitch_writer_loop(self):
+        while True:
+            item = self.stitch_write_queue.get()
+            if item is None:
+                self.stitch_write_queue.task_done()
+                return
+
+            path, frame, capture = item
+            try:
+                written = cv2.imwrite(path, frame)
+                if not written:
+                    self.get_logger().error(f"Could not write stitch frame: {path}")
+                    continue
+                skipped = (
+                    f", skipped={capture.skipped_targets}"
+                    if capture.skipped_targets else ""
+                )
+                self.get_logger().info(
+                    f"Stitch capture: {path} "
+                    f"(kind={capture.kind}, d={capture.distance_m:.2f}m, "
+                    f"target={capture.target_m:.2f}m{skipped})"
+                )
+            except Exception as error:
+                self.get_logger().error(
+                    f"Could not write stitch frame {path}: {error}"
+                )
+            finally:
+                self.stitch_write_queue.task_done()
 
     
     # Detection Worker Thread
@@ -924,29 +1048,6 @@ class VisionNode(Node):
             frame=frame,
             threshold=self.det_thresh,
         )
-        
-        # Distance-based stitching capture (long-side rows only).
-        if (self.state == 'scan'
-                and self.row_anchor_ll is not None
-                and self.row_next_ll is not None
-                and self.curr_wp % 2 == 0
-                and not self.stitch_paused
-                and len(self.gps_buffer) > 0):
-            g = self.gps_buffer[-1]
-            d = along_track_m(
-                (g.latitude, g.longitude),
-                self.row_anchor_ll,
-                self.row_next_ll,
-            )
-            if d >= self.next_capture_m:
-                row_n = (self.curr_wp // 2) + 1
-                path = f"raw_frames/row{row_n}_{self.col_idx}.jpg"
-                cv2.imwrite(path, frame)
-                self.get_logger().info(
-                    f"Stitch capture: {path} (d={d:.2f}m, target={self.next_capture_m:.2f}m)"
-                )
-                self.col_idx += 1
-                self.next_capture_m += self.step_m
 
         # Log to mission logger
         if len(detections) > 0:
@@ -1166,6 +1267,8 @@ class VisionNode(Node):
 
         self.detector.stop()
         self.queue.put(None)  # Unblock worker thread
+        self.stitch_write_queue.put(None)
+        self.stitch_writer.join(timeout=5.0)
 
         self.log.close()
         return super().destroy_node()

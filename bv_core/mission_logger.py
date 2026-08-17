@@ -4,7 +4,7 @@ Centralized mission logger for bv_core drone nodes.
 
 Writes human-readable, one-line-per-event logs to a shared file.
 All nodes import this and create their own MissionLogger instance.
-Controlled by enable_mission_log in mission_params.yaml.
+Controlled by enable_mission_log in the selected mission config.
 """
 
 import os
@@ -12,6 +12,8 @@ import time
 import math
 import yaml
 from datetime import datetime
+
+from .mission_config import mission_config_path
 
 # Default log directory — anchored at the repository's package directory
 # so logs consistently land in bv_core/logs even when running from install/.
@@ -21,13 +23,8 @@ LOG_DIR = os.path.abspath(
 
 
 def _load_mission_config() -> dict:
-    """Load mission_params.yaml from the installed share directory."""
-    from ament_index_python.packages import get_package_share_directory
-    config_path = os.path.join(
-        get_package_share_directory('bv_core'),
-        'config',
-        'mission_params.yaml'
-    )
+    """Load the selected mission configuration."""
+    config_path = mission_config_path()
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 

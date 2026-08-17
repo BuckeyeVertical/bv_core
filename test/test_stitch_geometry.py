@@ -1,7 +1,8 @@
 """Unit tests for stitch_geometry helpers."""
 import pytest
 
-from bv_core.stitch_geometry import along_track_m, compute_step_m, distance_m
+from bv_core.stitch_geometry import (along_track_m, compute_step_m,
+                                     cross_track_m, distance_m)
 
 
 def test_compute_step_m_35_percent_overlap():
@@ -49,6 +50,33 @@ def test_along_track_negative_before_anchor():
     behind = (40.159520, -83.197500)
     d = along_track_m(behind, anchor, nxt)
     assert d < 0.0
+
+
+def test_cross_track_on_the_segment_is_zero():
+    anchor = (40.159520, -83.197420)
+    nxt = (40.159520, -83.196820)
+    halfway = (40.159520, -83.197120)
+    assert cross_track_m(halfway, anchor, nxt) == pytest.approx(0.0, abs=0.01)
+
+
+def test_cross_track_ignores_along_track_progress():
+    # Same 5m northward offset, sampled at two very different points along the
+    # segment — and once well past its end.
+    anchor = (40.159520, -83.197420)
+    nxt = (40.159520, -83.196820)
+    near = (40.159520 + 4.49e-5, -83.197300)
+    far = (40.159520 + 4.49e-5, -83.196000)
+    assert cross_track_m(near, anchor, nxt) == pytest.approx(5.0, abs=0.2)
+    assert cross_track_m(far, anchor, nxt) == pytest.approx(5.0, abs=0.2)
+
+
+def test_cross_track_sign_flips_across_the_segment():
+    anchor = (40.159520, -83.197420)
+    nxt = (40.159520, -83.196820)
+    north = (40.159520 + 4.49e-5, -83.197120)
+    south = (40.159520 - 4.49e-5, -83.197120)
+    assert cross_track_m(north, anchor, nxt) > 0.0
+    assert cross_track_m(south, anchor, nxt) < 0.0
 
 
 def test_distance_m_matches_short_east_west_segment():

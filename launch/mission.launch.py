@@ -7,10 +7,11 @@ import launch.logging
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from bv_core.mission_config import mission_config_path
 
 
 def _approval_required():
-    """Read Approval_required from mission_params.yaml.
+    """Read Approval_required from the selected mission config.
 
     Read at launch-generation time rather than passed as a launch argument
     because mission_node reads all its configuration from this same YAML; a
@@ -22,12 +23,9 @@ def _approval_required():
     running. Defaulting off is also the safe direction: a config problem can
     never silently enable the gate.
     """
-    config_path = os.path.join(
-        get_package_share_directory('bv_core'),
-        'config',
-        'mission_params.yaml'
-    )
+    config_path = 'selected mission config'
     try:
+        config_path = mission_config_path()
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f) or {}
         return bool(config.get('Approval_required', False))

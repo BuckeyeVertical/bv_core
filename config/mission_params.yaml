@@ -14,12 +14,13 @@ num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
 takeoff_alt: &TAKEOFF 60.96
+scan_altitude: *TAKEOFF
 
 
 
 # LAP WAYPOINTS
 
-
+lap_count: 1
 points:
   - [38.3876112, -76.4190542, *TAKEOFF]
   # Add more lap waypoints as needed:
