@@ -2,7 +2,11 @@
 """
 
 Mission Flow:
-    TAKEOFF → LAP → SCAN → [LOCALIZE → DELIVER → DEPLOY] x N → RTL
+    TAKEOFF → LAP → SCAN → [LOCALIZE → DELIVER → DEPLOY] x N → SCAN → RTL
+
+The scan always runs to the end of its plan, including after the last payload
+is delivered, so the stitch covers the whole region rather than stopping
+wherever the final object happened to be.
 
 Each detected object triggers the sequence:
     1. Stop drone (LOITER)
@@ -23,7 +27,6 @@ FUTURE CHANGES:
 """
 
 # Imports
-import os
 import time
 import yaml
 
@@ -36,12 +39,12 @@ from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, Par
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String, Int8, Bool
 from rcl_interfaces.msg import ParameterValue, ParameterType
-from ament_index_python.packages import get_package_share_directory
-
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 from .mission_logger import MissionLogger
 from .approval_gate import ApprovalGate
+from .mission_config import expand_lap_route, mission_config_path
+from .scan_plan import load_scan_plan
 
 # Mission configuration
 DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
@@ -119,19 +122,19 @@ class MissionRunner(Node):
         self.main_timer = self.create_timer(0.5, self.main_timer_callback)
 
     def load_config_from_yaml(self):
-        """Load waypoints and parameters from mission_params.yaml."""
-        config_path = os.path.join(
-            get_package_share_directory('bv_core'),
-            'config',
-            'mission_params.yaml'
-        )
+        """Load waypoints and parameters from the selected mission config."""
+        config_path = mission_config_path()
         
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
         
         # Waypoint lists
-        self.lap_waypoints = config.get('points', [])
-        self.scan_waypoints = config.get('scan_points', [])
+        lap_route = config.get('points', [])
+        lap_count = int(config.get('lap_count', 1))
+        self.takeoff_waypoint = lap_route[0] if lap_route else None
+        self.lap_waypoints = expand_lap_route(lap_route, lap_count)
+        scan_plan = load_scan_plan()
+        self.scan_waypoints = scan_plan.waypoints
         
         # Velocity parameters (m/s)
         self.lap_velocity = config.get('Lap_velocity', 5.0)
@@ -162,11 +165,16 @@ class MissionRunner(Node):
         
         # Required mission parameters
         if 'num_objects' not in config:
-            raise ValueError("mission_params.yaml is missing required key: num_objects")
+            raise ValueError("mission config is missing required key: num_objects")
         self.num_objects_to_find = int(config['num_objects'])
         
         self.get_logger().info(f"Loaded {len(self.lap_waypoints)} lap waypoints")
-        self.get_logger().info(f"Loaded {len(self.scan_waypoints)} scan waypoints")
+        self.get_logger().info(
+            f"Prepared {len(self.scan_waypoints)} scan waypoints across "
+            f"{scan_plan.row_count} row(s): capture_spacing="
+            f"{scan_plan.capture_spacing_m:.2f}m, "
+            f"row_spacing={scan_plan.row_spacing_m:.2f}m"
+        )
 
     def init_state_variables(self):
         """Initialize all state tracking variables."""
@@ -380,7 +388,10 @@ class MissionRunner(Node):
         self.get_logger().info(f"State '{self.current_state}' complete")
         
         if self.current_state == STATE_TAKEOFF:
-            self.enter_lap_state()
+            if self.lap_waypoints:
+                self.enter_lap_state()
+            else:
+                self.enter_scan_state()
             
         elif self.current_state == STATE_LAP:
             self.enter_scan_state()
@@ -433,13 +444,13 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', 'takeoff')
 
-        # Use first lap point as takeoff destination
-        if not self.lap_waypoints:
-            self.get_logger().error("No lap waypoints defined!")
+        # Use the first configured lap point as the takeoff destination
+        if self.takeoff_waypoint is None:
+            self.get_logger().error("No takeoff waypoint defined!")
             return
         
         self.active_waypoint_list = self.build_waypoint_list(
-            [self.lap_waypoints[0]],
+            [self.takeoff_waypoint],
             self.lap_tolerance
         )
         self.expected_final_waypoint_index = 0
@@ -854,25 +865,31 @@ class MissionRunner(Node):
         self.confirmed_detection_class_id = -1
         
         if self.objects_delivered_count >= self.num_objects_to_find:
-            # All objects delivered - mission complete
             self.get_logger().info("All payloads delivered!")
-            self.enter_rtl_state()
-        else:
-            # Calculate scan resume index
-            self.scan_waypoint_index_on_detection = (
-                self.scan_waypoint_index_on_detection + self.last_reached_scan_waypoint + 1
-            )
-            
-            # Wrap around if we've passed the end
-            if self.scan_waypoint_index_on_detection >= len(self.scan_waypoints):
-                self.scan_waypoint_index_on_detection = 0
-            
-            self.get_logger().info(
-                f"Resuming scan from waypoint {self.scan_waypoint_index_on_detection}"
-            )
-            self.log.event('SCAN_RESUME',
-                f"from_wp={self.scan_waypoint_index_on_detection}/{len(self.scan_waypoints)}")
-            self.enter_scan_state()
+
+        # Resume the scan whether or not every payload is gone. Returning the
+        # moment the last one lands leaves the rest of the scan region unflown,
+        # and the panorama is built from the frames captured along it — so the
+        # stitch would be missing whatever the aircraft had not reached yet.
+        # This still ends the mission on its own: an exhausted plan completes
+        # out of STATE_SCAN into RTL, which is what triggers stitching.
+        self.scan_waypoint_index_on_detection = (
+            self.scan_waypoint_index_on_detection + self.last_reached_scan_waypoint + 1
+        )
+
+        # Wrap only while objects are still outstanding. Once everything has
+        # been delivered the index is deliberately left past the end, so the
+        # scan finishes instead of sweeping the region a second time.
+        if (self.scan_waypoint_index_on_detection >= len(self.scan_waypoints)
+                and self.objects_delivered_count < self.num_objects_to_find):
+            self.scan_waypoint_index_on_detection = 0
+
+        self.get_logger().info(
+            f"Resuming scan from waypoint {self.scan_waypoint_index_on_detection}"
+        )
+        self.log.event('SCAN_RESUME',
+            f"from_wp={self.scan_waypoint_index_on_detection}/{len(self.scan_waypoints)}")
+        self.enter_scan_state()
 
     # Callbacks - service responses
     def on_waypoint_push_complete(self, future):

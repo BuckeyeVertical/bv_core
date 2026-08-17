@@ -53,3 +53,19 @@ def along_track_m(current: LatLon, anchor: LatLon, nxt: LatLon) -> float:
     seg_len = math.sqrt(seg_len2)
     # dot(current, seg_unit)
     return (cx * nx + cy * ny) / seg_len
+
+
+def cross_track_m(current: LatLon, anchor: LatLon, nxt: LatLon) -> float:
+    """Signed perpendicular distance of `current` from line `anchor → nxt`, in meters.
+
+    Positive to the left of the direction of travel. The companion to
+    along_track_m: that one ignores lateral offset, this one measures only it.
+    """
+    cx, cy = _ll_to_local_xy(current, anchor)
+    nx, ny = _ll_to_local_xy(nxt, anchor)
+    seg_len2 = nx * nx + ny * ny
+    if seg_len2 == 0.0:
+        return 0.0
+    seg_len = math.sqrt(seg_len2)
+    # cross(seg_unit, current)
+    return (nx * cy - ny * cx) / seg_len

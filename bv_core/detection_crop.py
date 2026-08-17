@@ -3,9 +3,9 @@
 
 The operator judges a detection from this image, so it has to stay legible. A
 whole-frame downscale will not do: at 15 m AGL the real camera (fx=3582.9,
-4640 px wide) puts a 1.8 m person at roughly 430 px tall, while the Gazebo sim
-(fx=410.9, 1280 px) puts the same person at roughly 49 px. One fixed crop size
-cannot serve both, so the window adapts to the bounding box.
+4640 px wide) puts a 1.8 m person at roughly 430 px tall, while the lower-resolution
+Bevy camera puts the same person at roughly 119 px. The crop therefore adapts to
+the bounding box.
 
 Pure numpy/cv2 — no ROS — so the geometry is testable without a camera.
 """

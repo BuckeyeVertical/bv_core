@@ -2,11 +2,13 @@
 # [ fx,  0, cx,
 #    0, fy, cy,
 #    0,  0,  1 ]
+image_width_px: 4640
+image_height_px: 3480
 c_matrix: [3582.919594907671, 0.0, 2309.6945407896765,
             0.0, 3588.8787536398254, 1751.1103732483455,
             0.0, 0.0, 1.0]
 
-# # distortion coefficients [k1, k2, p1, p2, k3]
+# distortion coefficients [k1, k2, p1, p2, k3]
 dist_coefficients: [0.13686699, -0.31351783, 0.0008991, -0.0005242, 0.20004041]
 
 camera_orientation: [0.0, 0.0, 0.0]
@@ -32,15 +34,17 @@ deployed_ignore_radius_deg: 0.0001
 rejected_ignore_radius_deg: 0.0001
 
 # ============================================================
-# SIMULATION CAMERA INTRINSICS (Gazebo 1280x720)
+# SIMULATION CAMERA INTRINSICS (Bevy 1280x960, scaled from real calibration)
 # Uncomment these and comment out the real camera values for sim
 # ============================================================
 
-# c_matrix: [410.93927419797154, 0.0, 640.0,
-#            0.0, 410.9392741979716, 360.0,
+# image_width_px: 1280
+# image_height_px: 960
+# c_matrix: [988.3916123883231, 0.0, 640.0,
+#            0.0, 988.3916123883231, 480.0,
 #            0.0, 0.0, 1.0]
 # dist_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-#camera_orientation: [3.1416, 0.0, -1.5708] # Gazebo orientation
+# camera_orientation: [3.1416, 0.0, -1.5708] # Downward simulation camera
 
 # Detection confirmation: a class must be seen `confirmation_hits` times within the
 # last `confirmation_window` frames, with those sightings agreeing spatially, before
@@ -51,5 +55,5 @@ rejected_ignore_radius_deg: 0.0001
 # lost ~30% of real targets. It bought little in return: a false positive that recurs
 # in the same spot satisfies a consecutive rule just as easily, and one that flickers
 # between spots is caught by the proximity check either way.
-confirmation_hits: 3
+confirmation_hits: 2
 confirmation_window: 5

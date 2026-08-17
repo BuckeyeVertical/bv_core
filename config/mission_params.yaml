@@ -14,12 +14,13 @@ num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
 takeoff_alt: &TAKEOFF 15.24
+scan_altitude: *TAKEOFF
 
 
 
 # LAP WAYPOINTS
 
-
+lap_count: 1
 points:
   - [38.3876112, -76.4190542, *TAKEOFF]
   # Add more lap waypoints as needed:
@@ -35,7 +36,7 @@ points:
 # for targets. When an object is detected, the drone stops,
 # localizes, and delivers before resuming from where it left off.
 
-#SIM POINTS
+# #SIM POINTS
 # scan_points:
 #   - [38.3877010611175, -76.4190542, *TAKEOFF]
 #   - [38.3878597611175, -76.4188516343129, *TAKEOFF]

@@ -1,0 +1,45 @@
+# SUAS 2026 training mission. Official lap waypoints are released at check-in.
+# This 1.96-mile route stays inside the published flight boundary.
+
+enable_mission_log: true
+num_objects: 2
+
+takeoff_alt: &TAKEOFF 60.96
+scan_altitude: 60.96
+lap_count: 0
+
+# One counter-clockwise lap; mission_node closes and repeats it.
+points:
+  - [36.21531017, -96.00994545, *TAKEOFF]
+  - [36.21362892, -96.00981991, *TAKEOFF]
+  - [36.21359247, -96.00813694, *TAKEOFF]
+  - [36.21142292, -96.00821104, *TAKEOFF]
+  - [36.21146430, -96.00483924, *TAKEOFF]
+  - [36.21645553, -96.00483924, *TAKEOFF]
+  - [36.21883578, -96.00271530, *TAKEOFF]
+  - [36.21961682, -96.00447978, *TAKEOFF]
+  - [36.21998623, -96.00686465, *TAKEOFF]
+  - [36.21980137, -96.00921336, *TAKEOFF]
+  - [36.21911447, -96.01129465, *TAKEOFF]
+  - [36.21808622, -96.01282681, *TAKEOFF]
+
+scan_boundary:
+  - [36.216341, -96.010424]
+  - [36.216750, -96.007550]
+  - [36.218054, -96.007835]
+  - [36.217645, -96.010709]
+
+Lap_velocity: 20.0
+Scan_velocity: 3.0
+Deliver_velocity: 3.0
+
+Lap_tolerance: 15.0
+Scan_tolerance: 1.0
+Deliver_tolerance: 1.0
+
+Default_servo_pwms: [1500, 1500, 1500, 1500]
+Deliver_initial_pwms: [1600, 1600, 1600, 1600]
+Deliver_second_pwms: [1400, 1400, 1400, 1400]
+
+Approval_required: true
+Approval_timeout_sec: 180.0

@@ -60,3 +60,22 @@ can never disturb what the aircraft chases.
   per-object spatial clustering. Flagged, not attempted.
 - Not exercised against a live flying mission — verified with synthetic windows and
   the unit suite only.
+
+# SUAS 2026 lap mission
+
+- [x] Verify the 2026 flight and search boundaries from the official handbook
+- [x] Build a roughly 2-mile training lap inside the flight boundary
+- [x] Add configurable lap repetition without changing existing one-lap behavior
+- [x] Create `mission_suas_params.yaml` with 10 laps and no scan route yet
+- [x] Select alternate mission files with `BV_MISSION_CONFIG`
+- [ ] Replace the training lap with the official competition waypoints at check-in
+- [ ] Add the selected search-boundary scan pattern after lap approval
+
+## Review (verified 2026-08-16)
+
+The 12-point route is 1.96 miles, remains inside the official flight polygon,
+and does not intersect either search boundary. Ten laps expand to 121 mission
+waypoints and close at the shared PX4/Bevy home point near Runway 1. The helper passed direct assertions,
+all edited Python files compile, and the YAML loads with 12 route points. The
+whitespace check passes when `setup.py`'s existing CRLF line endings are treated
+as valid. The local ROS image was unavailable, so pytest was not run in Docker.
