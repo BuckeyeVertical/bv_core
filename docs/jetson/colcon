@@ -1,0 +1,7 @@
+#!/home/bvorinnano/bv_ws/.venv/bin/python
+
+from colcon_core.command import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
