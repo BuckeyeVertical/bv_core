@@ -66,7 +66,7 @@ can never disturb what the aircraft chases.
 - [x] Verify the 2026 flight and search boundaries from the official handbook
 - [x] Build a roughly 2-mile training lap inside the flight boundary
 - [x] Add configurable lap repetition without changing existing one-lap behavior
-- [x] Create `mission_suas_params.yaml` with 10 laps and no scan route yet
+- [x] Create `sim_params.yaml` with 10 laps and no scan route yet
 - [x] Select alternate mission files with `BV_MISSION_CONFIG`
 - [ ] Replace the training lap with the official competition waypoints at check-in
 - [ ] Add the selected search-boundary scan pattern after lap approval

@@ -11,7 +11,7 @@ stitch_overlap: 0.35
 
 # Detector configuration
 detector_type: "ml"  # Options: "ml" (LightlyTrain LTDETR), "gazebo_bbox" (Gazebo bounding box camera)
-ml_model_path: "ltdetr.pt"  # LTDETR checkpoint path when detector_type is "ml"
+ml_model_path: "/home/bvorinnano/bv_ws/src/bv_core/ltdetr.pt"  # LTDETR checkpoint path when detector_type is "ml"
 gazebo_bbox_topic: "/camera/bounding_boxes"  # Topic for Gazebo bbox camera (only used when detector_type is "gazebo_bbox")
 sahi_slice_sizes:
   bevy: [530, 530]       # Real-camera 1920px tiles scaled to Bevy resolution

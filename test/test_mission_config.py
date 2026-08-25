@@ -3,14 +3,14 @@ import pytest
 from bv_core.mission_config import expand_lap_route, mission_config_name
 
 
-def test_default_mission_config_name_is_unchanged():
-    assert mission_config_name({}) == 'mission_params.yaml'
+def test_default_mission_config_is_real():
+    assert mission_config_name({}) == 'real_params.yaml'
 
 
 def test_mission_config_can_be_selected_by_environment():
-    environment = {'BV_MISSION_CONFIG': 'mission_suas_params.yaml'}
+    environment = {'BV_MISSION_CONFIG': 'sim_params.yaml'}
 
-    assert mission_config_name(environment) == 'mission_suas_params.yaml'
+    assert mission_config_name(environment) == 'sim_params.yaml'
 
 
 @pytest.mark.parametrize('name', ['../mission.yaml', '/tmp/mission.yaml', 'mission.txt'])

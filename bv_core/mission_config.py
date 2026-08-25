@@ -2,7 +2,7 @@ import os
 
 
 MISSION_CONFIG_ENV = 'BV_MISSION_CONFIG'
-DEFAULT_MISSION_CONFIG = 'mission_params.yaml'
+DEFAULT_MISSION_CONFIG = 'real_params.yaml'
 
 
 def mission_config_name(environment=None):
