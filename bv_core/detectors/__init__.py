@@ -41,9 +41,7 @@ def create_detector(detector_type: str, **config) -> BaseDetector:
                 "ml_model_path",
                 "/Users/allenthomas/Code/Personal/inference/ltdetr.pt",
             ),
-            source_tile_size=tuple(
-                config.get("sahi_source_tile_size", (1920, 1920))
-            ),
+            local_slices=int(config.get("sahi_local_slices", 4)),
             overlap=float(config.get("sahi_overlap", 0.2)),
             progress_callback=config.get("sahi_progress_callback"),
         )

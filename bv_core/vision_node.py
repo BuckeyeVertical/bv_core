@@ -214,11 +214,7 @@ class VisionNode(Node):
         self.ros_image_topic = cfg.get('ros_image_topic', '/image_compressed')
         self.bevy_host = cfg.get('bevy_host', '127.0.0.1')
         self.bevy_port = int(cfg.get('bevy_port', 7002))
-        sahi_slice_sizes = cfg.get('sahi_slice_sizes', {})
-        self.sahi_slice_size = tuple(
-            int(value)
-            for value in sahi_slice_sizes.get(self.pipeline_type, [1920, 1920])
-        )
+        self.sahi_local_slices = int(cfg.get('sahi_local_slices', 4))
         self.sahi_overlap = float(cfg.get('sahi_overlap', 0.2))
 
         # Operator review crop (human-in-the-loop approval gate)
@@ -437,7 +433,7 @@ class VisionNode(Node):
         self.detector = create_detector(
             detector_type=self.detector_type,
             ml_model_path=self.ml_model_path,
-            sahi_source_tile_size=self.sahi_slice_size,
+            sahi_local_slices=self.sahi_local_slices,
             sahi_overlap=self.sahi_overlap,
             sahi_progress_callback=self._publish_sahi_progress,
             gazebo_bbox_topic=self.gazebo_bbox_topic,

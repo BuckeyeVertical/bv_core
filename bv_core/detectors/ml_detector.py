@@ -1,5 +1,6 @@
 """ML-based object detector using LightlyTrain LTDETR."""
 
+import math
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -18,7 +19,7 @@ class MLDetector(BaseDetector):
     def __init__(
         self,
         model_path: str,
-        source_tile_size: tuple[int, int],
+        local_slices: int,
         overlap: float,
         progress_callback: Callable[[dict], None] | None = None,
     ):
@@ -26,17 +27,21 @@ class MLDetector(BaseDetector):
 
         Args:
             model_path: Filesystem path to the LTDETR checkpoint.
-            source_tile_size: Native camera crop width and height for SAHI.
+            local_slices: Number of local SAHI views in a square grid.
             overlap: Fractional overlap between adjacent slices.
             progress_callback: Optional observer for inference progress.
         """
-        if len(source_tile_size) != 2 or min(source_tile_size) <= 0:
-            raise ValueError("source_tile_size must contain two positive values")
+        if local_slices <= 0:
+            raise ValueError("local_slices must be positive")
+        grid_size = math.isqrt(local_slices)
+        if grid_size * grid_size != local_slices:
+            raise ValueError("local_slices must form a square grid")
         if not 0.0 <= overlap < 1.0:
             raise ValueError("overlap must be in the range [0, 1)")
 
         self.model_path = Path(model_path).expanduser()
-        self.source_tile_size = source_tile_size
+        self.local_slices = local_slices
+        self.grid_size = grid_size
         self.overlap = overlap
         self.progress_callback = progress_callback
         self._run_id = 0
@@ -92,32 +97,27 @@ class MLDetector(BaseDetector):
         )
 
     def _predict_sahi(self, image: Image.Image, threshold: float):
-        source_tile_width, source_tile_height = self.source_tile_size
-        if image.width <= source_tile_width and image.height <= source_tile_height:
+        model_height, model_width = self.model.image_size
+        if self.local_slices == 1:
             resized = image
             local_slices = 1
             total_views = 1
             use_sahi = False
+            source_tile_width, source_tile_height = image.size
         else:
-            model_height, model_width = self.model.image_size
-            resized_width = max(
-                model_width,
-                round(image.width * model_width / source_tile_width),
-            )
-            resized_height = max(
-                model_height,
-                round(image.height * model_height / source_tile_height),
-            )
-            resized = image.resize(
-                (resized_width, resized_height),
-                resample=Image.Resampling.LANCZOS,
-            )
+            resized = self._resize_for_sahi(image, model_width, model_height)
             local_slices = (
-                self._axis_slice_count(resized_width, model_width)
-                * self._axis_slice_count(resized_height, model_height)
+                self._axis_slice_count(resized.width, model_width)
+                * self._axis_slice_count(resized.height, model_height)
             )
+            if local_slices != self.local_slices:
+                raise RuntimeError(
+                    f"expected {self.local_slices} SAHI slices, got {local_slices}"
+                )
             total_views = local_slices + 1
             use_sahi = True
+            source_tile_width = round(image.width * model_width / resized.width)
+            source_tile_height = round(image.height * model_height / resized.height)
 
         self._run_id += 1
         progress = {
@@ -147,8 +147,8 @@ class MLDetector(BaseDetector):
 
             boxes = results.get("bboxes")
             if use_sahi and boxes is not None and len(boxes) > 0:
-                boxes[:, [0, 2]] *= image.width / resized_width
-                boxes[:, [1, 3]] *= image.height / resized_height
+                boxes[:, [0, 2]] *= image.width / resized.width
+                boxes[:, [1, 3]] *= image.height / resized.height
         except Exception as exc:
             self._notify_progress({
                 **progress,
@@ -167,6 +167,32 @@ class MLDetector(BaseDetector):
             "elapsed_sec": time.monotonic() - started,
         })
         return results
+
+    def _resize_for_sahi(
+        self,
+        image: Image.Image,
+        model_width: int,
+        model_height: int,
+    ) -> Image.Image:
+        step_width = max(1, int((1.0 - self.overlap) * model_width))
+        step_height = max(1, int((1.0 - self.overlap) * model_height))
+        min_width = model_width + (self.grid_size - 2) * step_width
+        min_height = model_height + (self.grid_size - 2) * step_height
+        max_width = min_width + step_width
+        max_height = min_height + step_height
+        min_scale = max(min_width / image.width, min_height / image.height)
+        max_scale = min(max_width / image.width, max_height / image.height)
+        if min_scale >= max_scale or min_scale >= 1.0:
+            raise ValueError(
+                f"cannot produce a {self.grid_size}x{self.grid_size} SAHI grid "
+                f"for image size {image.size}"
+            )
+
+        scale = min((min_scale + max_scale) / 2.0, 1.0)
+        return image.resize(
+            (round(image.width * scale), round(image.height * scale)),
+            resample=Image.Resampling.LANCZOS,
+        )
 
     def _axis_slice_count(self, image_size: int, tile_size: int) -> int:
         if image_size <= tile_size:

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from PIL import Image
 
 from bv_core.detectors.ml_detector import MLDetector
@@ -22,10 +23,10 @@ class FakeModel:
         }
 
 
-def detector_with_fake_model(source_tile_size, progress_callback=None):
+def detector_with_fake_model(local_slices=4, progress_callback=None):
     detector = MLDetector(
         "unused.pt",
-        source_tile_size,
+        local_slices,
         overlap=0.2,
         progress_callback=progress_callback,
     )
@@ -33,41 +34,47 @@ def detector_with_fake_model(source_tile_size, progress_callback=None):
     return detector
 
 
-def test_bevy_frame_uses_same_three_by_three_grid_as_real_camera():
-    detector = detector_with_fake_model((530, 530))
+def test_bevy_and_real_frames_use_the_same_two_by_two_grid():
+    bevy_detector = detector_with_fake_model()
+    real_detector = detector_with_fake_model()
 
-    results = detector._predict_sahi(Image.new("RGB", (1280, 960)), threshold=0.5)
-
-    assert detector.model.predict_call is None
-    assert detector.model.sahi_call == ((1546, 1159), 0.5, 0.2)
-    np.testing.assert_allclose(
-        results["bboxes"],
-        [[100.0 * 1280 / 1546, 200.0 * 960 / 1159,
-          300.0 * 1280 / 1546, 400.0 * 960 / 1159]],
+    bevy_results = bevy_detector._predict_sahi(
+        Image.new("RGB", (1280, 960)), threshold=0.5
+    )
+    real_results = real_detector._predict_sahi(
+        Image.new("RGB", (4640, 3480)), threshold=0.5
     )
 
-
-def test_large_frame_uses_1920_pixel_sahi_tiles_and_restores_coordinates():
-    detector = detector_with_fake_model((1920, 1920))
-
-    results = detector._predict_sahi(Image.new("RGB", (4640, 3480)), threshold=0.5)
-
-    assert detector.model.sahi_call == ((1547, 1160), 0.5, 0.2)
+    assert bevy_detector.model.predict_call is None
+    assert real_detector.model.predict_call is None
+    assert bevy_detector.model.sahi_call == ((1003, 752), 0.5, 0.2)
+    assert real_detector.model.sahi_call == ((1003, 752), 0.5, 0.2)
     np.testing.assert_allclose(
-        results["bboxes"],
-        [[100.0 * 4640 / 1547, 600.0, 300.0 * 4640 / 1547, 1200.0]],
+        bevy_results["bboxes"],
+        [[100.0 * 1280 / 1003, 200.0 * 960 / 752,
+          300.0 * 1280 / 1003, 400.0 * 960 / 752]],
+    )
+    np.testing.assert_allclose(
+        real_results["bboxes"],
+        [[100.0 * 4640 / 1003, 200.0 * 3480 / 752,
+          300.0 * 4640 / 1003, 400.0 * 3480 / 752]],
     )
 
 
 def test_progress_reports_the_full_sahi_batch():
     progress = []
-    detector = detector_with_fake_model((530, 530), progress.append)
+    detector = detector_with_fake_model(progress_callback=progress.append)
 
     detector._predict_sahi(Image.new("RGB", (1280, 960)), threshold=0.5)
 
     assert len(progress) == 2
     assert progress[0]["status"] == "running"
-    assert progress[0]["local_slices"] == 9
-    assert progress[0]["total"] == 10
+    assert progress[0]["local_slices"] == 4
+    assert progress[0]["total"] == 5
     assert progress[1]["status"] == "complete"
-    assert progress[1]["completed"] == 10
+    assert progress[1]["completed"] == 5
+
+
+def test_local_slice_count_must_form_a_square_grid():
+    with pytest.raises(ValueError, match="square grid"):
+        detector_with_fake_model(local_slices=3)
