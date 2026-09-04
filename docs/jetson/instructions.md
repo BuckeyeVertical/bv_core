@@ -285,7 +285,7 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 
 gst-launch-1.0 -v \
   v4l2src device=/dev/video0 num-buffers=8 ! \
-  image/jpeg,width=4640,height=3480,framerate=8/1 ! \
+  image/jpeg,width=3840,height=2160,framerate=30/1 ! \
   jpegdec ! fakesink
 ```
 

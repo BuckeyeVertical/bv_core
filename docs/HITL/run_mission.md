@@ -1,5 +1,15 @@
 # Run the Mission on the Jetson
 
+## Maximize mission overhead
+
+Run these commands from a normal SSH session before starting the mission:
+
+```bash
+sudo systemctl isolate multi-user.target
+sudo systemctl stop docker.service docker.socket containerd.service
+pkill -u "$USER" -f '/\.vscode-server/'
+```
+
 ## Safety checks
 
 `mission.launch.py` arms the aircraft automatically. Before starting it:
