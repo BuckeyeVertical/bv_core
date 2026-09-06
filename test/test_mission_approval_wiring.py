@@ -97,6 +97,7 @@ class FakeMission:
     _on_approval_granted = MissionRunner._on_approval_granted
     _on_approval_rejected = MissionRunner._on_approval_rejected
     _on_approval_callback_failed = MissionRunner._on_approval_callback_failed
+    _resume_scan_in_place = MissionRunner._resume_scan_in_place
     on_vision_localization_complete = MissionRunner.on_vision_localization_complete
     request_localization_from_vision = MissionRunner.request_localization_from_vision
 
@@ -114,6 +115,10 @@ class FakeMission:
         self._localize_retry_timer = None
         self.current_lat = 38.3876
         self.current_lon = -76.4191
+        self.scan_waypoints = [[0.0, 0.0, 15.2]] * 6
+        self.scan_waypoint_index_on_detection = 0
+        self.last_reached_scan_waypoint = 0
+        self.loiter_resume_coords = (38.3876, -76.4191, 15.2)
         self.log = _StubMissionLog()
         self.localize_object_client = _RecordingLocalizeClient()
 
@@ -183,6 +188,16 @@ class TestApprovalRejected:
         assert mission.current_target_coords is None
         assert mission.current_target_class_id is None
         assert mission.confirmed_detection_class_id == -1
+
+    def test_continues_toward_next_endpoint_without_return_point(self):
+        mission = FakeMission()
+        mission.scan_waypoint_index_on_detection = 2
+        mission.last_reached_scan_waypoint = 0
+
+        mission._on_approval_rejected(38.3877, -76.4190, 1, 'shadow')
+
+        assert mission.scan_waypoint_index_on_detection == 3
+        assert mission.loiter_resume_coords is None
 
     def test_logs_the_class_name_and_reason(self):
         mission = FakeMission()
@@ -432,6 +447,20 @@ class TestWantCropFlag:
         assert mission.localize_object_client.requests[-1].target_class_id == 1
 
 
+class TestLocalizationFailureResume:
+    def test_fifth_failure_continues_toward_next_endpoint(self):
+        mission = FakeMission()
+        mission.localization_retry_count = 4
+        response = LocalizeObject.Response()
+        response.success = False
+
+        mission.on_vision_localization_complete(_FakeFuture(response))
+
+        assert mission.calls == ['enter_scan_state']
+        assert mission.scan_waypoint_index_on_detection == 1
+        assert mission.loiter_resume_coords is None
+
+
 class TestApprovalCallbackRecovery:
     """A verdict callback that dies mid-transition must not strand the aircraft."""
 
@@ -450,6 +479,15 @@ class TestApprovalCallbackRecovery:
         mission = FakeMission()
         mission._on_approval_callback_failed('on_approve', RuntimeError('x'))
         assert 'enter_deliver_state' not in mission.calls
+
+    def test_resumes_in_place_at_the_upcoming_endpoint(self):
+        mission = FakeMission()
+        mission.scan_waypoint_index_on_detection = 2
+        mission.last_reached_scan_waypoint = -1
+        mission._on_approval_callback_failed('on_approve', RuntimeError('x'))
+
+        assert mission.scan_waypoint_index_on_detection == 2
+        assert mission.loiter_resume_coords is None
 
     @pytest.mark.parametrize('state', [STATE_RTL, STATE_DELIVER, 'scan'])
     def test_outside_localize_nothing_is_disturbed(self, state):

@@ -202,7 +202,7 @@ class MissionRunner(Node):
         
         # Scan resume tracking
         self.scan_waypoint_index_on_detection = 0
-        self.last_reached_scan_waypoint = 0
+        self.last_reached_scan_waypoint = -1
         self.loiter_resume_coords = None  # (lat, lon, alt) to return to after delivery
         self.scan_resume_waypoint_offset = 0  # Offset when loiter point is prepended
 
@@ -544,8 +544,25 @@ class MissionRunner(Node):
             pass_through_ratio=1.0  # Continuous flight for scanning
         )
         self.expected_final_waypoint_index = len(self.active_waypoint_list) - 1
-        self.last_reached_scan_waypoint = 0  # Reset for this segment
+        # -1 means this newly uploaded segment has not reached an actual scan
+        # waypoint yet.  A prepended delivery-return point also maps to -1.
+        self.last_reached_scan_waypoint = -1
         self.push_mission_to_autopilot()
+
+    def _resume_scan_in_place(self, reason):
+        """Continue toward the next scan endpoint without retracing the row."""
+        self.scan_waypoint_index_on_detection += max(
+            0, self.last_reached_scan_waypoint + 1)
+        self.loiter_resume_coords = None
+        self.get_logger().info(
+            f"Resuming scan in place toward waypoint "
+            f"{self.scan_waypoint_index_on_detection} ({reason})")
+        self.log.event(
+            'SCAN_RESUME',
+            f"from_current_position=true, "
+            f"toward_wp={self.scan_waypoint_index_on_detection}/"
+            f"{len(self.scan_waypoints)}, reason={reason}")
+        self.enter_scan_state()
 
     def enter_localize_state(self):
         """
@@ -1011,7 +1028,7 @@ class MissionRunner(Node):
                 self.current_target_coords = None
                 self.current_target_class_id = None
                 self.confirmed_detection_class_id = -1
-                self.enter_scan_state()
+                self._resume_scan_in_place('localization_failed')
                 return
 
             self.get_logger().warn(
@@ -1104,7 +1121,7 @@ class MissionRunner(Node):
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1
-        self.enter_scan_state()
+        self._resume_scan_in_place('operator_rejected')
 
     def _on_approval_callback_failed(self, name, exc):
         """A verdict callback raised. Get the FSM moving again.
@@ -1132,7 +1149,7 @@ class MissionRunner(Node):
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1
-        self.enter_scan_state()
+        self._resume_scan_in_place('approval_callback_failed')
 
     # Callbacks - topic subscriptions
     def on_gps_received(self, msg):
