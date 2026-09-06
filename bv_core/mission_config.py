@@ -37,3 +37,12 @@ def expand_lap_route(points, lap_count):
 
     closed_route = route if route[0] == route[-1] else route + [route[0]]
     return closed_route + closed_route[1:] * (lap_count - 1)
+
+
+def select_takeoff_waypoint(lap_waypoints, scan_waypoints):
+    """Choose the first route point the aircraft should reach after takeoff."""
+    if lap_waypoints:
+        return lap_waypoints[0]
+    if scan_waypoints:
+        return scan_waypoints[0]
+    return None

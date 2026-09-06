@@ -1,6 +1,10 @@
 import pytest
 
-from bv_core.mission_config import expand_lap_route, mission_config_name
+from bv_core.mission_config import (
+    expand_lap_route,
+    mission_config_name,
+    select_takeoff_waypoint,
+)
 
 
 def test_default_mission_config_is_real():
@@ -53,3 +57,20 @@ def test_lap_count_cannot_be_negative():
 def test_multiple_laps_require_a_real_route():
     with pytest.raises(ValueError, match='at least two'):
         expand_lap_route([[1]], 2)
+
+
+def test_takeoff_uses_first_lap_waypoint_when_laps_are_enabled():
+    lap = [[1.0, 2.0, 30.0], [3.0, 4.0, 30.0]]
+    scan = [[5.0, 6.0, 30.0]]
+
+    assert select_takeoff_waypoint(lap, scan) == lap[0]
+
+
+def test_takeoff_uses_first_scan_waypoint_when_laps_are_disabled():
+    scan = [[5.0, 6.0, 30.0], [7.0, 8.0, 30.0]]
+
+    assert select_takeoff_waypoint([], scan) == scan[0]
+
+
+def test_takeoff_requires_at_least_one_route_waypoint():
+    assert select_takeoff_waypoint([], []) is None

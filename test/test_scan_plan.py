@@ -57,6 +57,44 @@ def test_more_overlap_generates_more_rows():
     assert plan.row_count == 4
 
 
+def test_short_sweep_flies_rows_along_short_axis():
+    long_plan = build_scan_plan(mission(), VISION, BEVY_CAMERA)
+    short_mission = mission()
+    short_mission['scan_sweep'] = 'short'
+    short_plan = build_scan_plan(short_mission, VISION, BEVY_CAMERA)
+
+    long_leg = abs(long_plan.waypoints[1][1] - long_plan.waypoints[0][1])
+    short_leg = abs(short_plan.waypoints[1][1] - short_plan.waypoints[0][1])
+
+    assert short_leg < long_leg
+    assert short_plan.row_count > long_plan.row_count
+
+
+@pytest.mark.parametrize(('start', 'comparison'), [
+    ('top', lambda first, last: first >= last),
+    ('bottom', lambda first, last: first <= last),
+])
+def test_scan_start_selects_north_or_south_end_of_route(start, comparison):
+    config = mission()
+    config['scan_start'] = start
+
+    plan = build_scan_plan(config, VISION, BEVY_CAMERA)
+
+    assert comparison(plan.waypoints[0][0], plan.waypoints[-1][0])
+
+
+@pytest.mark.parametrize(('key', 'value', 'message'), [
+    ('scan_sweep', 'diagonal', 'scan_sweep'),
+    ('scan_start', 'middle', 'scan_start'),
+])
+def test_invalid_scan_route_options_are_rejected(key, value, message):
+    config = mission()
+    config[key] = value
+
+    with pytest.raises(ValueError, match=message):
+        build_scan_plan(config, VISION, BEVY_CAMERA)
+
+
 def test_explicit_scan_points_remain_supported():
     points = [[1.0, 2.0, 30.0], [1.0, 3.0, 30.0]]
     config = {

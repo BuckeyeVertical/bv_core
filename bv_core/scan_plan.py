@@ -61,6 +61,8 @@ def build_scan_plan(mission, vision, camera) -> ScanPlan:
         altitude,
         cross_footprint_m,
         overlap,
+        sweep=mission.get('scan_sweep'),
+        start=mission.get('scan_start'),
     )
     return ScanPlan(
         waypoints=waypoints,
@@ -87,10 +89,18 @@ def load_scan_plan() -> ScanPlan:
     return build_scan_plan(mission, vision, camera)
 
 
-def _snake_waypoints(boundary, altitude, footprint_m, overlap):
+def _snake_waypoints(
+    boundary, altitude, footprint_m, overlap, sweep=None, start=None
+):
     points = [_lat_lon(point) for point in boundary]
     if len(points) != 4:
         raise ValueError("scan_boundary must contain four ordered corners")
+
+    if sweep not in (None, 'long', 'short'):
+        raise ValueError("scan_sweep must be 'long' or 'short'")
+    if start not in (None, 'top', 'bottom'):
+        raise ValueError("scan_start must be 'top' or 'bottom'")
+    route_start = start
 
     pair_a = (
         distance_m(points[0], points[1])
@@ -100,7 +110,11 @@ def _snake_waypoints(boundary, altitude, footprint_m, overlap):
         distance_m(points[1], points[2])
         + distance_m(points[3], points[0])
     ) / 2.0
-    if pair_a >= pair_b:
+    use_pair_a = pair_a >= pair_b
+    if sweep == 'short':
+        use_pair_a = not use_pair_a
+
+    if use_pair_a:
         starts = (points[0], points[3])
         ends = (points[1], points[2])
     else:
@@ -115,14 +129,24 @@ def _snake_waypoints(boundary, altitude, footprint_m, overlap):
     waypoints = []
     for index, offset_m in enumerate(offsets_m):
         fraction = 0.5 if cross_span_m == 0.0 else offset_m / cross_span_m
-        start = _interpolate(starts[0], starts[1], fraction)
-        end = _interpolate(ends[0], ends[1], fraction)
+        row_start = _interpolate(starts[0], starts[1], fraction)
+        row_end = _interpolate(ends[0], ends[1], fraction)
         if index % 2:
-            start, end = end, start
+            row_start, row_end = row_end, row_start
         waypoints.extend([
-            [start[0], start[1], altitude],
-            [end[0], end[1], altitude],
+            [row_start[0], row_start[1], altitude],
+            [row_end[0], row_end[1], altitude],
         ])
+
+    # Reversing the complete snake preserves every leg and its continuity while
+    # selecting which geographic side the aircraft encounters first.  Keeping
+    # this opt-in preserves the historical corner-order behavior for configs
+    # that do not specify scan_start.
+    if route_start is not None and len(waypoints) >= 2:
+        first_is_top = waypoints[0][0] >= waypoints[-1][0]
+        wants_top = route_start == 'top'
+        if first_is_top != wants_top:
+            waypoints.reverse()
 
     return waypoints, row_spacing_m
 

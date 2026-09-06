@@ -43,7 +43,11 @@ from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ObjectLocations
 from .mission_logger import MissionLogger
 from .approval_gate import ApprovalGate
-from .mission_config import expand_lap_route, mission_config_path
+from .mission_config import (
+    expand_lap_route,
+    mission_config_path,
+    select_takeoff_waypoint,
+)
 from .scan_plan import load_scan_plan
 
 # Mission configuration
@@ -131,10 +135,11 @@ class MissionRunner(Node):
         # Waypoint lists
         lap_route = config.get('points', [])
         lap_count = int(config.get('lap_count', 1))
-        self.takeoff_waypoint = lap_route[0] if lap_route else None
         self.lap_waypoints = expand_lap_route(lap_route, lap_count)
         scan_plan = load_scan_plan()
         self.scan_waypoints = scan_plan.waypoints
+        self.takeoff_waypoint = select_takeoff_waypoint(
+            self.lap_waypoints, self.scan_waypoints)
         
         # Velocity parameters (m/s)
         self.lap_velocity = config.get('Lap_velocity', 5.0)
@@ -428,12 +433,15 @@ class MissionRunner(Node):
     # State entry methods
     def enter_takeoff_state(self):
         """
-        Initial state - arm the vehicle and fly to the first lap waypoint.
-        This effectively performs the takeoff.
+        Arm and fly to the first waypoint of the enabled mission route.
+
+        A mission with laps flies to its first lap waypoint. A zero-lap mission
+        flies directly to the first generated scan waypoint.
         """
         self.current_state = STATE_TAKEOFF
         self.is_transitioning = True
-        self.desired_velocity = self.lap_velocity
+        self.desired_velocity = (
+            self.lap_velocity if self.lap_waypoints else self.scan_velocity)
         
         # Reset waypoint tracking for new state
         self.last_waypoint_reached = None
@@ -444,14 +452,19 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', 'takeoff')
 
-        # Use the first configured lap point as the takeoff destination
         if self.takeoff_waypoint is None:
-            self.get_logger().error("No takeoff waypoint defined!")
+            self.get_logger().error("No lap or scan waypoint defined for takeoff!")
             return
+
+        takeoff_tolerance = (
+            self.lap_tolerance if self.lap_waypoints else self.scan_tolerance)
+        route_name = 'lap' if self.lap_waypoints else 'scan'
+        self.get_logger().info(
+            f"Takeoff destination is the first {route_name} waypoint")
         
         self.active_waypoint_list = self.build_waypoint_list(
             [self.takeoff_waypoint],
-            self.lap_tolerance
+            takeoff_tolerance
         )
         self.expected_final_waypoint_index = 0
         self.push_mission_to_autopilot()

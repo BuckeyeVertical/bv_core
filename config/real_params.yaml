@@ -16,6 +16,8 @@ points:
   - [40.15920833, -83.19580278, *TAKEOFF]
   - [40.15920833, -83.19985278, *TAKEOFF]
 
+scan_sweep: long
+scan_start: bottom
 scan_boundary:
   - [40.15920833, -83.19985278]
   - [40.15777778, -83.19985278]
