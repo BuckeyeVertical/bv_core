@@ -24,7 +24,7 @@ ls -l /dev/video0 /dev/ttyTHS*
 ```
 
 Verify the camera can capture and decode eight full-resolution frames:
-
+The command should exit without errors.
 ```bash
 gst-launch-1.0 -q \
   v4l2src device=/dev/video0 num-buffers=8 ! \
@@ -32,9 +32,13 @@ gst-launch-1.0 -q \
   jpegdec ! fakesink
 ```
 
-The command should exit without errors.
+Check one frame visually
+```bash
+ssh bvorinnano@192.168.144.2 "gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=1 ! 'image/jpeg,width=3840,height=2160,framerate=30/1' ! filesink location=/tmp/camera_frame.jpg"
+scp bvorinnano@192.168.144.2:/tmp/camera_frame.jpg .
+```
 
-After starting MAVROS below, verify PX4 and GPS before launching the mission:
+AFTER starting MAVROS below, verify PX4 and GPS before launching the mission:
 
 ```bash
 ros2 topic echo /mavros/state --once
@@ -48,7 +52,7 @@ Require `connected: true`, `armed: false`, and coordinates near the flight area.
 Terminal 1 — MAVROS:
 
 ```bash
-ssh bvorinnano@192.168.55.1
+ssh bvorinnano@192.168.144.2
 source ~/bv_ws/.venv/bin/activate
 source ~/bv_ws/install/setup.bash
 
@@ -59,10 +63,11 @@ ros2 launch mavros px4.launch \
 Terminal 2 — mission:
 
 ```bash
-ssh bvorinnano@192.168.55.1
+ssh bvorinnano@192.168.144.2
 source ~/bv_ws/.venv/bin/activate
 source ~/bv_ws/install/setup.bash
-
+cd bv_ws
+colcon build
 export BV_MISSION_CONFIG=real_params.yaml
 ros2 launch bv_core mission.launch.py
 ```
