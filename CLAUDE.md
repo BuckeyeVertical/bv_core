@@ -202,6 +202,12 @@ YAML config files in `config/` define **mission behavior**, **vision/detector se
 - **General guidance**
   - Prefer editing these YAMLs over touching node logic when changing speeds, paths, camera sources, or detectors.
   - Do not hardcode topics, modes, or thresholds inside nodes; use the existing factories and parameters instead.
+  - `scripts/Scan_Picker.py` opens a localhost map for selecting two opposite
+    corners and copying a four-corner `scan_boundary` YAML block. It can also
+    display the active mission config's existing scan boundary or points.
+  - `scripts/mission_ready_check.py` performs read-only real-flight device,
+    camera, MAVROS, disarmed-state, and GPS checks. It never arms or commands
+    the aircraft and requires MAVROS to be started separately.
 
 ## Camera Pipelines and Detectors
 
@@ -243,4 +249,3 @@ Using these factories keeps node code agnostic to specific camera backends or mo
 - `bv_msgs` (sibling package — must be built alongside)
 - Python: supervision, geographiclib, numpy<2
 - Build system: `ament_python` (no CMake — pure Python ROS 2 package)
-

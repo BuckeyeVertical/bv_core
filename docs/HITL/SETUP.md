@@ -18,4 +18,4 @@
    ```
 
 8. Follow the camera and PX4 checks in [run_mission.md](run_mission.md), then stop unnecessary overhead:
-
+9. Check the real_params.yaml coordinates to make sure they are correct. Use [Scan_Picker.py](../../scripts/Scan_Picker.py)

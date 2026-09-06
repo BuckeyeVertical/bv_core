@@ -79,3 +79,37 @@ waypoints and close at the shared PX4/Bevy home point near Runway 1. The helper 
 all edited Python files compile, and the YAML loads with 12 route points. The
 whitespace check passes when `setup.py`'s existing CRLF line endings are treated
 as valid. The local ROS image was unavailable, so pytest was not run in Docker.
+
+# Scan boundary map picker
+
+- [x] Add a localhost browser map under `scripts/`
+- [x] Center on browser geolocation when permission is available
+- [x] Select and adjust a rectangle from two opposite corners
+- [x] Generate and copy the ordered `scan_boundary` YAML block
+- [x] Default to satellite imagery and report rectangle acreage
+- [x] Show and automatically frame the active config's existing scan region
+- [x] Document and smoke-test the utility
+
+## Review (verified 2026-09-06)
+
+The picker uses only the Python standard library locally, binds to `127.0.0.1`,
+and loads Leaflet plus satellite/street tiles in the browser. Python compilation, HTML endpoint,
+404 handling, and clean shutdown were verified. The generated YAML orders the
+corners northwest, southwest, southeast, northeast as required by `scan_plan.py`.
+
+# Real-mission readiness checker
+
+- [x] Check camera and PX4 serial device access
+- [x] Capture and decode eight full-resolution camera frames
+- [x] Check the ROS environment and required packages
+- [x] Require MAVROS connected and aircraft disarmed
+- [x] Require a valid GPS fix near the active mission coordinates
+- [x] Print all remaining human-only HITL safety confirmations
+- [x] Avoid every aircraft command, publisher, service call, and launch command
+
+## Review (verified 2026-09-06)
+
+The checker invokes only a GStreamer decode check, `ros2 pkg prefix`, and
+`ros2 topic echo --once`. Unit coverage verifies active-config parsing, the
+connected-and-disarmed requirement, near/far GPS handling, and the absence of
+ROS publish, service-call, launch, arming, mode, and mission-upload operations.

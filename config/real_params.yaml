@@ -4,23 +4,23 @@
 enable_mission_log: true
 num_objects: 2
 
-takeoff_alt: &TAKEOFF 60.96
-scan_altitude: 60.96
+takeoff_alt: &TAKEOFF 45.72
+scan_altitude: 45.72
 lap_count: 0
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
-  - [40.009004, -83.018121, *TAKEOFF]
-  - [40.008009, -83.018095, *TAKEOFF]
-  - [40.008017, -83.016011, *TAKEOFF]
-  - [40.009064, -83.016032, *TAKEOFF]
-  - [40.009004, -83.018121, *TAKEOFF]
+  - [40.15920833, -83.19985278, *TAKEOFF]
+  - [40.15777778, -83.19985278, *TAKEOFF]
+  - [40.15777778, -83.19580278, *TAKEOFF]
+  - [40.15920833, -83.19580278, *TAKEOFF]
+  - [40.15920833, -83.19985278, *TAKEOFF]
 
 scan_boundary:
-  - [40.009004, -83.018121]
-  - [40.008009, -83.018095]
-  - [40.008017, -83.016011]
-  - [40.009064, -83.016032]
+  - [40.15920833, -83.19985278]
+  - [40.15777778, -83.19985278]
+  - [40.15777778, -83.19580278]
+  - [40.15920833, -83.19580278]
 
 Lap_velocity: 5.0
 Scan_velocity: 3.0

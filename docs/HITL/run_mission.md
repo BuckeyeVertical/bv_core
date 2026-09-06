@@ -47,6 +47,18 @@ ros2 topic echo /mavros/global_position/global --once
 
 Require `connected: true`, `armed: false`, and coordinates near the flight area.
 
+The repository readiness checker automates those read-only checks plus the
+camera/device checks above. Run it on the Jetson after MAVROS is started:
+
+```bash
+cd ~/bv_ws/src/bv_core
+python3 scripts/mission_ready_check.py
+```
+
+It never arms, changes mode, uploads a mission, or launches the mission stack.
+It exits nonzero when an automated check fails and prints the remaining manual
+confirmations. The one-frame visual check above remains a separate manual step.
+
 ## Run the mission
 
 Terminal 1 — MAVROS:

@@ -238,6 +238,33 @@ Configuration files:
 - `config/filtering_params.yaml`
 	- `c_matrix` (intrinsics 3x3), `dist_coefficients` (k1…k5), `camera_orientation` (mount euler xyz in radians)
 
+To select a rectangular scanning region on a map and generate a copy-ready
+`scan_boundary` block, run:
+
+```bash
+python3 scripts/Scan_Picker.py
+```
+
+Allow location access in the browser, click two opposite corners, then use
+**Copy YAML**. The picker shows satellite imagery by default, reports the selected
+area in acres, and includes a street-map layer. It only binds to localhost and
+needs an internet connection to load Leaflet and map tiles. Treat imagery and
+browser location as selection aids; verify flight boundaries against official or
+surveyed coordinates.
+
+Use **Show real_params.yaml** to draw the currently configured `scan_boundary`
+or `scan_points` and automatically pan/zoom to them. The picker follows
+`BV_MISSION_CONFIG`; a specific file can also be selected with
+`--config path/to/mission.yaml`.
+
+After MAVROS is running on the Jetson, run the non-arming real-mission checks:
+
+```bash
+python3 scripts/mission_ready_check.py
+```
+
+See `docs/HITL/run_mission.md` for the required manual confirmations.
+
 Test PX4
 Add the following to your .bashrc as needed
 ```bash
