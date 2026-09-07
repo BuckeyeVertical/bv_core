@@ -120,7 +120,10 @@ def _assert_bv_msgs_is_current():
     _response = LocalizeObject.Response()
     _missing = [name for obj, name in ((_response, 'Response.confidence'),
                                        (_response, 'Response.annotated_crop'),
-                                       (_request, 'Request.want_crop'))
+                                       (_request, 'Request.want_crop'),
+                                       (_request, 'Request.detection_id'),
+                                       (_request, 'Request.candidate_latitude'),
+                                       (_request, 'Request.candidate_longitude'))
                 if not hasattr(obj, name.split('.', 1)[1])]
     if _missing:
         raise RuntimeError(
@@ -776,6 +779,19 @@ class VisionNode(Node):
                     f"drone_pos=({drone_pose[0]:.6f},{drone_pose[1]:.6f},{drone_pose[2]:.1f}), "
                     f"orientation=({drone_orientation[0]:.3f},{drone_orientation[1]:.3f},{drone_orientation[2]:.3f},{drone_orientation[3]:.3f})")
                 return response
+
+        # A class is not a target identity. When filtering supplied its
+        # scan-time candidate, choose the matching-class localization nearest
+        # that position instead of trusting detector output order. This keeps
+        # the GCS crop and rejection tied to the candidate that interrupted the
+        # scan even when another same-class box is present.
+        if request.detection_id and indexed_coords:
+            candidate = (
+                float(request.candidate_latitude),
+                float(request.candidate_longitude),
+            )
+            indexed_coords.sort(
+                key=lambda pair: distance_m(candidate, pair[1][:2]))
 
         # At this point we have at least one coordinate to return
         best_index, best_coord = indexed_coords[0]

@@ -109,6 +109,8 @@ class FakeMission:
         self.current_target_coords = (38.3877, -76.4190, 15.2)
         self.current_target_class_id = 1
         self.confirmed_detection_class_id = 1
+        self.confirmed_detection_id = 'confirmed-1'
+        self.confirmed_detection_coords = (38.38765, -76.41905)
         # Only read by on_vision_localization_complete's success path.
         self.approval_gate = None
         self.localization_retry_count = 0
@@ -188,6 +190,8 @@ class TestApprovalRejected:
         assert mission.current_target_coords is None
         assert mission.current_target_class_id is None
         assert mission.confirmed_detection_class_id == -1
+        assert mission.confirmed_detection_id == ''
+        assert mission.confirmed_detection_coords is None
 
     def test_continues_toward_next_endpoint_without_return_point(self):
         mission = FakeMission()
@@ -202,14 +206,14 @@ class TestApprovalRejected:
     def test_logs_the_class_name_and_reason(self):
         mission = FakeMission()
         mission._on_approval_rejected(38.3877, -76.4190, 1, 'shadow')
-        line = mission.get_logger().lines[-1][1]
-        assert 'tent' in line
-        assert 'shadow' in line
+        lines = [text for _level, text in mission.get_logger().lines]
+        assert any('tent' in line and 'shadow' in line for line in lines)
 
     def test_out_of_range_class_id_does_not_raise(self):
         mission = FakeMission()
         mission._on_approval_rejected(38.3877, -76.4190, 99, '')
-        assert 'unknown' in mission.get_logger().lines[-1][1]
+        assert any('unknown' in text
+                   for _level, text in mission.get_logger().lines)
         assert mission.calls == ['publish', 'enter_scan_state']
 
     @pytest.mark.parametrize('state', [STATE_RTL, STATE_DELIVER, 'scan'])
@@ -445,6 +449,14 @@ class TestWantCropFlag:
         mission.confirmed_detection_class_id = 1
         mission.request_localization_from_vision()
         assert mission.localize_object_client.requests[-1].target_class_id == 1
+
+    def test_confirmed_candidate_rides_the_request(self):
+        mission = FakeMission()
+        mission.request_localization_from_vision()
+        request = mission.localize_object_client.requests[-1]
+        assert request.detection_id == 'confirmed-1'
+        assert request.candidate_latitude == pytest.approx(38.38765)
+        assert request.candidate_longitude == pytest.approx(-76.41905)
 
 
 class TestLocalizationFailureResume:

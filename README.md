@@ -55,7 +55,7 @@ High-level services (“microservices”) and data flow:
 
 - **mission_node** (bv_core.mission.MissionRunner)
 	- Publishes: `/mission_state` (std_msgs/String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
-	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/global_obj_dets` (std_msgs/Int8)
+	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/global_obj_dets` (bv_msgs/ConfirmedDetection)
 	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `localize_object` (bv_msgs/srv/LocalizeObject) on vision_node
 	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params. On confirmed detections from `/global_obj_dets`, calls `localize_object` to get GPS, then flies to object and deploys payload.
 
@@ -66,7 +66,7 @@ High-level services (“microservices”) and data flow:
 	- Role: Image input comes from a configurable pipeline (sim/real/ros per `vision_params.yaml`), not from a ROS image topic. On scan state, enqueues frames at waypoint-reached events, runs LTDETR when `detector_type: "ml"` is selected, publishes detections. Mission calls `localize_object` during localize state to get object coordinates.
 
 - **filtering_node** (bv_core.filtering_node.FilteringNode)
-	- Publishes: `/global_obj_dets` (std_msgs/Int8) — confirmed class IDs after the configured M-of-N window, excluding areas near already-deployed locations
+	- Publishes: `/global_obj_dets` (bv_msgs/ConfirmedDetection) — unique, timestamped candidates with class and scan-time coordinates after the configured M-of-N window, excluding suppressed locations
 	- Subscribes: `/obj_dets` (bv_msgs/ObjectDetections), `/mavros/global_position/global` (NavSatFix), `/mavros/global_position/rel_alt` (Float64), `/mavros/local_position/pose` (PoseStamped), `/mission_state` (String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
 	- Role: Time-aligns detections with pose/GPS, projects to lat/lon using camera intrinsics/orientation from `filtering_params.yaml`. Confirms detections in scan state and publishes `/global_obj_dets`; does not provide a service — mission uses `localize_object` on vision_node for per-object GPS.
 
@@ -150,7 +150,7 @@ sequenceDiagram
 	Mission-->>Filtering: /mission_state
 	Mission-->>Stitching: /mission_state
 		Note over MAVROS,Filtering: Proprioception (global/local position, altitude)
-	Filtering-->>Mission: /global_obj_dets (confirmed class_id)
+	Filtering-->>Mission: /global_obj_dets (confirmed candidate ID, class, position)
 	Mission->>Vision: localize_object (service)
 	Vision-->>Mission: lat/lon, class_id
 ```
@@ -565,7 +565,7 @@ You can now proceed to run the BV stack (`ros2 launch bv_core mission.launch.py`
 	- `takeoff` → `lap` → `stitching` → `scan` → `localize` → `deliver` → `deploy` → `return`
 - Mission publishes `/deployed_object_locations` (bv_msgs/ObjectLocations) after each successful payload deployment; filtering_node uses this to ignore detections near serviced locations.
 - Vision publishes `/obj_dets` and queue state on `/queue_state` (1=empty/ready, 0=busy). Vision provides `localize_object` (bv_msgs/srv/LocalizeObject) for mission_node to get object GPS during localize state.
-- Filtering publishes `/global_obj_dets` (std_msgs/Int8) with confirmed class IDs (currently 2 hits within 5 frames) during scan; mission_node subscribes and triggers localize/deliver/deploy per detection.
+- Filtering publishes `/global_obj_dets` (`bv_msgs/ConfirmedDetection`) with a unique ID, timestamp, class, and scan-time coordinates (currently 2 hits within 5 frames) during scan. Mission rejects stale/duplicate confirmations and passes the candidate into localization so the same instance is selected when multiple same-class boxes are visible.
 - MAVROS bridges:
 	- Topics: `/mavros/mission/reached`, `/mavros/state`, `/mavros/global_position/global`, `/mavros/global_position/rel_alt`, `/mavros/local_position/pose`
 	- Services: `/mavros/mission/push`, `/mavros/cmd/arming`, `/mavros/set_mode`, `/mavros/cmd/command`, `/mavros/param/set`

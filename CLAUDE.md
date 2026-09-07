@@ -100,9 +100,9 @@ ros2 bag play <bag_path>
 
 **Inter-node communication**: mission_node broadcasts state via `/mission_state` topic. Other nodes react to state transitions. Vision publishes detections → filtering accumulates and geolocates → mission queries filtering via service call after scan completes.
 
-**Custom messages**: defined in separate `bv_msgs` package (sibling repo in `src/`). Key types: `ObjectDetections`, `ObjectLocations`, `PendingDetection`, `LocalizeObject` (service), `DetectionDecision` (service).
+**Custom messages**: defined in separate `bv_msgs` package (sibling repo in `src/`). Key types: `ObjectDetections`, `ObjectLocations`, `ConfirmedDetection`, `PendingDetection`, `LocalizeObject` (service), `DetectionDecision` (service).
 
-`LocalizeObject`'s response carries an `annotated_crop` (`sensor_msgs/CompressedImage`) alongside the coordinates — a native-resolution crop around the detection with the box and class label drawn on. It is only populated when the human-in-the-loop gate is enabled; autonomous runs leave it empty. The request carries `bool want_crop` to say so: `mission_node` sets it from whether the gate is active, so with approval disabled the localize service does exactly the work it did before the feature existed. `PendingDetection` and `DetectionDecision` belong to that gate, implemented in the sibling `bv_gcs` package — see `src/bv_gcs/README.md`. The mission-side wiring is live and is described under "Human-in-the-loop approval gate" below.
+`LocalizeObject`'s response carries an `annotated_crop` (`sensor_msgs/CompressedImage`) alongside the coordinates — a native-resolution crop around the detection with the box and class label drawn on. It is only populated when the human-in-the-loop gate is enabled; autonomous runs leave it empty. The request carries `bool want_crop` to say so: `mission_node` sets it from whether the gate is active, so with approval disabled the crop path remains inactive. It also carries the confirmed candidate ID and scan-time position; `vision_node` uses that position to select the nearest matching-class box instead of relying on detector order. `PendingDetection` and `DetectionDecision` belong to that gate, implemented in the sibling `bv_gcs` package — see `src/bv_gcs/README.md`. The mission-side wiring is live and is described under "Human-in-the-loop approval gate" below.
 
 `bv_msgs` for this feature lives on branch `feat/hitl-interfaces`. `mission_node` and `vision_node` both refuse to start against an older `bv_msgs` — deliberately, because the failure would otherwise be a silently failed localize on every detection, in flight.
 
@@ -144,7 +144,7 @@ Optional operator confirmation between LOCALIZE and DELIVER. Off by default; whe
   - **`/queue_state` (`std_msgs/Int8`)**: Published by `vision_node`; subscribed by `bv_viz_node`. Encodes internal vision queue/throughput state for HUD display.
 
 - **Object confirmation and deployment**
-  - **`/global_obj_dets` (`std_msgs/Int8`)**: Published by `filtering_node` after 3-frame confirmation; subscribed by `mission_node`. Each message is the confirmed COCO `class_id` that should trigger a localize/deliver/deploy sequence.
+  - **`/global_obj_dets` (`bv_msgs/ConfirmedDetection`)**: Published by `filtering_node` after M-of-N confirmation; subscribed by `mission_node`. Each message carries a unique ID, timestamp, COCO `class_id`, and scan-time candidate coordinates. Mission ignores duplicate IDs and messages older than the current scan entry, then passes the candidate into localization to preserve same-class target identity.
   - **`/confirmation_window` (`std_msgs/String`, JSON)**: Published by `filtering_node` whenever its M-of-N window changes; subscribed by `bv_gcs/approval_node`, which relays it to the browser's confirmation panel. Latched, published only on change. Purely informational — nothing reads it back into the confirmation decision.
   - **`/deployed_object_locations` (`bv_msgs/ObjectLocations`)**: Published by `mission_node` after a successful payload deployment; subscribed by `filtering_node` so it can ignore future detections near already-serviced locations.
 
@@ -186,7 +186,7 @@ YAML config files in `config/` define **mission behavior**, **vision/detector se
       pipeline supplies them into a latest-wins single-slot queue, and the detection worker
       consumes them back-to-back, so detection runs at whatever rate inference sustains. To
       slow it down, reduce `Scan_velocity` — a rate limit here would cut the number of
-      sightings per pass and can break filtering's 3-frame confirmation.
+      sightings per pass and can break filtering's M-of-N confirmation.
 
 - **`filtering_params.yaml`** — camera intrinsics and localization tuning
   - **Intrinsics/distortion**:

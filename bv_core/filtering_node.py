@@ -5,10 +5,10 @@ from rclpy.node import Node
 from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy,
                        HistoryPolicy)
 
-from std_msgs.msg import String, Float64, Int8
+from std_msgs.msg import String, Float64
 from .localizer import Localizer
 from rclpy.executors import MultiThreadedExecutor
-from bv_msgs.msg import ObjectDetections
+from bv_msgs.msg import ConfirmedDetection, ObjectDetections
 from geometry_msgs.msg import PoseStamped
 import numpy as np
 
@@ -22,6 +22,7 @@ from collections import deque
 from rclpy.time import Time
 import math
 import json
+import uuid
 from .mission_logger import MissionLogger
 
 CLASS_NAMES = ("person", "tent")
@@ -193,7 +194,8 @@ class FilteringNode(Node):
         # Use same reliable QoS pattern for /global_obj_dets
         global_dets_qos = QoSProfile(depth=10)
         global_dets_qos.reliability = ReliabilityPolicy.RELIABLE
-        self.confirmed_pub = self.create_publisher(Int8, '/global_obj_dets', global_dets_qos)
+        self.confirmed_pub = self.create_publisher(
+            ConfirmedDetection, '/global_obj_dets', global_dets_qos)
 
         filtering_yaml = os.path.join(
             get_package_share_directory('bv_core'),
@@ -363,10 +365,12 @@ class FilteringNode(Node):
             confirmed if confirmed is not None else (None, None))
 
         # Guard: confirm class is a valid target and still undetected
-        if confirmed_class is not None and confirmed_class in self.targets and self.targets[confirmed_class]["state"] == "undetected":
+        if (confirmed_class is not None
+                and confirmed_class in self.targets
+                and self.targets[confirmed_class]["state"] == "undetected"):
             self.targets[confirmed_class]["state"] = "confirmed"
-            # Record where FILTERING believes the object is, from the three
-            # frames that just agreed. Rejection suppression compares future
+            # Record where filtering believes the object is, from the sightings
+            # that just agreed. Rejection suppression compares future
             # scan-leg detections against this rather than against the
             # loiter-time estimate mission_node publishes: same projection,
             # altitude and angle, so cross-vantage error cancels and the
@@ -375,7 +379,13 @@ class FilteringNode(Node):
             if centroid is not None:
                 self.targets[confirmed_class]["confirmed_lat"] = centroid[0]
                 self.targets[confirmed_class]["confirmed_lon"] = centroid[1]
-            self.confirmed_pub.publish(Int8(data=int(confirmed_class)))
+            confirmation = ConfirmedDetection()
+            confirmation.header.stamp = self.get_clock().now().to_msg()
+            confirmation.detection_id = str(uuid.uuid4())
+            confirmation.class_id = int(confirmed_class)
+            confirmation.latitude = float(centroid[0])
+            confirmation.longitude = float(centroid[1])
+            self.confirmed_pub.publish(confirmation)
 
     @staticmethod
     def _centroid(points):
@@ -468,19 +478,32 @@ class FilteringNode(Node):
             lat, lon = msg.latitude, msg.longitude
             source = 'message'
 
-        entry = (lat, lon, cls)
-        self.rejected_locations.append(entry)
+        # Keep both coordinate estimates. The scan-time centroid is the best
+        # reference for future scan frames; the message coordinate is the
+        # loiter-time target the operator actually rejected in the GCS.
+        positions = [(float(lat), float(lon), source)]
+        message_position = (float(msg.latitude), float(msg.longitude))
+        if not is_within_radius(
+                message_position[0], message_position[1], lat, lon, 1e-12):
+            positions.append((*message_position, 'message'))
+        for rejected_lat, rejected_lon, _ in positions:
+            self.rejected_locations.append((rejected_lat, rejected_lon, cls))
         cls_name = (CLASS_NAMES[cls]
                     if 0 <= cls < len(CLASS_NAMES) else 'unknown')
         self.get_logger().info(
             f"Suppressing {cls_name} within "
-            f"{self.rejected_ignore_radius_deg * 111320.0:.1f}m of "
-            f"lat={lat:.6f}, lon={lon:.6f} (source={source})")
+            f"{self.rejected_ignore_radius_deg * 111320.0:.1f}m of " +
+            ", ".join(
+                f"lat={rejected_lat:.6f}, lon={rejected_lon:.6f} "
+                f"(source={position_source})"
+                for rejected_lat, rejected_lon, position_source in positions))
+        logged_positions = [
+            (round(p[0], 6), round(p[1], 6), p[2]) for p in positions
+        ]
         self.log.event('REJECTED_LOCATION',
-                       f"lat={lat:.6f}, lon={lon:.6f}, "
+                       f"positions={logged_positions}, "
                        f"class={cls_name}({cls}), "
                        f"radius={self.rejected_ignore_radius_deg}deg, "
-                       f"source={source}, "
                        f"msg_lat={msg.latitude:.6f}, "
                        f"msg_lon={msg.longitude:.6f}")
 

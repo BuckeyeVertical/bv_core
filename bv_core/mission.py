@@ -37,10 +37,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
-from std_msgs.msg import String, Int8, Bool
+from std_msgs.msg import String, Bool
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from bv_msgs.srv import LocalizeObject
-from bv_msgs.msg import ObjectLocations
+from bv_msgs.msg import ConfirmedDetection, ObjectLocations
 from .mission_logger import MissionLogger
 from .approval_gate import ApprovalGate
 from .mission_config import (
@@ -70,6 +70,21 @@ STATE_RTL      = "return"
 # the aircraft in an indefinite loiter. Clamping at the config boundary keeps the
 # fail-open guarantee true for every possible config.
 MIN_APPROVAL_TIMEOUT_SEC = 10.0
+
+
+def confirmation_rejection_reason(message, scan_started_ns, handled_ids):
+    """Return why a confirmation cannot start work, or ``None`` if fresh."""
+    if message.class_id < 0 or not message.detection_id:
+        return 'invalid'
+    if message.detection_id in handled_ids:
+        return 'duplicate'
+    stamp_ns = (
+        int(message.header.stamp.sec) * 1_000_000_000
+        + int(message.header.stamp.nanosec)
+    )
+    if stamp_ns < scan_started_ns:
+        return 'stale'
+    return None
 
 
 # Mavlink constants
@@ -216,6 +231,10 @@ class MissionRunner(Node):
         
         # Confirmed detection class from filtering_node (set on object detection)
         self.confirmed_detection_class_id = -1
+        self.confirmed_detection_id = ''
+        self.confirmed_detection_coords = None
+        self.handled_confirmation_ids = set()
+        self.scan_started_ns = 0
         self._localize_retry_timer = None
         self.localization_retry_count = 0
 
@@ -294,10 +313,11 @@ class MissionRunner(Node):
             qos_profile=reliable_qos
         )
         
-        # Object detection trigger from filtering_node (confirmed 3-frame detection)
-        # Int8 carries the confirmed semantic class_id.
+        # Object detection trigger from filtering_node (confirmed M-of-N detection)
+        # Carries a unique ID and the scan-time candidate position so delayed
+        # confirmations and same-class detections can be disambiguated.
         self.object_detected_sub = self.create_subscription(
-            Int8,
+            ConfirmedDetection,
             '/global_obj_dets',
             self.on_object_detected,
             qos_profile=reliable_qos
@@ -502,6 +522,7 @@ class MissionRunner(Node):
         Will be interrupted by on_object_detected() callback.
         """
         self.current_state = STATE_SCAN
+        self.scan_started_ns = self.get_clock().now().nanoseconds
         self.publish_mission_state()
         self.is_transitioning = True
         self.desired_velocity = self.scan_velocity
@@ -806,6 +827,10 @@ class MissionRunner(Node):
         """Request object localization from vision node."""
         request = LocalizeObject.Request()
         request.target_class_id = self.confirmed_detection_class_id
+        request.detection_id = self.confirmed_detection_id
+        if self.confirmed_detection_coords is not None:
+            request.candidate_latitude = float(self.confirmed_detection_coords[0])
+            request.candidate_longitude = float(self.confirmed_detection_coords[1])
         # Only pay for the annotated crop when a human will actually look at it.
         # vision_node cannot see Approval_required, so the flag rides the request:
         # with the gate disabled the localize service does exactly the work it
@@ -893,6 +918,8 @@ class MissionRunner(Node):
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1
+        self.confirmed_detection_id = ''
+        self.confirmed_detection_coords = None
         
         if self.objects_delivered_count >= self.num_objects_to_find:
             self.get_logger().info("All payloads delivered!")
@@ -1028,6 +1055,8 @@ class MissionRunner(Node):
                 self.current_target_coords = None
                 self.current_target_class_id = None
                 self.confirmed_detection_class_id = -1
+                self.confirmed_detection_id = ''
+                self.confirmed_detection_coords = None
                 self._resume_scan_in_place('localization_failed')
                 return
 
@@ -1121,6 +1150,8 @@ class MissionRunner(Node):
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1
+        self.confirmed_detection_id = ''
+        self.confirmed_detection_coords = None
         self._resume_scan_in_place('operator_rejected')
 
     def _on_approval_callback_failed(self, name, exc):
@@ -1149,6 +1180,8 @@ class MissionRunner(Node):
         self.current_target_coords = None
         self.current_target_class_id = None
         self.confirmed_detection_class_id = -1
+        self.confirmed_detection_id = ''
+        self.confirmed_detection_coords = None
         self._resume_scan_in_place('approval_callback_failed')
 
     # Callbacks - topic subscriptions
@@ -1211,13 +1244,24 @@ class MissionRunner(Node):
             self.in_auto_mission = False
             self.handle_state_completion()
 
-    def on_object_detected(self, msg: Int8):
+    def on_object_detected(self, msg: ConfirmedDetection):
         """
-        Callback when filtering_node confirms object detection (3 frames).
-        msg.data contains the confirmed semantic class_id.
+        Callback when filtering_node confirms an object in its M-of-N window.
+        The message carries the semantic class, candidate position, and a
+        unique ID minted when filtering confirmed it.
         Stops the drone, waits for stabilization, then transitions to localization.
         """
-        if msg.data < 0:
+        rejection_reason = confirmation_rejection_reason(
+            msg, self.scan_started_ns, self.handled_confirmation_ids)
+        if rejection_reason == 'invalid':
+            return
+        if rejection_reason == 'duplicate':
+            self.get_logger().warn(
+                f"Ignoring duplicate confirmation {msg.detection_id}")
+            return
+        if rejection_reason == 'stale':
+            self.get_logger().warn(
+                f"Ignoring stale confirmation {msg.detection_id} from a prior scan")
             return
         
         if self.current_state != STATE_SCAN:
@@ -1227,22 +1271,31 @@ class MissionRunner(Node):
             return  # Already handling a transition
 
         target_name = (
-            CLASS_NAMES[int(msg.data)]
-            if 0 <= int(msg.data) < len(CLASS_NAMES)
+            CLASS_NAMES[int(msg.class_id)]
+            if 0 <= int(msg.class_id) < len(CLASS_NAMES)
             else "unknown"
         )
         
         self.get_logger().info(
             f"OBJECT CONFIRMED! (#{self.objects_delivered_count + 1}) "
-            f"- 3-frame detection confirmed. "
-            f"Target={target_name}({int(msg.data)}). Stopping to localize..."
+            f"Target={target_name}({int(msg.class_id)}). Stopping to localize..."
         )
         
-        # Store which class was confirmed so we can tell the localizer
-        self.confirmed_detection_class_id = int(msg.data)
-        cls_name = CLASS_NAMES[int(msg.data)] if 0 <= int(msg.data) < len(CLASS_NAMES) else 'unknown'
+        self.handled_confirmation_ids.add(msg.detection_id)
+        # Preserve the exact scan-time candidate so localization can select
+        # the same instance when a frame contains multiple boxes of this class.
+        self.confirmed_detection_class_id = int(msg.class_id)
+        self.confirmed_detection_id = msg.detection_id
+        self.confirmed_detection_coords = (msg.latitude, msg.longitude)
+        cls_name = (
+            CLASS_NAMES[int(msg.class_id)]
+            if 0 <= int(msg.class_id) < len(CLASS_NAMES)
+            else 'unknown'
+        )
         self.log.event('OBJECT_DETECTED',
-            f"class={cls_name}({msg.data}), delivered_so_far={self.objects_delivered_count}/{self.num_objects_to_find}")
+            f"id={msg.detection_id}, class={cls_name}({msg.class_id}), "
+            f"candidate=({msg.latitude:.6f},{msg.longitude:.6f}), "
+            f"delivered_so_far={self.objects_delivered_count}/{self.num_objects_to_find}")
 
         # Mark as transitioning to prevent duplicate triggers
         self.is_transitioning = True

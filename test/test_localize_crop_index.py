@@ -191,9 +191,14 @@ def _node():
     return FakeVisionNode(_frame(), detections, coords)
 
 
-def _localize(node, target_class_id, want_crop=True):
+def _localize(node, target_class_id, want_crop=True, *, detection_id='',
+              candidate=None):
     request = LocalizeObject.Request()
     request.target_class_id = target_class_id
+    request.detection_id = detection_id
+    if candidate is not None:
+        request.candidate_latitude = candidate[0]
+        request.candidate_longitude = candidate[1]
     request.want_crop = want_crop
     return node._handle_localize_request(request, LocalizeObject.Response())
 
@@ -251,6 +256,31 @@ class TestCropMatchesTheReturnedDetection:
         response = _localize(node, target_class_id=1)
         assert response.annotated_crop.format == 'jpeg'
         assert response.class_id == 1
+
+    def test_candidate_position_selects_nearest_same_class_box(self):
+        detections = _FakeDetections(
+            xyxy=[BOX_PERSON, BOX_TENT],
+            class_id=[0, 0],
+            confidence=[CONF_PERSON, CONF_TENT],
+        )
+        coords = [
+            (LAT_PERSON, LON_PERSON, 0),
+            (LAT_TENT, LON_TENT, 0),
+        ]
+        node = FakeVisionNode(_frame(), detections, coords)
+
+        response = _localize(
+            node,
+            target_class_id=0,
+            detection_id='candidate-2',
+            candidate=(LAT_TENT, LON_TENT),
+        )
+
+        assert response.latitude == pytest.approx(LAT_TENT)
+        assert response.longitude == pytest.approx(LON_TENT)
+        assert response.confidence == pytest.approx(CONF_TENT, abs=1e-6)
+        blue, _green, red = _dominant_bgr(bytes(response.annotated_crop.data))
+        assert red > blue
 
 
 class TestWantCropIsHonoured:

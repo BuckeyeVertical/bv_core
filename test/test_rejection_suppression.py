@@ -75,7 +75,7 @@ def node(ros):
 def _drive(node, class_id, frames=3):
     """Feed `frames` identical detections and report whether one confirmed."""
     published = []
-    node.confirmed_pub.publish = lambda msg: published.append(int(msg.data))
+    node.confirmed_pub.publish = lambda msg: published.append(int(msg.class_id))
 
     # Stub the projection: this test is about suppression, not geometry.
     node.localizer.get_lat_lon = (
@@ -154,6 +154,28 @@ class TestSuppressionReferenceFrame:
         # Suppression must still hold: the stored confirmed position wins.
         assert _drive(node, class_id=0) == []
 
+    def test_also_suppresses_the_location_shown_to_the_operator(self, node):
+        assert _drive(node, class_id=0) == [0]
+
+        loiter_lat = REJECT_LAT + 0.0003
+        rejection = ObjectLocations()
+        rejection.latitude = loiter_lat
+        rejection.longitude = REJECT_LON
+        rejection.class_id = 0
+        node.rejected_location_callback(rejection)
+
+        node.localizer.get_lat_lon = (
+            lambda *a, **k: [(loiter_lat, REJECT_LON, 0)])
+        node.frame_history = []
+        node.targets[0]['state'] = 'undetected'
+        published = []
+        node.confirmed_pub.publish = lambda msg: published.append(msg.class_id)
+        for _ in range(3):
+            msg = ObjectDetections()
+            msg.dets = [Vector3(x=640.0, y=360.0, z=0.0)]
+            node.handle_detections(msg)
+        assert published == []
+
     def test_falls_back_to_message_coords_when_never_confirmed(self, node):
         # No stored confirmed position for this class.
         assert node.targets[1].get('confirmed_lat') is None
@@ -175,7 +197,7 @@ def _drive_multi(node, per_frame, class_id, frames=3):
     order the detector emitted them.
     """
     published = []
-    node.confirmed_pub.publish = lambda msg: published.append(int(msg.data))
+    node.confirmed_pub.publish = lambda msg: published.append(int(msg.class_id))
     node.localizer.get_lat_lon = lambda *a, **k: list(per_frame)
 
     node.frame_history = []
@@ -191,7 +213,7 @@ def _drive_multi(node, per_frame, class_id, frames=3):
 
 
 class TestConfirmedCentroidMatchesTheConfirmedDetection:
-    """The stored position must be the one 3-frame confirmation validated.
+    """The stored position must be the one M-of-N confirmation validated.
 
     `evaluate_window` takes only the FIRST same-class detection per
     frame. If the stored centroid averages every same-class detection instead,
