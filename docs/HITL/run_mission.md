@@ -34,7 +34,15 @@ gst-launch-1.0 -q \
 
 Check one frame visually
 ```bash
-ssh bvorinnano@192.168.144.2 "gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=1 ! 'image/jpeg,width=3840,height=2160,framerate=30/1' ! filesink location=/tmp/camera_frame.jpg"
+ssh bvorinnano@192.168.144.2 "
+  rm -f /tmp/camera_frame_*.jpg
+  gst-launch-1.0 -q \
+    v4l2src device=/dev/video0 num-buffers=8 ! \
+    'image/jpeg,width=3840,height=2160,framerate=30/1' ! \
+    jpegparse ! \
+    multifilesink location=/tmp/camera_frame_%02d.jpg
+  cp /tmp/camera_frame_07.jpg /tmp/camera_frame.jpg
+"
 scp bvorinnano@192.168.144.2:/tmp/camera_frame.jpg .
 ```
 
