@@ -27,6 +27,7 @@ FUTURE CHANGES:
 """
 
 # Imports
+import json
 import time
 import yaml
 
@@ -280,6 +281,11 @@ class MissionRunner(Node):
             '/mission_state',
             qos_profile=transient_local_qos
         )
+        self.path_progress_pub = self.create_publisher(
+            String,
+            '/path_progress',
+            qos_profile=transient_local_qos
+        )
         self.deployed_object_pub = self.create_publisher(
             ObjectLocations,
             '/deployed_object_locations',
@@ -450,6 +456,33 @@ class MissionRunner(Node):
         msg.data = self.current_state
         self.mission_state_pub.publish(msg)
 
+    def publish_path_progress(self, phase, completed, total):
+        """Publish absolute lap/scan progress despite MAVROS mission renumbering."""
+        completed = max(0, min(int(completed), int(total)))
+        target = completed + 1 if completed < total else None
+        route = self.lap_waypoints if phase == 'lap' else self.scan_waypoints
+        segment_start = None
+        segment_end = None
+        if target is not None and completed < len(route):
+            segment_end = [float(route[completed][0]), float(route[completed][1])]
+            if completed > 0:
+                segment_start = [
+                    float(route[completed - 1][0]),
+                    float(route[completed - 1][1]),
+                ]
+            elif self.current_lat is not None and self.current_lon is not None:
+                segment_start = [float(self.current_lat), float(self.current_lon)]
+        msg = String()
+        msg.data = json.dumps({
+            'phase': phase,
+            'completed': completed,
+            'target': target,
+            'total': int(total),
+            'segment_start': segment_start,
+            'segment_end': segment_end,
+        }, separators=(',', ':'))
+        self.path_progress_pub.publish(msg)
+
     # State entry methods
     def enter_takeoff_state(self):
         """
@@ -481,6 +514,8 @@ class MissionRunner(Node):
         route_name = 'lap' if self.lap_waypoints else 'scan'
         self.get_logger().info(
             f"Takeoff destination is the first {route_name} waypoint")
+        route = self.lap_waypoints if self.lap_waypoints else self.scan_waypoints
+        self.publish_path_progress(route_name, 0, len(route))
         
         self.active_waypoint_list = self.build_waypoint_list(
             [self.takeoff_waypoint],
@@ -506,6 +541,7 @@ class MissionRunner(Node):
         self.get_logger().info("ENTERING STATE: LAP")
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', 'takeoff -> lap')
+        self.publish_path_progress('lap', 0, len(self.lap_waypoints))
 
         self.active_waypoint_list = self.build_waypoint_list(
             self.lap_waypoints,
@@ -538,6 +574,9 @@ class MissionRunner(Node):
         )
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', f"-> scan (resume from wp {self.scan_waypoint_index_on_detection})")
+        self.publish_path_progress(
+            'scan', self.scan_waypoint_index_on_detection,
+            len(self.scan_waypoints))
 
         # Get remaining scan waypoints from where we left off
         remaining_scan_points = self.scan_waypoints[self.scan_waypoint_index_on_detection:]
@@ -1211,6 +1250,16 @@ class MissionRunner(Node):
         # Subtract offset if loiter return point was prepended to the waypoint list
         if self.current_state == STATE_SCAN:
             self.last_reached_scan_waypoint = waypoint_index - self.scan_resume_waypoint_offset
+
+        if self.current_state == STATE_LAP:
+            self.publish_path_progress(
+                'lap', waypoint_index + 1, len(self.lap_waypoints))
+        elif self.current_state == STATE_SCAN:
+            reached_in_segment = waypoint_index - self.scan_resume_waypoint_offset
+            completed = self.scan_waypoint_index_on_detection
+            if reached_in_segment >= 0:
+                completed += reached_in_segment + 1
+            self.publish_path_progress('scan', completed, len(self.scan_waypoints))
 
         # Don't process completion if we're mid-transition
         if self.is_transitioning:
