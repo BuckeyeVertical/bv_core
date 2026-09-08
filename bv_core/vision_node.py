@@ -49,6 +49,7 @@ from collections import deque
 from .detectors import create_detector
 from .pipelines import create_pipeline
 from .detection_crop import CropConfig, build_annotated_crop
+from .detection_thresholds import load_thresholds, filter_detections
 from .localizer import Localizer
 from .mission_logger import MissionLogger
 from .mission_config import mission_config_path
@@ -184,7 +185,8 @@ class VisionNode(Node):
             cfg = yaml.safe_load(f)
 
         # Detection settings
-        self.det_thresh = cfg.get('detection_threshold', 0.5)
+        self.class_thresholds = load_thresholds(cfg, CLASS_NAMES)
+        self.det_thresh = min(self.class_thresholds.values())
         self.num_scan_wp = cfg.get('num_scan_wp', 3)
 
         # Debug preview stream
@@ -697,6 +699,8 @@ class VisionNode(Node):
             frame=frame,
             threshold=self.det_thresh,
         )
+        detections = filter_detections(
+            detections, getattr(self, 'class_thresholds', None))
         
         if len(detections) == 0:
             self.get_logger().warn("No detections found during localization")
@@ -1060,6 +1064,8 @@ class VisionNode(Node):
             frame=frame,
             threshold=self.det_thresh,
         )
+        detections = filter_detections(
+            detections, getattr(self, 'class_thresholds', None))
 
         # Log to mission logger
         if len(detections) > 0:

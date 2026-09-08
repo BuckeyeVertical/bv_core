@@ -3,7 +3,10 @@
 # ============================================================
 
 # Detection settings
-detection_threshold: 0.5
+detection_threshold: 0.5  # Fallback for any class omitted below
+detection_thresholds:
+  person: 0.5
+  tent: 0.7
 num_scan_wp: 3
 
 # Stitching frame capture
