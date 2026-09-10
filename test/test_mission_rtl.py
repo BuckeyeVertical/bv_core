@@ -102,6 +102,35 @@ class TestMissionRTL(unittest.TestCase):
         node.create_timer.call_args.args[1]()
         node.set_velocity.assert_called_once_with(3.0)
 
+    def test_loiter_response_keeps_detection_transition_locked(self):
+        node = mission('scan')
+
+        node.on_set_mode_complete(
+            Mock(result=lambda: SimpleNamespace(mode_sent=True)),
+            'AUTO.LOITER',
+        )
+
+        self.assertTrue(node.is_transitioning)
+        node.reset_all_servos_to_default.assert_not_called()
+        node.create_timer.assert_not_called()
+
+    def test_set_flight_mode_forwards_requested_mode_to_callback(self):
+        future = Mock()
+        node = SimpleNamespace(
+            set_mode_client=Mock(call_async=Mock(return_value=future)),
+            on_set_mode_complete=Mock(),
+            get_logger=Mock(return_value=Mock()),
+        )
+        node.set_flight_mode = MethodType(MissionRunner.set_flight_mode, node)
+
+        node.set_flight_mode('AUTO.LOITER')
+        callback = future.add_done_callback.call_args.args[0]
+        completed = Mock()
+        callback(completed)
+
+        node.on_set_mode_complete.assert_called_once_with(
+            completed, 'AUTO.LOITER')
+
     def test_loiter_is_not_an_external_rtl(self):
         node = mission()
         node.on_vehicle_state_changed(SimpleNamespace(mode='AUTO.LOITER', armed=True))

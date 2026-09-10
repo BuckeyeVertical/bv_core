@@ -859,7 +859,10 @@ class MissionRunner(Node):
         self.get_logger().info(f"Setting flight mode: {mode}")
         
         future = self.set_mode_client.call_async(request)
-        future.add_done_callback(self.on_set_mode_complete)
+        future.add_done_callback(
+            lambda completed, requested_mode=mode:
+                self.on_set_mode_complete(completed, requested_mode)
+        )
 
     def set_velocity(self, speed):
         """
@@ -1077,7 +1080,7 @@ class MissionRunner(Node):
         self.get_logger().info("Vehicle armed")
         self.set_flight_mode("AUTO.MISSION")
 
-    def on_set_mode_complete(self, future):
+    def on_set_mode_complete(self, future, requested_mode=None):
         """Callback when mode change completes."""
         response = future.result()
         
@@ -1090,6 +1093,13 @@ class MissionRunner(Node):
             return
 
         self.get_logger().info("Flight mode set successfully")
+
+        # A successful LOITER response only confirms that braking has begun.
+        # Keep the detection transition locked until the stabilization timer
+        # advances the mission from scan to localize.
+        if requested_mode == "AUTO.LOITER":
+            return
+
         self.in_auto_mission = True
         self.is_transitioning = False
         
