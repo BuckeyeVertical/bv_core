@@ -208,6 +208,7 @@ class MissionRunner(Node):
         # Mission progress
         self.objects_delivered_count = 0
         self.in_auto_mission = False
+        self.rtl_completed = False
         
         # Waypoint tracking
         self.expected_final_waypoint_index = None
@@ -445,11 +446,6 @@ class MissionRunner(Node):
             # Handled by timer, not waypoint completion
             pass
             
-        elif self.current_state == STATE_RTL:
-            self.get_logger().info("=" * 50)
-            self.get_logger().info("MISSION COMPLETE - LANDED")
-            self.get_logger().info("=" * 50)
-
     def publish_mission_state(self):
         """Publish current state to /mission_state topic."""
         msg = String()
@@ -709,14 +705,22 @@ class MissionRunner(Node):
         # Execute first servo step immediately
         self.execute_deploy_servo_step()
 
-    def enter_rtl_state(self):
+    def enter_rtl_state(self, command_mode=True):
         """
-        Return to launch and land.
+        Stop mission work and return; skip the command if RTL is already observed.
         """
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
+        for name in ('_localize_timer', '_localize_retry_timer', '_velocity_delay_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.cancel()
+                self.destroy_timer(timer)
+                setattr(self, name, None)
+
         self.current_state = STATE_RTL
+        self.in_auto_mission = False
         self.publish_mission_state()
         self.is_transitioning = True
         
@@ -725,7 +729,8 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', '-> rtl')
 
-        self.set_flight_mode("AUTO.RTL")
+        if command_mode:
+            self.set_flight_mode("AUTO.RTL")
 
     # Mavros utilities
     def build_waypoint_list(self, points, tolerance, pass_through_ratio=0.0):
@@ -990,6 +995,8 @@ class MissionRunner(Node):
     # Callbacks - service responses
     def on_waypoint_push_complete(self, future):
         """Callback when waypoint push to autopilot completes."""
+        if self.current_state == STATE_RTL:
+            return
         response = future.result()
         
         if not response.success:
@@ -1008,6 +1015,8 @@ class MissionRunner(Node):
 
     def on_arm_complete(self, future):
         """Callback when arming completes."""
+        if self.current_state == STATE_RTL:
+            return
         response = future.result()
         
         if not response.success:
@@ -1027,6 +1036,9 @@ class MissionRunner(Node):
             self.is_transitioning = False
             return
         
+        if self.current_state == STATE_RTL:
+            return
+
         self.get_logger().info("Flight mode set successfully")
         self.in_auto_mission = True
         self.is_transitioning = False
@@ -1034,6 +1046,8 @@ class MissionRunner(Node):
         # Reset servos and set velocity (delay velocity set to let mode change settle)
         self.reset_all_servos_to_default()
         def set_velocity_once():
+            if self.current_state == STATE_RTL:
+                return
             if hasattr(self, '_velocity_delay_timer') and self._velocity_delay_timer is not None:
                 self._velocity_delay_timer.cancel()
                 self._velocity_delay_timer = None
@@ -1284,14 +1298,13 @@ class MissionRunner(Node):
 
     def on_vehicle_state_changed(self, msg):
         """Callback when vehicle state (flight mode) changes."""
-        # Detect when RTL completes
-        if (self.in_auto_mission and 
-            msg.mode != 'AUTO.MISSION' and 
-            self.current_state == STATE_RTL):
-            
-            self.get_logger().info(f"Flight mode changed to: {msg.mode}")
-            self.in_auto_mission = False
-            self.handle_state_completion()
+        if msg.mode == 'AUTO.RTL' and self.current_state != STATE_RTL:
+            self.get_logger().info("External RTL detected - stopping mission actions")
+            self.enter_rtl_state(command_mode=False)
+
+        if self.current_state == STATE_RTL and not msg.armed and not self.rtl_completed:
+            self.rtl_completed = True
+            self.get_logger().info("RETURN COMPLETE - DISARMED")
 
     def on_object_detected(self, msg: ConfirmedDetection):
         """
@@ -1369,6 +1382,8 @@ class MissionRunner(Node):
         # Wait 1 second for drone to stabilize, then transition to localize
         # Use a one-shot timer pattern: store reference and cancel after firing
         def localize_once():
+            if self.current_state != STATE_SCAN:
+                return
             if hasattr(self, '_localize_timer') and self._localize_timer is not None:
                 self._localize_timer.cancel()
                 self._localize_timer = None
