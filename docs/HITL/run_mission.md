@@ -99,3 +99,8 @@ Open the GCS from the laptop:
 
 For an in-flight abort, command Loiter or RTL from the Herelink. Do not use
 `Ctrl-C` as a flight abort.
+
+Scp latest log
+```bash
+scp "bvorinnano@192.168.144.2:$(ssh bvorinnano@192.168.144.2 'ls -t ~/bv_ws/src/bv_core/bv_core/logs/*.log | head -1')" .
+```
