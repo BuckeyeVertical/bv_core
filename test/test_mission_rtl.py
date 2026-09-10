@@ -17,6 +17,7 @@ def mission(state='localize'):
         create_timer=Mock(return_value=Mock()), desired_velocity=3.0,
         last_waypoint_reached=None, expected_final_waypoint_index=0,
         has_armed=True, enter_deliver_state=Mock(),
+        scan_route_pending=False, _pending_scan_confirmation=None,
         _localize_timer=Mock(), _localize_retry_timer=Mock(),
         _velocity_delay_timer=Mock(),
     )

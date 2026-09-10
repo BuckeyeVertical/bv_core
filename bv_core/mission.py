@@ -241,6 +241,8 @@ class MissionRunner(Node):
         self.confirmed_detection_coords = None
         self.handled_confirmation_ids = set()
         self.scan_started_ns = 0
+        self.scan_route_pending = False
+        self._pending_scan_confirmation = None
         self._localize_retry_timer = None
         self.localization_retry_count = 0
 
@@ -561,9 +563,11 @@ class MissionRunner(Node):
         Will be interrupted by on_object_detected() callback.
         """
         self.current_state = STATE_SCAN
+        self.scan_route_pending = True
+        self._pending_scan_confirmation = None
+        self.is_transitioning = True
         self.scan_started_ns = self.get_clock().now().nanoseconds
         self.publish_mission_state()
-        self.is_transitioning = True
         self.desired_velocity = self.scan_velocity
         
         # Reset waypoint tracking for new state
@@ -597,6 +601,7 @@ class MissionRunner(Node):
             self.scan_resume_waypoint_offset = 0
 
         if not remaining_scan_points:
+            self.scan_route_pending = False
             self.get_logger().info("No remaining scan waypoints")
             self.handle_state_completion()
             return
@@ -615,6 +620,8 @@ class MissionRunner(Node):
     def enter_scan_transit_state(self):
         """Fly the complete scan route at transit speed until its first waypoint."""
         self.current_state = STATE_SCAN_TRANSIT
+        self.scan_route_pending = False
+        self._pending_scan_confirmation = None
         self.is_transitioning = True
         self.desired_velocity = self.scan_transit_velocity
         self.last_waypoint_reached = None
@@ -640,6 +647,8 @@ class MissionRunner(Node):
     def activate_scan_state(self):
         """Begin scanning at waypoint zero without replacing the active route."""
         self.current_state = STATE_SCAN
+        self.scan_route_pending = False
+        self._pending_scan_confirmation = None
         self.scan_started_ns = self.get_clock().now().nanoseconds
         self.is_transitioning = False
         self.desired_velocity = self.scan_velocity
@@ -676,6 +685,8 @@ class MissionRunner(Node):
         using camera intrinsics and drone pose.
         """
         self.current_state = STATE_LOCALIZE
+        self.scan_route_pending = False
+        self._pending_scan_confirmation = None
         self.is_transitioning = True
         self.localization_retry_count = 0
         
@@ -770,6 +781,8 @@ class MissionRunner(Node):
                 setattr(self, name, None)
 
         self.current_state = STATE_RTL
+        self.scan_route_pending = False
+        self._pending_scan_confirmation = None
         self.in_auto_mission = False
         self.publish_mission_state()
         self.is_transitioning = True
@@ -1057,6 +1070,9 @@ class MissionRunner(Node):
                 f"Waypoint push failed! Only {response.wp_transfered} transferred."
             )
             self.is_transitioning = False
+            if self.current_state == STATE_SCAN:
+                self.scan_route_pending = False
+                self._pending_scan_confirmation = None
             return
         
         self.get_logger().info("Waypoints uploaded successfully")
@@ -1087,6 +1103,9 @@ class MissionRunner(Node):
         if not response.mode_sent:
             self.get_logger().error("Mode change failed!")
             self.is_transitioning = False
+            if self.current_state == STATE_SCAN:
+                self.scan_route_pending = False
+                self._pending_scan_confirmation = None
             return
         
         if self.current_state == STATE_RTL:
@@ -1099,6 +1118,14 @@ class MissionRunner(Node):
         # advances the mission from scan to localize.
         if requested_mode == "AUTO.LOITER":
             return
+
+        scan_route_ready = (
+            requested_mode == "AUTO.MISSION"
+            and self.current_state == STATE_SCAN
+            and self.scan_route_pending
+        )
+        if scan_route_ready:
+            self.scan_route_pending = False
 
         self.in_auto_mission = True
         self.is_transitioning = False
@@ -1131,6 +1158,22 @@ class MissionRunner(Node):
                 "Detected missed waypoint completion during transition - processing now"
             )
             self.handle_state_completion()
+
+        if scan_route_ready:
+            self._drain_pending_scan_confirmation()
+
+    def _drain_pending_scan_confirmation(self):
+        """Handle one confirmation retained while the scan route activated."""
+        message = self._pending_scan_confirmation
+        self._pending_scan_confirmation = None
+        if (message is None or self.current_state != STATE_SCAN
+                or self.is_transitioning):
+            return
+        self.get_logger().info(
+            f"Processing confirmation {message.detection_id} retained during "
+            "scan route activation"
+        )
+        self.on_object_detected(message)
 
     def on_velocity_set_complete(self, future):
         """Callback when velocity parameter change completes."""
@@ -1390,6 +1433,13 @@ class MissionRunner(Node):
             return  # Ignore detections outside of scan phase
         
         if self.is_transitioning:
+            if (self.scan_route_pending
+                    and self._pending_scan_confirmation is None):
+                self._pending_scan_confirmation = msg
+                self.get_logger().info(
+                    f"Retaining confirmation {msg.detection_id} until the "
+                    "scan route is active"
+                )
             return  # Already handling a transition
 
         target_name = (
