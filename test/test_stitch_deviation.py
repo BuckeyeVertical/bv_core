@@ -189,11 +189,53 @@ def test_pipeline_is_warm_before_scanning_begins(ros):
     """Starting the stream at scan entry cost 7.1 s of blindness in flight."""
     harness = StitchHarness()
     try:
-        for state in ('takeoff', 'lap', 'scan'):
+        for state in ('takeoff', 'lap', 'scan_transit', 'scan'):
             harness.set_state(state)
 
         assert harness.pipeline_calls[0] == 'start'
         assert 'stop' not in harness.pipeline_calls
+    finally:
+        Node.destroy_node(harness)
+
+
+def test_scan_transit_does_not_start_stitch_capture(ros):
+    harness = StitchHarness()
+    try:
+        harness.set_state('lap')
+        harness.set_state('scan_transit')
+        harness.fly(-100.0)
+
+        assert harness.state == 'scan_transit'
+        assert harness.stitch_capture.active is False
+        assert 'stop' not in harness.pipeline_calls
+    finally:
+        Node.destroy_node(harness)
+
+
+def test_scan_transit_discards_inference_queue_items(ros):
+    harness = StitchHarness()
+    try:
+        harness.set_state('scan_transit')
+        harness.queue = queue.Queue()
+        harness.queue.put((np.zeros((4, 4, 3), dtype=np.uint8), None, None))
+
+        assert harness._get_queue_item() is None
+    finally:
+        Node.destroy_node(harness)
+
+
+def test_transit_to_scan_starts_first_stitch_row_without_waypoint_replay(ros):
+    harness = StitchHarness()
+    try:
+        harness.set_state('lap')
+        harness.set_state('scan_transit')
+        harness.goto(0.0)
+        harness.set_state('scan')
+
+        assert harness.curr_wp == 0
+        assert harness.stitch_capture.active is True
+        harness.fly(0.0)
+        assert [c.column for _p, c in harness.written()] == [1]
     finally:
         Node.destroy_node(harness)
 

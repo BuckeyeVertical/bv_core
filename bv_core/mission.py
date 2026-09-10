@@ -59,6 +59,7 @@ CLASS_NAMES = ("person", "tent")
 # State constants
 STATE_TAKEOFF  = "takeoff"
 STATE_LAP      = "lap"
+STATE_SCAN_TRANSIT = "scan_transit"
 STATE_SCAN     = "scan"
 STATE_LOCALIZE = "localize"
 STATE_DELIVER  = "deliver"
@@ -131,6 +132,7 @@ class MissionRunner(Node):
             f"num_objects={self.num_objects_to_find}, "
             f"scan_wps={len(self.scan_waypoints)}, "
             f"lap_wps={len(self.lap_waypoints)}, "
+            f"scan_transit_vel={self.scan_transit_velocity}m/s, "
             f"scan_vel={self.scan_velocity}m/s, "
             f"deliver_vel={self.deliver_velocity}m/s, "
             f"scan_tol={self.scan_tolerance}m, "
@@ -159,6 +161,8 @@ class MissionRunner(Node):
         
         # Velocity parameters (m/s)
         self.lap_velocity = config.get('Lap_velocity', 5.0)
+        self.scan_transit_velocity = config.get(
+            'Scan_transit_velocity', self.lap_velocity)
         self.scan_velocity = config.get('Scan_velocity', 2.5)
         self.deliver_velocity = config.get('Deliver_velocity', 5.0)
         
@@ -426,7 +430,10 @@ class MissionRunner(Node):
                 self.enter_scan_state()
             
         elif self.current_state == STATE_LAP:
-            self.enter_scan_state()
+            self.enter_scan_transit_state()
+
+        elif self.current_state == STATE_SCAN_TRANSIT:
+            self.activate_scan_state()
             
         elif self.current_state == STATE_SCAN:
             # Scan waypoints finished - proceed to RTL
@@ -604,6 +611,49 @@ class MissionRunner(Node):
         # waypoint yet.  A prepended delivery-return point also maps to -1.
         self.last_reached_scan_waypoint = -1
         self.push_mission_to_autopilot()
+
+    def enter_scan_transit_state(self):
+        """Fly the complete scan route at transit speed until its first waypoint."""
+        self.current_state = STATE_SCAN_TRANSIT
+        self.is_transitioning = True
+        self.desired_velocity = self.scan_transit_velocity
+        self.last_waypoint_reached = None
+        self.last_processed_waypoint = -1
+        self.scan_resume_waypoint_offset = 0
+
+        self.get_logger().info("-" * 40)
+        self.get_logger().info("ENTERING STATE: SCAN TRANSIT")
+        self.get_logger().info("-" * 40)
+        self.log.event('STATE_CHANGE', 'lap -> scan_transit')
+        self.publish_mission_state()
+        self.publish_path_progress('scan', 0, len(self.scan_waypoints))
+
+        self.active_waypoint_list = self.build_waypoint_list(
+            self.scan_waypoints,
+            self.scan_tolerance,
+            pass_through_ratio=1.0,
+        )
+        self.expected_final_waypoint_index = 0
+        self.last_reached_scan_waypoint = -1
+        self.push_mission_to_autopilot()
+
+    def activate_scan_state(self):
+        """Begin scanning at waypoint zero without replacing the active route."""
+        self.current_state = STATE_SCAN
+        self.scan_started_ns = self.get_clock().now().nanoseconds
+        self.is_transitioning = False
+        self.desired_velocity = self.scan_velocity
+        self.expected_final_waypoint_index = len(self.active_waypoint_list) - 1
+        self.last_reached_scan_waypoint = 0
+        self.last_processed_waypoint = 0
+
+        self.get_logger().info("-" * 40)
+        self.get_logger().info("ENTERING STATE: SCAN")
+        self.get_logger().info("-" * 40)
+        self.log.event('STATE_CHANGE', 'scan_transit -> scan')
+        self.publish_path_progress('scan', 1, len(self.scan_waypoints))
+        self.publish_mission_state()
+        self.set_velocity(self.scan_velocity)
 
     def _resume_scan_in_place(self, reason):
         """Continue toward the next scan endpoint without retracing the row."""

@@ -104,7 +104,7 @@ PREVIEW_WORKER_JOIN_SEC = 25.0
 # Listed as an allowlist rather than excluding 'return', so a mission state
 # added later defaults to releasing the pipeline, as every state did before.
 PIPELINE_ACTIVE_STATES = (
-    'takeoff', 'lap', 'scan', 'localize', 'deliver', 'deploy')
+    'takeoff', 'lap', 'scan_transit', 'scan', 'localize', 'deliver', 'deploy')
 
 
 # Fail on the ground, not in the air.
@@ -543,6 +543,14 @@ class VisionNode(Node):
             if new_state == 'scan' and not self.raw_frames_cleared:
                 self._clear_raw_frames_dir()
                 self.raw_frames_cleared = True
+            if self.prev_state == 'scan_transit' and new_state == 'scan':
+                self.curr_wp = 0
+                self.stitch_paused = False
+                scan_start = (
+                    float(self.scan_points[0][0]),
+                    float(self.scan_points[0][1]),
+                )
+                self._start_stitch_row(0, scan_start)
             if (new_state == 'scan'
                     and not self.stitch_capture.active
                     and self.curr_wp + 1 >= len(self.scan_points)):
@@ -610,19 +618,23 @@ class VisionNode(Node):
         self.stitch_paused = False
 
         if self.curr_wp % 2 == 0 and self.curr_wp + 1 < len(self.scan_points):
-            sp_next = self.scan_points[self.curr_wp + 1]
-            endpoint_ll = (float(sp_next[0]), float(sp_next[1]))
-            row = (self.curr_wp // 2) + 1
-            with self.stitch_lock:
-                self.stitch_capture.start_row(row, current_ll, endpoint_ll)
-                self.latest_stitch_frame = None
-            self.get_logger().info(
-                f"Stitch row entry: curr_wp={self.curr_wp}, "
-                f"anchor={current_ll}, next={endpoint_ll}"
-            )
+            self._start_stitch_row(self.curr_wp, current_ll)
         else:
             self._finish_stitch_row()
             self.stitch_paused = False
+
+    def _start_stitch_row(self, scan_index, anchor_ll):
+        """Start one stitch row from a planned even-numbered scan point."""
+        next_point = self.scan_points[scan_index + 1]
+        endpoint_ll = (float(next_point[0]), float(next_point[1]))
+        row = (scan_index // 2) + 1
+        with self.stitch_lock:
+            self.stitch_capture.start_row(row, anchor_ll, endpoint_ll)
+            self.latest_stitch_frame = None
+        self.get_logger().info(
+            f"Stitch row entry: curr_wp={scan_index}, "
+            f"anchor={anchor_ll}, next={endpoint_ll}"
+        )
 
     def _on_timer(self):
         """
