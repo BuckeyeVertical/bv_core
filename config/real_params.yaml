@@ -6,7 +6,7 @@ num_objects: 2
 
 takeoff_alt: &TAKEOFF 45.72
 scan_altitude: 45.72
-lap_count: 0
+lap_count: 1
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
@@ -25,8 +25,10 @@ scan_boundary:
   - [40.15920833, -83.19580278]
 
 Lap_velocity: 5.0
+Scan_transit_velocity: 5.0
 Scan_velocity: 3.0
 Deliver_velocity: 3.0
+RTL_velocity: 5.0
 
 Lap_tolerance: 15.0
 Scan_tolerance: 1.0
