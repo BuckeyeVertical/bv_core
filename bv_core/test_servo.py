@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bench tool for the payload servos, in the same degrees as the mission config.
 
+    ros2 run bv_core test_servo show            # positions, pulses, DIS values
     ros2 run bv_core test_servo slider 130      # one servo to an angle
     ros2 run bv_core test_servo brake 107
     ros2 run bv_core test_servo rest            # slider hold + brake rest
@@ -38,9 +39,12 @@ DROP_TICK_SEC = 0.02
 
 
 def parse_args(argv):
-    """('servo', name, degrees) | ('rest',) | ('drop', payload); SystemExit on error."""
-    if argv == ['rest']:
-        return ('rest',)
+    """('servo', name, deg) | ('show',) | ('rest',) | ('drop', payload).
+
+    Raises SystemExit with the usage text on anything else.
+    """
+    if argv in (['show'], ['rest']):
+        return (argv[0],)
     if len(argv) == 2 and argv[0] == 'drop' and argv[1] in PAYLOADS:
         return ('drop', argv[1])
     if len(argv) == 2 and argv[0] in ('slider', 'brake'):
@@ -49,6 +53,26 @@ def parse_args(argv):
         except ValueError:
             pass
     raise SystemExit(f"usage:\n{USAGE}")
+
+
+def describe(config):
+    """Every position with its pulse and range status, then the DIS values.
+
+    Run after entering a new zero_deg: it shows whether everything fits and
+    which disarmed pulses to set on the flight controller.
+    """
+    lines = []
+    for servo, label, degrees in config.positions():
+        pulse = degrees_to_us(degrees, config.arduino_pulse_range_us)
+        reason = unreachable_reason(config, servo, degrees)
+        status = f"OUT OF RANGE: {reason}" if reason else "ok"
+        lines.append(f"{servo.name} {label}: {degrees:g} deg = {pulse:.0f} us "
+                     f"[{status}]")
+    for servo, degrees in ((config.slider, config.slider_hold_deg),
+                           (config.brake, config.brake_rest_deg)):
+        pulse = degrees_to_us(degrees, config.arduino_pulse_range_us)
+        lines.append(f"PWM_MAIN_DIS ({servo.name}): {pulse:.0f}")
+    return lines
 
 
 def drop_schedule(config, payload, tick_s=DROP_TICK_SEC):
@@ -140,6 +164,13 @@ def main(args=None):
     with open(mission_config_path(), 'r') as stream:
         mission = yaml.safe_load(stream)
     config = parse_payload_block(mission.get('payload'))
+
+    if action[0] == 'show':
+        # Pure config readout; needs no MAVROS.
+        print(f"config: {mission_config_path()}")
+        print('\n'.join(describe(config)))
+        rclpy.shutdown()
+        return
 
     node = ServoBench(config)
     try:

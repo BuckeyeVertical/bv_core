@@ -42,27 +42,33 @@ Deliver_tolerance: 1.0
 payload:
   enabled: false
 
-  # Positions are in degrees, as the Arduino test wrote them, and are stored
-  # as a zero plus offsets. Re-mounting a servo horn shifts every position of
-  # that servo equally, so re-zeroing means changing its zero_deg only.
+  # Each servo = one zero_deg (where the horn sits on the spline) plus fixed
+  # offsets (the mechanism's geometry, never change). After re-mounting a
+  # horn, measure its new zero with the bench tool and enter it here; every
+  # position of that servo moves with it (docs/HITL/payload.md).
   # Degrees -> pulse uses Arduino Servo.write()'s mapping, so the flight
   # controller emits the pulses that were tested on the bench.
   arduino_pulse_range_us: [544, 2400]   # AVR Servo library: 0-180 deg
 
   slider:
     actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
-    zero_deg: 130            # hold both payloads
-    beacon_offset_deg: -30   # 100 deg: drops the beacon (tent)
-    bottle_offset_deg: 40    # 170 deg: drops the bottle (person)
-    # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn on this output. PX4 caps MAX at
-    # 2200 us (~160 deg), so 170 deg fails the startup check until the bottle
-    # release is re-measured lower or MAX is raised on the FC.
+    # zero = the beacon release. 100 matches the horn as mounted for the
+    # Arduino test; RE-ZERO before flight (bottle at zero+70 must fit the range).
+    zero_deg: 100
+    beacon_offset_deg: 0     # drops the beacon (tent)
+    hold_offset_deg: 30      # holds both payloads
+    bottle_offset_deg: 70    # drops the bottle (person)
+    # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn on this output. 800-2200 us
+    # reaches ~25-160 deg, so zero_deg must be ~25-90 for zero+70 to fit;
+    # ~55-60 leaves margin on both sides. With zero 100 the bottle needs 170
+    # deg and mission_node refuses to start until the horn is re-zeroed.
     pwm_range_us: [800, 2200]
 
   brake:
     actuator_set: 2          # PWM_MAIN_FUNCn = 302 (Peripheral via Actuator Set 2)
-    zero_deg: 125            # rest
-    pulse_offset_deg: -18    # 107 deg: toggled against rest during a drop
+    zero_deg: 107            # zero = the pulse position
+    pulse_offset_deg: 0      # toggled against rest during a drop
+    rest_offset_deg: 18      # rest (125 deg with this zero)
     pwm_range_us: [800, 2200]
 
   # The brake toggles pulse <-> rest every toggle_ms; each phase lasts

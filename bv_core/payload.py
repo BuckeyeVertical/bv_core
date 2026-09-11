@@ -6,13 +6,16 @@ time t" and "what MAVLink command puts them there".
 
 The hardware, as tested with an Arduino before moving to the flight controller:
 
-    slider  holds both payloads at its zero; one side drops the beacon, the other
-            the bottle
-    brake   rests at its zero; during a drop it toggles between its pulse position
-            and rest, faster as the payload nears the ground
+    slider  holds both payloads in the middle; one side drops the beacon, the
+            other the bottle
+    brake   rests; during a drop it toggles between its pulse position and
+            rest, faster as the payload nears the ground
 
-Positions are configured in degrees, as zero + offset per servo, so re-mounting a
-servo horn means changing that servo's zero and nothing else.
+Positions are configured in degrees as one zero per servo plus a fixed offset
+for each position (slider: beacon 0, hold 30, bottle 70). The offsets are the
+mechanism's geometry and never change; the zero is wherever the horn happens to
+sit on the spline. Re-mounting a horn means measuring and entering its new zero,
+and it is also how the positions are moved into the flight controller's range.
 
 Degrees become a pulse width the way Arduino's Servo.write() does it, so the
 flight controller reproduces the pulses the team tested with. PX4 does not take a
@@ -83,25 +86,25 @@ class BrakePhase:
 class PayloadConfig:
     slider: ServoConfig
     brake: ServoConfig
-    release_offsets_deg: dict
-    brake_pulse_offset_deg: float
+    slider_offsets_deg: dict   # 'hold', 'beacon', 'bottle'
+    brake_offsets_deg: dict    # 'rest', 'pulse'
     arduino_pulse_range_us: tuple
     brake_phases: tuple
 
     @property
     def slider_hold_deg(self):
-        return self.slider.zero_deg
+        return self.slider.zero_deg + self.slider_offsets_deg['hold']
 
     def release_deg(self, payload):
-        return self.slider.zero_deg + self.release_offsets_deg[payload]
+        return self.slider.zero_deg + self.slider_offsets_deg[payload]
 
     @property
     def brake_rest_deg(self):
-        return self.brake.zero_deg
+        return self.brake.zero_deg + self.brake_offsets_deg['rest']
 
     @property
     def brake_pulse_deg(self):
-        return self.brake.zero_deg + self.brake_pulse_offset_deg
+        return self.brake.zero_deg + self.brake_offsets_deg['pulse']
 
     @property
     def total_duration_s(self):
@@ -156,8 +159,9 @@ def load_payload_config(mission_config):
         raise ValueError(
             "payload positions the flight controller cannot reach: "
             + "; ".join(problems)
-            + ". Change the offset/zero, or widen PWM_MAIN_MINn/MAXn on the "
-            "FC and pwm_range_us to match.")
+            + ". Re-mount the servo horn and enter its new zero_deg "
+            "(docs/HITL/payload.md), or widen PWM_MAIN_MINn/MAXn on the FC "
+            "and pwm_range_us to match.")
     return config
 
 
@@ -182,13 +186,14 @@ def parse_payload_block(block):
     config = PayloadConfig(
         slider=slider,
         brake=brake,
-        release_offsets_deg={
-            payload: _number(slider_block, f'{payload}_offset_deg',
-                             'payload.slider')
-            for payload in PAYLOADS
+        slider_offsets_deg={
+            name: _number(slider_block, f'{name}_offset_deg', 'payload.slider')
+            for name in ('hold', *PAYLOADS)
         },
-        brake_pulse_offset_deg=_number(
-            brake_block, 'pulse_offset_deg', 'payload.brake'),
+        brake_offsets_deg={
+            name: _number(brake_block, f'{name}_offset_deg', 'payload.brake')
+            for name in ('rest', 'pulse')
+        },
         arduino_pulse_range_us=arduino_range,
         brake_phases=_phases(block.get('brake_phases')),
     )

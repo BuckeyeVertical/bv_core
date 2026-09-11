@@ -3,7 +3,7 @@
 import pytest
 
 from bv_core.payload import parse_payload_block
-from bv_core.test_servo import drop_schedule, parse_args
+from bv_core.test_servo import describe, drop_schedule, parse_args
 
 from test_payload import _block
 
@@ -14,6 +14,7 @@ class TestParseArgs:
         assert parse_args(['brake', '107.5']) == ('servo', 'brake', 107.5)
 
     def test_rest_and_drop(self):
+        assert parse_args(['show']) == ('show',)
         assert parse_args(['rest']) == ('rest',)
         assert parse_args(['drop', 'bottle']) == ('drop', 'bottle')
         assert parse_args(['drop', 'beacon']) == ('drop', 'beacon')
@@ -25,6 +26,27 @@ class TestParseArgs:
     def test_bad_arguments_print_usage(self, argv):
         with pytest.raises(SystemExit, match='usage'):
             parse_args(argv)
+
+
+class TestShow:
+    def test_lists_positions_pulses_and_disarmed_values(self):
+        block = _block()['payload']
+        block['slider']['zero_deg'] = 58
+        block['slider']['pwm_range_us'] = [800, 2200]
+        text = '\n'.join(describe(parse_payload_block(block)))
+        assert 'slider hold' in text and '88 deg' in text
+        assert 'bottle release' in text and '128 deg' in text
+        # Disarmed pulses to enter on the FC: slider hold, brake rest.
+        assert 'PWM_MAIN_DIS (slider): 1451' in text
+        assert 'PWM_MAIN_DIS (brake): 1833' in text
+        assert 'OUT OF RANGE' not in text
+
+    def test_flags_unreachable_positions(self):
+        block = _block()['payload']
+        block['slider']['pwm_range_us'] = [800, 2200]
+        lines = describe(parse_payload_block(block))
+        flagged = [line for line in lines if 'OUT OF RANGE' in line]
+        assert len(flagged) == 1 and 'bottle' in flagged[0]
 
 
 class TestDropSchedule:

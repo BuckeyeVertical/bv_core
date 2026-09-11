@@ -3,11 +3,11 @@
 Each delivery drops one payload from the hover altitude (150 ft) with two servos
 on the flight controller:
 
-- The **slider** holds both payloads at its zero position. Moving it one way drops
-  the beacon (for the tent) and moving it the other way drops the bottle (for the
-  person).
-- The **brake** rests at its zero. During a drop it toggles between its pulse
-  position and rest, with shorter intervals as the payload gets closer to the ground.
+- The **slider** holds both payloads in its middle position. Moving it one way
+  drops the beacon (for the tent) and moving it the other way drops the bottle
+  (for the person).
+- The **brake** sits at rest. During a drop it toggles between its pulse position
+  and rest, with shorter intervals as the payload gets closer to the ground.
 
 `mission_node` runs the sequence in the DEPLOY state. The logic is in
 `bv_core/payload.py` and the values are in the `payload:` block of the mission
@@ -33,24 +33,27 @@ interrupts a drop, the brake goes to rest.
 At startup `mission_node` warns if the phase distances do not add up to the
 delivery altitude.
 
-## Positions: degrees, zero plus offset
+## Positions: one zero plus fixed offsets
 
-The degree values are the angles that were tested with Arduino `Servo.write()`.
-Each servo is configured as one zero plus offsets:
+Each servo is configured as a `zero_deg` plus a fixed offset for each position.
+The offsets come from the mechanism's geometry and never change. The zero depends
+on where the horn happens to sit on the servo spline.
 
 ```yaml
 slider:
-  zero_deg: 130          # hold
-  beacon_offset_deg: -30 # 100 deg
-  bottle_offset_deg: 40  # 170 deg
+  zero_deg: 100          # the beacon release, wherever the horn puts it
+  beacon_offset_deg: 0
+  hold_offset_deg: 30
+  bottle_offset_deg: 70
 brake:
-  zero_deg: 125          # rest
-  pulse_offset_deg: -18  # 107 deg
+  zero_deg: 107          # the pulse position
+  pulse_offset_deg: 0
+  rest_offset_deg: 18
 ```
 
-**Re-zeroing:** after you re-mount a servo horn, find its new hold or rest angle
-with the bench tool and change that servo's `zero_deg`. The offsets depend on the
-mechanism, so they stay the same.
+With a zero of 100, which is how the horn was mounted for the Arduino test, the
+slider positions are 100 / 130 / 170°. When the horn is re-mounted, you change
+only `zero_deg` and all three positions move together.
 
 ## Degrees to PWM
 
@@ -65,28 +68,40 @@ steps:
 2. µs to the -1..1 value uses `pwm_range_us`, which **must equal the flight
    controller's `PWM_MAIN_MINn` and `PWM_MAIN_MAXn`**.
 
-| Position | Degrees | Pulse |
-|---|---|---|
-| Slider hold | 130 | 1884 µs |
-| Beacon release | 100 | 1575 µs |
-| Bottle release | 170 | 2297 µs |
-| Brake rest | 125 | 1833 µs |
-| Brake pulse | 107 | 1647 µs |
-
 If a position is outside its servo's `pwm_range_us`, `mission_node` refuses to
 start and names the position. It does not clamp silently, because a clamped
 release can look fine on the ground and then fail to drop the payload in flight.
 
-> **The bottle release does not currently pass this check.** PX4 limits
-> `PWM_MAIN_MAX` to 2200 µs (about 160°), and 170° needs 2297 µs. Fix it one of two
-> ways:
-> - Use the bench tool to find the smallest angle that still drops the bottle, then
->   lower `bottle_offset_deg`.
-> - Raise `PWM_MAIN_MAXn` above 2200 from the PX4 console
->   (`param set PWM_MAIN_MAX5 2350`) and change `pwm_range_us` to match. The
->   firmware reads the value without clamping it and only QGroundControl enforces
->   2200, but this setting is outside PX4's documented range, so verify it on the
->   bench.
+PX4 limits `PWM_MAIN_MAX` to 2200 µs, so 800–2200 µs covers about **25–161°**.
+The slider needs 70° of travel, so its zero must be between about **25° and 90°**.
+A zero of about **58°** leaves the same margin on both ends (58 / 88 / 128°). With
+the Arduino mounting (zero 100) the bottle needs 170° = 2297 µs, which is out of
+range. The fix is to re-zero the slider.
+
+## Re-zeroing a servo
+
+Do this when you move a horn to a different spline tooth, or to bring the slider
+into range. Take the propellers off and allow bench control first (see
+[Bench testing](#bench-testing)).
+
+1. **Command the target zero.** For the slider:
+   `ros2 run bv_core test_servo slider 58`.
+2. **Re-seat the horn.** With the servo holding that angle, pull the horn off and
+   push it back on the tooth that puts the mechanism closest to its **beacon
+   release** position. Splines only allow steps of roughly 7–15°, so it will be
+   close but not exact.
+3. **Fine-tune.** Nudge the angle (`test_servo slider 56`, `test_servo slider 60`,
+   and so on) until the mechanism sits exactly at beacon release. **That angle is
+   the new `zero_deg`.**
+4. **Enter it** in `real_params.yaml`, then rebuild:
+   `colcon build --packages-select bv_core`.
+5. **Check** with `ros2 run bv_core test_servo show`. It prints every position with
+   its pulse and whether it is in range. Then run `test_servo rest` (the slider
+   should hold both payloads) and `test_servo drop bottle` / `drop beacon`.
+6. **Update the disarmed pulse** (`PWM_MAIN_DISs`) to the new hold pulse printed by
+   `test_servo show`.
+
+The brake is re-zeroed the same way, using its pulse position as the zero.
 
 ## Flight controller setup
 
@@ -98,13 +113,13 @@ output *b*. Use the outputs the servos are actually plugged into.
 | `PWM_MAIN_FUNCs` / `FUNCb` | 301 | 302 | Actuator Set 1 and 2. These must match `actuator_set`. |
 | `PWM_MAIN_MINs` / `MINb` | 800 | 800 | Must equal `pwm_range_us[0]`. |
 | `PWM_MAIN_MAXs` / `MAXb` | 2200 | 2200 | Must equal `pwm_range_us[1]`. |
-| `PWM_MAIN_DISs` / `DISb` | **1884** | **1833** | Pulse sent while disarmed: slider hold and brake rest. |
+| `PWM_MAIN_DISs` / `DISb` | slider **hold** pulse | brake **rest** pulse | Pulse sent while disarmed. Get both from `test_servo show`. They change whenever a zero changes. |
 
 **The disarmed pulse matters.** PX4 only sends commanded values to peripheral
 outputs while the vehicle is armed. While disarmed, including at power-up and after
 landing, each output sends its `PWM_MAIN_DISn` pulse. If that pulse is 0 (no
-signal), the slider goes limp and can drop a payload on the ground. If you re-zero
-a servo, recompute its disarmed pulse as `544 + zero_deg × 1856 / 180`.
+signal), the slider goes limp and can drop a payload on the ground. After any
+re-zero, set the disarmed pulses again from `test_servo show`.
 
 `mission_node` sends the hold and rest positions once at startup, before arming.
 PX4 stores them and applies them when the vehicle arms.
@@ -120,8 +135,9 @@ Remove the propellers. Then either arm the vehicle or set `COM_PREARM_MODE = 2`
 (Always) so peripheral outputs respond while disarmed. Start MAVROS and run:
 
 ```bash
+ros2 run bv_core test_servo show            # positions, pulses, range check, DIS values
 ros2 run bv_core test_servo rest            # slider hold + brake rest
-ros2 run bv_core test_servo slider 160      # try an angle
+ros2 run bv_core test_servo slider 58       # try an angle
 ros2 run bv_core test_servo brake 107
 ros2 run bv_core test_servo drop bottle     # full 10.76 s sequence (or: beacon)
 ```
@@ -135,4 +151,4 @@ afterwards.
 
 Set `payload.enabled: false` to fly without payload hardware. The drone still flies
 to each target and holds, but it sends no servo commands and skips the range check,
-and DEPLOY finishes immediately. `sim_params.yaml` ships with the payload disabled.
+and DEPLOY finishes immediately.

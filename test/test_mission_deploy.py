@@ -19,11 +19,11 @@ def payload_config():
     return load_payload_config({'payload': {
         'enabled': True,
         'arduino_pulse_range_us': [544, 2400],
-        'slider': {'actuator_set': 1, 'zero_deg': 130,
-                   'beacon_offset_deg': -30, 'bottle_offset_deg': 40,
-                   'pwm_range_us': [544, 2400]},
-        'brake': {'actuator_set': 2, 'zero_deg': 125,
-                  'pulse_offset_deg': -18, 'pwm_range_us': [544, 2400]},
+        'slider': {'actuator_set': 1, 'zero_deg': 100,
+                   'beacon_offset_deg': 0, 'hold_offset_deg': 30,
+                   'bottle_offset_deg': 70, 'pwm_range_us': [544, 2400]},
+        'brake': {'actuator_set': 2, 'zero_deg': 107, 'pulse_offset_deg': 0,
+                  'rest_offset_deg': 18, 'pwm_range_us': [544, 2400]},
         'brake_phases': [
             {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
             {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},

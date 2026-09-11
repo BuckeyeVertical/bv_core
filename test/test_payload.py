@@ -26,15 +26,17 @@ def _block(**overrides):
         'arduino_pulse_range_us': [544, 2400],
         'slider': {
             'actuator_set': 1,
-            'zero_deg': 130,
-            'beacon_offset_deg': -30,
-            'bottle_offset_deg': 40,
+            'zero_deg': 100,
+            'beacon_offset_deg': 0,
+            'hold_offset_deg': 30,
+            'bottle_offset_deg': 70,
             'pwm_range_us': [544, 2400],
         },
         'brake': {
             'actuator_set': 2,
-            'zero_deg': 125,
-            'pulse_offset_deg': -18,
+            'zero_deg': 107,
+            'pulse_offset_deg': 0,
+            'rest_offset_deg': 18,
             'pwm_range_us': [544, 2400],
         },
         'brake_phases': [
@@ -82,14 +84,24 @@ class TestLoading:
         assert cfg.brake_pulse_deg == 107
 
     def test_rezero_moves_every_position_of_that_servo(self):
+        # Re-mounting the horn so the beacon release sits at 58 deg keeps the
+        # 0/30/70 spacing and brings the bottle release inside PX4's range.
         block = _block()
-        block['payload']['slider']['zero_deg'] = 120
+        block['payload']['slider']['zero_deg'] = 58
+        block['payload']['slider']['pwm_range_us'] = [800, 2200]
         cfg = load_payload_config(block)
-        assert cfg.slider_hold_deg == 120
-        assert cfg.release_deg('beacon') == 90
-        assert cfg.release_deg('bottle') == 160
+        assert cfg.release_deg('beacon') == 58
+        assert cfg.slider_hold_deg == 88
+        assert cfg.release_deg('bottle') == 128
         # The brake keeps its own zero.
         assert cfg.brake_rest_deg == 125
+        assert cfg.brake_pulse_deg == 107
+
+    def test_old_schema_names_the_missing_offset(self):
+        block = _block()
+        del block['payload']['slider']['hold_offset_deg']
+        with pytest.raises(ValueError, match='hold_offset_deg'):
+            load_payload_config(block)
 
     def test_phase_durations_come_from_distance_over_speed(self):
         cfg = _config()
