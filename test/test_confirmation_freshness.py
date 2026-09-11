@@ -60,7 +60,6 @@ def test_confirmation_during_scan_upload_is_processed_when_route_is_ready():
         log=Mock(),
         set_flight_mode=Mock(),
         create_timer=Mock(side_effect=lambda *_args: Mock()),
-        reset_all_servos_to_default=Mock(),
         set_velocity=Mock(),
         desired_velocity=3.0,
         _localize_timer=None,

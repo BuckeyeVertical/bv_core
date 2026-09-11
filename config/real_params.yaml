@@ -35,9 +35,43 @@ Lap_tolerance: 45.0
 Scan_tolerance: 1.0
 Deliver_tolerance: 1.0
 
-Default_servo_pwms: [1500, 1500, 1500, 1500]
-Deliver_initial_pwms: [1600, 1600, 1600, 1600]
-Deliver_second_pwms: [1400, 1400, 1400, 1400]
+# ------------------------------------------------------------
+# PAYLOAD RELEASE (bv_core/payload.py, docs/HITL/payload.md)
+# ------------------------------------------------------------
+# Enabled for flight. Set false to fly without payload hardware.
+payload:
+  enabled: false
+
+  # Positions are in degrees, as the Arduino test wrote them, and are stored
+  # as a zero plus offsets. Re-mounting a servo horn shifts every position of
+  # that servo equally, so re-zeroing means changing its zero_deg only.
+  # Degrees -> pulse uses Arduino Servo.write()'s mapping, so the flight
+  # controller emits the pulses that were tested on the bench.
+  arduino_pulse_range_us: [544, 2400]   # AVR Servo library: 0-180 deg
+
+  slider:
+    actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
+    zero_deg: 130            # hold both payloads
+    beacon_offset_deg: -30   # 100 deg: drops the beacon (tent)
+    bottle_offset_deg: 40    # 170 deg: drops the bottle (person)
+    # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn on this output. PX4 caps MAX at
+    # 2200 us (~160 deg), so 170 deg fails the startup check until the bottle
+    # release is re-measured lower or MAX is raised on the FC.
+    pwm_range_us: [800, 2200]
+
+  brake:
+    actuator_set: 2          # PWM_MAIN_FUNCn = 302 (Peripheral via Actuator Set 2)
+    zero_deg: 125            # rest
+    pulse_offset_deg: -18    # 107 deg: toggled against rest during a drop
+    pwm_range_us: [800, 2200]
+
+  # The brake toggles pulse <-> rest every toggle_ms; each phase lasts
+  # drop_ft / speed_ftps seconds. The drops should sum to the delivery
+  # altitude (150 ft = 45.72 m); mission_node warns at startup if not.
+  brake_phases:
+    - {drop_ft: 75, speed_ftps: 15.0, toggle_ms: 200}   # 5.00 s
+    - {drop_ft: 50, speed_ftps: 13.3, toggle_ms: 150}   # 3.76 s
+    - {drop_ft: 25, speed_ftps: 12.5, toggle_ms: 100}   # 2.00 s
 
 Approval_required: true
 Approval_timeout_sec: 180.0

@@ -84,21 +84,12 @@ Deliver_tolerance: 1.0  # Tight - need accurate drop position
 
 
 
-# SERVO PWM CONFIGURATION
+# PAYLOAD RELEASE
 
-# PWM values for payload release servos (microseconds).
-# Each object uses a different servo channel (cycles 1-4).
-#
-# Sequence for each deploy:
-#   1. Initial PWM (extend/release)
-#   2. Second PWM (retract)
-#   3. Default PWM (idle/neutral)
-#
-# Values are per-servo: [CH1, CH2, CH3, CH4]
-
-Default_servo_pwms: [1500, 1500, 1500, 1500]    # Neutral position
-Deliver_initial_pwms: [1600, 1600, 1600, 1600]  # Release position
-Deliver_second_pwms: [1400, 1400, 1400, 1400]   # Retract position
+# Slider + brake servos, configured in real_params.yaml (see
+# docs/HITL/payload.md). Disabled here: DEPLOY skips the drop.
+payload:
+  enabled: false
 
 # MISSION LOGGING
 # Set to true to write detailed mission logs to bv_core/logs/

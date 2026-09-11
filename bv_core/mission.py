@@ -12,7 +12,7 @@ Each detected object triggers the sequence:
     1. Stop drone (LOITER)
     2. Localize object using camera intrinsics
     3. Fly to localized object
-    4. Deploy payload via servo sequence
+    4. Drop the payload: release slider + pulsed brake (see payload.py)
     5. Resume scanning from where we left off
 
 Stitching runs during RTL - the stitching node listens for "return" state.
@@ -50,9 +50,19 @@ from .mission_config import (
     select_takeoff_waypoint,
 )
 from .scan_plan import load_scan_plan
+from .payload import (
+    DropSequence,
+    actuator_params,
+    altitude_mismatch_warning,
+    degrees_to_us,
+    load_payload_config,
+    payload_for_class,
+)
 
 # Mission configuration
-DEPLOY_SERVO_CYCLE_TIME = 1.0    # Seconds per servo state during payload deploy
+# Drop sequence tick. The fastest brake toggle is 100 ms, so 20 ms keeps each
+# toggle within a fifth of its interval; the 0.5 s main timer is far too coarse.
+DEPLOY_TICK_SEC = 0.02
 CLASS_NAMES = ("person", "tent")
 
 
@@ -121,7 +131,11 @@ class MissionRunner(Node):
         
         # Wait for required services to become available
         self.wait_for_services()
-        
+
+        # Put the payload servos at hold/rest before arming. PX4 outputs a
+        # peripheral's disarmed PWM until armed, then this stored command.
+        self.send_payload_rest_positions()
+
         # Start the mission
         self.get_logger().info("=" * 50)
         self.get_logger().info("MISSION STARTING")
@@ -186,11 +200,20 @@ class MissionRunner(Node):
                 f"only exit from the localize state, so it cannot be disabled "
                 f"or set arbitrarily short")
 
-        # Servo PWM configuration for payload deployment
-        self.default_servo_pwms = config.get('Default_servo_pwms', [1500, 1500, 1500, 1500])
-        self.deploy_initial_pwms = config.get('Deliver_initial_pwms', [1600, 1600, 1600, 1600])
-        self.deploy_second_pwms = config.get('Deliver_second_pwms', [1400, 1400, 1400, 1400])
-        
+        # Payload release. None when payload.enabled is false. Raises on any
+        # position the flight controller's PWM range cannot reach, so a bad
+        # config stops the mission on the ground rather than at the drop.
+        self.payload = load_payload_config(config)
+        if self.payload is None:
+            self.get_logger().info(
+                "Payload DISABLED - DEPLOY will skip the drop")
+        else:
+            self._log_payload_config(self.payload)
+            warning = altitude_mismatch_warning(
+                self.payload, scan_plan.altitude_m)
+            if warning:
+                self.get_logger().warn(warning)
+
         # Required mission parameters
         if 'num_objects' not in config:
             raise ValueError("mission config is missing required key: num_objects")
@@ -254,9 +277,11 @@ class MissionRunner(Node):
         # Operator approval gate; None when flying fully autonomously
         self.approval_gate = None
 
-        # Deploy state machine
-        self.deploy_servo_state = 0  # 0=extend, 1=retract, 2=idle
-        self.deploy_state_start_time = 0.0
+        # Active payload drop; None outside DEPLOY
+        self._drop_sequence = None
+        self._drop_started = 0.0
+        self._drop_last_sent = None
+        self._deploy_timer = None
         
         # Home position (set by GPS)
         self.home_lat = None
@@ -757,13 +782,15 @@ class MissionRunner(Node):
 
     def enter_deploy_state(self):
         """
-        Execute the servo sequence to release the payload.
-        Controlled by timer, not waypoints.
+        Drop the payload for this target while holding over it.
+
+        Runs the slider + brake sequence from payload.py on its own fast timer;
+        on_deploy_complete resumes the scan once the sequence ends.
         """
         self.current_state = STATE_DEPLOY
         self.publish_mission_state()
         self.is_transitioning = False  # No waypoint transition for deploy
-        
+
         self.get_logger().info("-" * 40)
         self.get_logger().info("ENTERING STATE: DEPLOY")
         self.get_logger().info(
@@ -772,12 +799,79 @@ class MissionRunner(Node):
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', 'deliver -> deploy')
 
-        # Initialize servo state machine
-        self.deploy_servo_state = 0
-        self.deploy_state_start_time = time.monotonic()
-        
-        # Execute first servo step immediately
-        self.execute_deploy_servo_step()
+        if self.payload is None:
+            self.get_logger().info("Payload disabled - skipping drop")
+            self.log.event('DEPLOY_SKIPPED', 'reason=payload_disabled')
+            self.on_deploy_complete()
+            return
+
+        payload = payload_for_class(self.current_target_class_id)
+        if payload is None:
+            # Guessing would drop the wrong object on the wrong target.
+            self.get_logger().error(
+                f"No payload for class {self.current_target_class_id} - "
+                f"skipping drop")
+            self.log.event(
+                'DEPLOY_SKIPPED',
+                f"reason=unknown_class, class={self.current_target_class_id}")
+            self.on_deploy_complete()
+            return
+
+        self._drop_sequence = DropSequence(self.payload, payload)
+        self._drop_started = time.monotonic()
+        self._drop_last_sent = None
+        self.get_logger().info(
+            f"[DEPLOY] dropping {payload}: slider -> "
+            f"{self._drop_sequence.slider_deg:g} deg, brake pulsing for "
+            f"{self.payload.total_duration_s:.2f}s")
+        self.log.event(
+            'DEPLOY_START',
+            f"payload={payload}, slider_deg={self._drop_sequence.slider_deg:g}, "
+            f"duration={self.payload.total_duration_s:.2f}s")
+
+        # First command now; the timer takes it from there.
+        self._on_deploy_tick()
+        if self._drop_sequence is not None:
+            self._deploy_timer = self.create_timer(
+                DEPLOY_TICK_SEC, self._on_deploy_tick)
+
+    def _on_deploy_tick(self):
+        """Advance the drop: command any change, finish when it ends.
+
+        Timing follows the clock, never command replies: a slow or failed
+        command is logged by on_payload_command_complete, but the drop always
+        ends on schedule and the mission moves on.
+        """
+        sequence = self._drop_sequence
+        if sequence is None:
+            return
+        if self.current_state != STATE_DEPLOY:
+            # RTL or another interruption already took over.
+            self._stop_drop()
+            return
+
+        slider_deg, brake_deg, done = sequence.positions_at(
+            time.monotonic() - self._drop_started)
+        if (slider_deg, brake_deg) != self._drop_last_sent:
+            # Always both servos: every brake toggle re-asserts the release,
+            # so one lost packet cannot leave the payload held.
+            self.send_payload_actuators(slider_deg, brake_deg)
+            self._drop_last_sent = (slider_deg, brake_deg)
+
+        if done:
+            self._stop_drop()
+            self.get_logger().info("[DEPLOY] drop sequence complete")
+            self.log.event('DEPLOY_DONE', f"payload={sequence.payload}")
+            self.on_deploy_complete()
+
+    def _stop_drop(self):
+        """Cancel the drop timer and forget the active sequence."""
+        self._drop_sequence = None
+        timer = self._deploy_timer
+        self._deploy_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
 
     def enter_rtl_state(self, command_mode=True):
         """
@@ -785,6 +879,12 @@ class MissionRunner(Node):
         """
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
+
+        # Interrupted mid-drop: stop pulsing and leave the brake at rest.
+        if getattr(self, '_drop_sequence', None) is not None:
+            self._stop_drop()
+            self.send_payload_actuators(brake_deg=self.payload.brake_rest_deg)
+            self.log.event('DEPLOY_ABORTED', 'reason=rtl')
 
         for name in ('_localize_timer', '_localize_retry_timer',
                      '_localization_timeout_timer', '_velocity_delay_timer'):
@@ -912,42 +1012,57 @@ class MissionRunner(Node):
         future = self.param_set_client.call_async(request)
         future.add_done_callback(self.on_velocity_set_complete)
 
-    def set_servo_pwm(self, servo_channel, pwm_value):
+    def send_payload_actuators(self, slider_deg=None, brake_deg=None):
         """
-        Set a servo's PWM value by adjusting its MIN/MAX parameters.
-        
-        Args:
-            servo_channel: Servo channel number (1-4)
-            pwm_value: PWM value in microseconds
-        """
-        min_param = f'PWM_MAIN_MIN{servo_channel}'
-        max_param = f'PWM_MAIN_MAX{servo_channel}'
-        
-        # Set min parameter
-        req_min = ParamSetV2.Request()
-        req_min.force_set = False
-        req_min.param_id = min_param
-        pv_min = ParameterValue()
-        pv_min.type = ParameterType.PARAMETER_INTEGER
-        pv_min.integer_value = pwm_value - 1
-        req_min.value = pv_min
-        
-        # Set max parameter
-        req_max = ParamSetV2.Request()
-        req_max.force_set = False
-        req_max.param_id = max_param
-        pv_max = ParameterValue()
-        pv_max.type = ParameterType.PARAMETER_INTEGER
-        pv_max.integer_value = pwm_value + 1
-        req_max.value = pv_max
-        
-        #self.param_set_client.call_async(req_min)
-        #self.param_set_client.call_async(req_max)
+        Command the payload servos through PX4's MAV_CMD_DO_SET_ACTUATOR.
 
-    def reset_all_servos_to_default(self):
-        """Reset all servos to their default PWM positions."""
-        for channel, pwm in enumerate(self.default_servo_pwms, start=1):
-            self.set_servo_pwm(channel, pwm)
+        Positions are degrees (see payload.py for the conversion); a servo
+        left as None is not changed.
+
+        Sent as a broadcast so MAVROS does not wait for an ACK. MAVROS refuses
+        a command while the previous one of the same type awaits its ACK (up
+        to a 5 s timeout), so one lost ACK would otherwise freeze the brake
+        mid-drop. PX4 accepts broadcast commands (target 0/0).
+        """
+        command, params = actuator_params(self.payload, slider_deg, brake_deg)
+        request = CommandLong.Request()
+        request.broadcast = True
+        request.command = command
+        request.confirmation = 0
+        (request.param1, request.param2, request.param3, request.param4,
+         request.param5, request.param6, request.param7) = params
+        future = self.command_client.call_async(request)
+        future.add_done_callback(self.on_payload_command_complete)
+
+    def send_payload_rest_positions(self):
+        """Slider to hold, brake to rest. No-op with the payload disabled."""
+        if self.payload is None:
+            return
+        self.send_payload_actuators(
+            self.payload.slider_hold_deg, self.payload.brake_rest_deg)
+
+    def on_payload_command_complete(self, future):
+        """Log a payload command MAVROS could not send. Never raises."""
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001 - a callback must not raise
+            self.get_logger().warn(f"Payload servo command failed: {exc!r}")
+            return
+        if not response.success:
+            self.get_logger().warn(
+                f"Payload servo command rejected (result={response.result})")
+
+    def _log_payload_config(self, payload):
+        """Log every servo position with the pulse it becomes."""
+        self.get_logger().info(
+            f"Payload ENABLED: slider=actuator set "
+            f"{payload.slider.actuator_set}, brake=actuator set "
+            f"{payload.brake.actuator_set}, drop={payload.drop_ft:g}ft over "
+            f"{payload.total_duration_s:.2f}s")
+        for servo, label, degrees in payload.positions():
+            pulse = degrees_to_us(degrees, payload.arduino_pulse_range_us)
+            self.get_logger().info(
+                f"  {servo.name} {label}: {degrees:g} deg = {pulse:.0f} us")
 
     def request_localization_from_vision(self):
         """Request object localization from vision node."""
@@ -1013,38 +1128,7 @@ class MissionRunner(Node):
         self.confirmed_detection_coords = None
         self._resume_scan_in_place('localization_timeout')
 
-    # Deploy servo logic
-    def execute_deploy_servo_step(self):
-        """
-        Execute the current step in the servo deploy sequence.
-        Uses the servo channel corresponding to the current object number.
-        """
-        # Determine which servo to use based on object count (cycles 1-4)
-        servo_index = self.objects_delivered_count % 4
-        servo_channel = servo_index + 1
-        
-        initial_pwm = self.deploy_initial_pwms[servo_index]
-        second_pwm = self.deploy_second_pwms[servo_index]
-        default_pwm = self.default_servo_pwms[servo_index]
-        
-        if self.deploy_servo_state == 0:
-            # Extend
-            self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {initial_pwm} (extend)")
-            self.set_servo_pwm(servo_channel, initial_pwm)
-            self.log.event('DEPLOY_SERVO', f"step=extend, ch={servo_channel}, pwm={initial_pwm}")
-
-        elif self.deploy_servo_state == 1:
-            # Retract
-            self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {second_pwm} (retract)")
-            self.set_servo_pwm(servo_channel, second_pwm)
-            self.log.event('DEPLOY_SERVO', f"step=retract, ch={servo_channel}, pwm={second_pwm}")
-
-        elif self.deploy_servo_state == 2:
-            # Return to idle
-            self.get_logger().info(f"[DEPLOY] CH{servo_channel} <- {default_pwm} (idle)")
-            self.set_servo_pwm(servo_channel, default_pwm)
-            self.log.event('DEPLOY_SERVO', f"step=idle, ch={servo_channel}, pwm={default_pwm}")
-
+    # Deploy completion
     def on_deploy_complete(self):
         """Called when the servo deploy sequence finishes."""
         if self.current_target_coords is not None:
@@ -1184,8 +1268,7 @@ class MissionRunner(Node):
         self.in_auto_mission = True
         self.is_transitioning = False
         
-        # Reset servos and set velocity (delay velocity set to let mode change settle)
-        self.reset_all_servos_to_default()
+        # Set velocity (delayed to let the mode change settle)
         def set_velocity_once():
             if self.current_state == STATE_RTL:
                 return
@@ -1573,25 +1656,9 @@ class MissionRunner(Node):
     def main_timer_callback(self):
         """
         Main timer callback - runs every 0.5 seconds.
-        Handles state publishing and deploy servo timing.
+        Publishes state; the payload drop runs on its own DEPLOY_TICK_SEC timer.
         """
-        # Always publish current state
         self.publish_mission_state()
-        
-        # Handle deploy servo timing
-        if self.current_state == STATE_DEPLOY:
-            elapsed = time.monotonic() - self.deploy_state_start_time
-            
-            if elapsed >= DEPLOY_SERVO_CYCLE_TIME:
-                # Advance to next servo state
-                self.deploy_servo_state += 1
-                self.deploy_state_start_time = time.monotonic()
-                
-                if self.deploy_servo_state > 2:
-                    # Deploy sequence complete
-                    self.on_deploy_complete()
-                else:
-                    self.execute_deploy_servo_step()
 
 
 # Main entry point

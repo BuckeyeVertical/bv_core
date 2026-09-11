@@ -14,6 +14,10 @@ pkill -u "$USER" -f '/\.vscode-server/'
 
 `mission.launch.py` arms the aircraft automatically. Before starting it:
 
+- Confirm the payload servos are set up and bench-tested per
+  [payload.md](payload.md), including their disarmed PWM (slider hold, brake rest).
+  `mission_node` refuses to start if a payload position is out of PWM range.
+
 - Clear the aircraft and propeller area.
 - Confirm the Herelink is connected and its Loiter/RTL controls work.
 - Confirm PX4 reports no battery, GPS, EKF, or other preflight failures.

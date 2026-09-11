@@ -57,7 +57,7 @@ High-level services (“microservices”) and data flow:
 	- Publishes: `/mission_state` (std_msgs/String), `/deployed_object_locations` (bv_msgs/ObjectLocations)
 	- Subscribes: `/mavros/mission/reached` (mavros_msgs/WaypointReached), `/mavros/state` (mavros_msgs/State), `/mavros/global_position/global` (NavSatFix), `/global_obj_dets` (bv_msgs/ConfirmedDetection)
 	- Calls services: `/mavros/mission/push` (WaypointPush), `/mavros/cmd/arming` (CommandBool), `/mavros/set_mode` (SetMode), `/mavros/cmd/command` (CommandLong), `/mavros/param/set` (ParamSetV2), `localize_object` (bv_msgs/srv/LocalizeObject) on vision_node
-	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, controls servos via PX4 PWM params. On confirmed detections from `/global_obj_dets`, calls `localize_object` to get GPS, then flies to object and deploys payload.
+	- Role: Mission FSM (takeoff → lap → scan → localize → deliver → deploy → return). Pushes waypoints from `config/mission_params.yaml`, tunes speed via `MPC_XY_VEL_ALL`, drops payloads with the slider + brake servo sequence via `MAV_CMD_DO_SET_ACTUATOR` (see `docs/HITL/payload.md`). On confirmed detections from `/global_obj_dets`, calls `localize_object` to get GPS, then flies to object and deploys payload.
 
 - **vision_node** (bv_core.vision_node.VisionNode)
 	- Publishes: `/obj_dets` (bv_msgs/ObjectDetections), `/queue_state` (std_msgs/Int8)
@@ -86,7 +86,7 @@ Launch file: `launch/mission.launch.py` starts mission_node, vision_node, filter
 
 - **camera_pipeline_test_node** — Publishes `/image_raw` (sensor_msgs/Image) from a GStreamer pipeline for debugging; not part of the main mission flow.
 - **test_obj_loc** — Provides `get_object_locations` (bv_msgs/srv/GetObjectLocations) with canned locations from `config/test_obj_loc.yaml`; legacy/test only, not used by mission_node (mission uses `localize_object` on vision_node).
-- **test_servo** — Calls `/mavros/cmd/command` (CommandLong CMD_DO_SET_SERVO) for quick servo PWM tests.
+- **test_servo** — Bench tool for the payload servos in config degrees: `test_servo slider 130`, `test_servo rest`, `test_servo drop bottle`. See `docs/HITL/payload.md`.
 - **gimbal_stabilizer_node** — Simulation-only helper: uses Gazebo transport (IMU → gimbal roll/pitch commands), no ROS 2 topics; run manually if needed for SITL gimbal stabilization.
 
 ### Operating modes overview
@@ -594,9 +594,9 @@ Stitching node test (captures at waypoints during stitching):
 ros2 run bv_core stitching_node
 ```
 
-Servo test:
+Servo test (see `docs/HITL/payload.md` for flight controller setup):
 ```bash
-ros2 run bv_core test_servo
+ros2 run bv_core test_servo rest
 ```
 
 Recording helper launch (edit topics/args as needed):

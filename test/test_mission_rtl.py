@@ -13,7 +13,7 @@ def mission(state='localize'):
         is_transitioning=True, approval_gate=Mock(), log=Mock(),
         get_logger=Mock(return_value=Mock()), publish_mission_state=Mock(),
         set_flight_mode=Mock(), destroy_timer=Mock(), arm_vehicle=Mock(),
-        reset_all_servos_to_default=Mock(), set_velocity=Mock(),
+        set_velocity=Mock(),
         create_timer=Mock(return_value=Mock()), desired_velocity=3.0,
         rtl_velocity=5.0,
         last_waypoint_reached=None, expected_final_waypoint_index=0,
@@ -83,7 +83,6 @@ class TestMissionRTL(unittest.TestCase):
         node.set_flight_mode.assert_not_called()
         node.arm_vehicle.assert_not_called()
         node.enter_deliver_state.assert_not_called()
-        node.reset_all_servos_to_default.assert_not_called()
 
     def test_failed_rtl_mode_request_is_still_logged(self):
         node = mission('return')
@@ -106,7 +105,6 @@ class TestMissionRTL(unittest.TestCase):
         node.set_flight_mode.assert_called_once_with('AUTO.MISSION')
         node.on_set_mode_complete(Mock(result=lambda: SimpleNamespace(mode_sent=True)))
         self.assertFalse(node.is_transitioning)
-        node.reset_all_servos_to_default.assert_called_once()
         node.create_timer.call_args.args[1]()
         node.set_velocity.assert_called_once_with(3.0)
 
@@ -119,7 +117,6 @@ class TestMissionRTL(unittest.TestCase):
         )
 
         self.assertTrue(node.is_transitioning)
-        node.reset_all_servos_to_default.assert_not_called()
         node.create_timer.assert_not_called()
 
     def test_set_flight_mode_forwards_requested_mode_to_callback(self):
