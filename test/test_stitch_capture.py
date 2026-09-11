@@ -25,48 +25,49 @@ def offset_from_anchor(along_m, cross_m=0.0):
 CROSS_LIMIT_M = 40.0
 
 
-def test_first_frame_is_captured_at_row_start():
+def test_first_frame_is_captured_half_a_spacing_into_row():
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(2, ANCHOR, ENDPOINT)
 
-    capture = scheduler.consider(ANCHOR, frame_id=1)
+    assert scheduler.consider(ANCHOR, frame_id=1) is None
+    capture = scheduler.consider(east_of_anchor(20.0), frame_id=2)
 
     assert capture.row == 2
     assert capture.column == 1
     assert capture.kind == "start"
-    assert capture.target_m == 0.0
+    assert capture.target_m == pytest.approx(20.0)
 
 
 def test_frames_are_selected_at_fixed_distance_targets():
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
 
-    assert scheduler.consider(ANCHOR, frame_id=1) is not None
-    assert scheduler.consider(east_of_anchor(39.0), frame_id=2) is None
-    capture = scheduler.consider(east_of_anchor(40.5), frame_id=3)
+    assert scheduler.consider(ANCHOR, frame_id=1) is None
+    assert scheduler.consider(east_of_anchor(19.0), frame_id=2) is None
+    capture = scheduler.consider(east_of_anchor(20.5), frame_id=3)
 
-    assert capture.column == 2
-    assert capture.kind == "spacing"
-    assert capture.target_m == pytest.approx(40.0)
-    assert capture.distance_m == pytest.approx(40.5, abs=0.1)
+    assert capture.column == 1
+    assert capture.kind == "start"
+    assert capture.target_m == pytest.approx(20.0)
+    assert capture.distance_m == pytest.approx(20.5, abs=0.1)
 
 
 def test_missed_targets_do_not_duplicate_one_camera_frame():
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
     capture = scheduler.consider(east_of_anchor(125.0), frame_id=2)
 
     assert capture.column == 2
-    assert capture.skipped_targets == 2
+    assert capture.skipped_targets == 1
     assert scheduler.consider(east_of_anchor(130.0), frame_id=3) is None
 
 
 def test_endpoint_frame_is_captured_once():
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
     capture = scheduler.consider(ENDPOINT, frame_id=2)
 
@@ -78,7 +79,7 @@ def test_endpoint_frame_is_captured_once():
 def test_waypoint_completion_uses_latest_frame_for_endpoint():
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
     capture = scheduler.finish_row(east_of_anchor(165.0), frame_id=2)
 
@@ -99,27 +100,27 @@ def test_off_row_frame_does_not_consume_the_capture_target():
     """The correct frame at this distance must still be captured on return."""
     scheduler = StitchCaptureScheduler(40.0, max_cross_track_m=CROSS_LIMIT_M)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
-    # Flown 60 m off the row toward a delivery target, projecting past 40 m.
-    assert scheduler.consider(offset_from_anchor(45.0, -60.0), frame_id=2) is None
+    # Flown 60 m off the row toward a delivery target, projecting past 60 m.
+    assert scheduler.consider(offset_from_anchor(65.0, -60.0), frame_id=2) is None
 
-    capture = scheduler.consider(offset_from_anchor(45.0), frame_id=3)
+    capture = scheduler.consider(offset_from_anchor(65.0), frame_id=3)
 
     assert capture.column == 2
-    assert capture.target_m == pytest.approx(40.0)
+    assert capture.target_m == pytest.approx(60.0)
 
 
 def test_off_row_frame_past_the_endpoint_does_not_end_the_row():
     """The worst case: a target whose projection runs past the row end."""
     scheduler = StitchCaptureScheduler(40.0, max_cross_track_m=CROSS_LIMIT_M)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
     assert scheduler.consider(offset_from_anchor(250.0, -80.0), frame_id=2) is None
     assert scheduler.active is True
 
-    assert scheduler.consider(offset_from_anchor(45.0), frame_id=3).column == 2
+    assert scheduler.consider(offset_from_anchor(65.0), frame_id=3).column == 2
 
 
 def test_ordinary_tracking_drift_is_still_captured():
@@ -127,7 +128,7 @@ def test_ordinary_tracking_drift_is_still_captured():
     scheduler = StitchCaptureScheduler(40.0, max_cross_track_m=CROSS_LIMIT_M)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
 
-    capture = scheduler.consider(offset_from_anchor(0.0, 8.0), frame_id=1)
+    capture = scheduler.consider(offset_from_anchor(20.0, 8.0), frame_id=1)
 
     assert capture is not None
     assert capture.kind == "start"
@@ -154,16 +155,16 @@ def test_row_resumes_on_target_after_a_delivery_deviation():
     for along in range(0, 81, 5):               # row up to the detection
         fly(along)
     for step in range(11):                      # out to a target off the row
-        fly(80.0 + 7.0 * step, -10.0 * step)
+        fly(80.0 + 7.0 * step, -20.0 * step)
     for step in range(10, -1, -1):              # and back to the loiter point
-        fly(80.0 + 7.0 * step, -10.0 * step)
+        fly(80.0 + 7.0 * step, -20.0 * step)
     for along in range(80, 171, 5):             # resume the row
         fly(along)
 
     assert [c.target_m for c, _ in captured] == pytest.approx(
-        [0.0, 40.0, 80.0, 120.0, 160.0])
-    assert [c.column for c, _ in captured] == [1, 2, 3, 4, 5]
-    assert [cross for _, cross in captured] == [0.0] * 5
+        [20.0, 60.0, 100.0, 140.0])
+    assert [c.column for c, _ in captured] == [1, 2, 3, 4]
+    assert [cross for _, cross in captured] == [0.0] * 4
     assert scheduler.active is True
 
 
@@ -171,19 +172,19 @@ def test_without_a_limit_an_off_row_frame_is_captured():
     """Regression guard: this is the behaviour the limit exists to prevent."""
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
-    capture = scheduler.consider(offset_from_anchor(45.0, -60.0), frame_id=2)
+    capture = scheduler.consider(offset_from_anchor(65.0, -60.0), frame_id=2)
 
     assert capture is not None
-    assert capture.target_m == pytest.approx(40.0)
+    assert capture.target_m == pytest.approx(60.0)
 
 
 def test_cancel_row_deactivates_without_capturing():
     """Where vision_node lands when a pause left it no frame for the endpoint."""
     scheduler = StitchCaptureScheduler(40.0)
     scheduler.start_row(1, ANCHOR, ENDPOINT)
-    scheduler.consider(ANCHOR, frame_id=1)
+    scheduler.consider(east_of_anchor(20.0), frame_id=1)
 
     scheduler.cancel_row()
 

@@ -164,6 +164,8 @@ class MissionRunner(Node):
         self.scan_transit_velocity = config.get(
             'Scan_transit_velocity', self.lap_velocity)
         self.scan_velocity = config.get('Scan_velocity', 2.5)
+        self.takeoff_velocity = config.get(
+            'Takeoff_velocity', self.scan_velocity)
         self.deliver_velocity = config.get('Deliver_velocity', 5.0)
         self.rtl_velocity = config.get('RTL_velocity', self.scan_velocity)
         
@@ -502,7 +504,7 @@ class MissionRunner(Node):
         self.current_state = STATE_TAKEOFF
         self.is_transitioning = True
         self.desired_velocity = (
-            self.lap_velocity if self.lap_waypoints else self.scan_velocity)
+            self.lap_velocity if self.lap_waypoints else self.takeoff_velocity)
         
         # Reset waypoint tracking for new state
         self.last_waypoint_reached = None

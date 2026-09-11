@@ -20,14 +20,25 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
+from .mission_config import package_source_dir
+
+
+def normalize_row_orientation(images, row_num):
+    """Rotate reverse-direction snake rows to match the first row."""
+    if row_num % 2 == 0:
+        return [cv2.rotate(image, cv2.ROTATE_180) for image in images]
+    return images
+
 
 class StitchingNode(Node):
     def __init__(self):
         super().__init__('stitching_node')
 
         # configurable settings with defaults
-        self.declare_parameter('input_dir', 'raw_frames')
-        self.declare_parameter('output_dir', 'stitching_results')
+        data_dir = package_source_dir()
+        self.declare_parameter('input_dir', os.path.join(data_dir, 'raw_frames'))
+        self.declare_parameter(
+            'output_dir', os.path.join(data_dir, 'stitching_results'))
         self.declare_parameter('max_width', 1500)
         self.declare_parameter('max_images_per_row', 50)
         self.declare_parameter('save_intermediate_rows', False)
@@ -36,6 +47,7 @@ class StitchingNode(Node):
         self.declare_parameter('gap_width', 50)
         self.declare_parameter('save_failed_frames', True)
         self._has_stitched = False # stops from stitching on every return publish
+        self._stitch_timer = None
 
 
         # subscribe to mission_state
@@ -56,16 +68,25 @@ class StitchingNode(Node):
     def mission_state_callback(self, msg):
         if msg.data == "return" and not self._has_stitched:
             self._has_stitched = True
-            self.get_logger().info("Mission state is 'return'. Starting stitch...")
-        
-            try:
-                success, message = self._perform_stitching()
-                if success:
-                    self.get_logger().info(f"Stitching complete: {message}")
-                else:
-                    self.get_logger().error(f"Stitching failed: {message}")
-            except Exception as e:
-                self.get_logger().error(f"Unexpected error: {e}")
+            self.get_logger().info(
+                "Mission state is 'return'. Starting stitch in 100 ms...")
+            self._stitch_timer = self.create_timer(0.1, self._start_stitching)
+
+    def _start_stitching(self):
+        timer = self._stitch_timer
+        self._stitch_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+        try:
+            success, message = self._perform_stitching()
+            if success:
+                self.get_logger().info(f"Stitching complete: {message}")
+            else:
+                self.get_logger().error(f"Stitching failed: {message}")
+        except Exception as e:
+            self.get_logger().error(f"Unexpected error: {e}")
 
     def _log_hardware_info(self):
         try:
@@ -540,7 +561,7 @@ class StitchingNode(Node):
         )
 
         # move files to temp just incase images get added. prevents random errors
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now().strftime("%m%d_%H%M")
         work_dir = os.path.join(input_dir, f".work_{timestamp}")
 
         try:
@@ -591,6 +612,11 @@ class StitchingNode(Node):
             if len(images) < 1:
                 failed_rows.append((row_num, "No valid images loaded"))
                 continue
+
+            images = normalize_row_orientation(images, row_num)
+            if row_num % 2 == 0:
+                self.get_logger().info(
+                    f"Row {row_num}: Rotated 180 degrees for snake alignment")
 
             success, result, metadata = self._stitch_row_with_fallback(
                 images, label=f"Row {row_num}"

@@ -31,6 +31,7 @@ scan_boundary:
 
 Lap_velocity: 20.0
 Scan_transit_velocity: 20.0
+Takeoff_velocity: 15.0
 Scan_velocity: 3.0
 Deliver_velocity: 3.0
 RTL_velocity: 20.0

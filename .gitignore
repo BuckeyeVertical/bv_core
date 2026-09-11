@@ -72,3 +72,4 @@ bv_core/.DS_Store
 
 *.pt
 .codex
+/raw_frames

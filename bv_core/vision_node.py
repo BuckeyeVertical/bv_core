@@ -52,7 +52,7 @@ from .detection_crop import CropConfig, build_annotated_crop
 from .detection_thresholds import load_thresholds, filter_detections
 from .localizer import Localizer
 from .mission_logger import MissionLogger
-from .mission_config import mission_config_path
+from .mission_config import mission_config_path, package_source_dir
 from .preview_stream import PreviewConfig, PreviewStream, pin_libgcc_unwinder
 from .stitch_geometry import distance_m
 from .scan_plan import load_scan_plan
@@ -171,7 +171,8 @@ class VisionNode(Node):
         self._start_worker_threads()
         # Index retained for legacy image naming conventions.
         self.frame_number = 1
-        os.makedirs("raw_frames", exist_ok=True)
+        self.raw_frames_dir = os.path.join(package_source_dir(), 'raw_frames')
+        os.makedirs(self.raw_frames_dir, exist_ok=True)
 
     def _load_config(self):
         """Load configuration from vision_params.yaml."""
@@ -283,7 +284,7 @@ class VisionNode(Node):
 
     def _clear_raw_frames_dir(self):
         """Delete all files in raw_frames/ at first SCAN entry per mission."""
-        raw_dir = "raw_frames"
+        raw_dir = self.raw_frames_dir
         if not os.path.isdir(raw_dir):
             os.makedirs(raw_dir, exist_ok=True)
             return
@@ -984,7 +985,9 @@ class VisionNode(Node):
             self._queue_stitch_capture(frame, capture)
 
     def _queue_stitch_capture(self, frame, capture):
-        path = f"raw_frames/row{capture.row}_{capture.column}.jpg"
+        path = os.path.join(
+            self.raw_frames_dir,
+            f"row{capture.row}_{capture.column}.jpg")
         try:
             self.stitch_write_queue.put_nowait((path, frame.copy(), capture))
         except queue.Full:

@@ -37,7 +37,7 @@ class StitchCaptureScheduler:
         self._endpoint = None
         self._row = 0
         self._column = 1
-        self._next_target_m = 0.0
+        self._next_target_m = self.spacing_m / 2.0
         self._row_length_m = 0.0
         self._last_frame_id = None
 
@@ -47,7 +47,9 @@ class StitchCaptureScheduler:
         self._endpoint = endpoint
         self._row = row
         self._column = 1
-        self._next_target_m = 0.0
+        # Let the aircraft finish turning onto the row before the first image.
+        # Half a spacing remains inside the overlap provided by the footprint.
+        self._next_target_m = self.spacing_m / 2.0
         self._row_length_m = distance_m(anchor, endpoint)
         self._last_frame_id = None
 
@@ -96,7 +98,7 @@ class StitchCaptureScheduler:
             frame_id,
             target_m,
             progress_m,
-            "start" if target_m == 0.0 else "spacing",
+            "start" if self._column == 1 else "spacing",
             skipped_targets,
         )
 

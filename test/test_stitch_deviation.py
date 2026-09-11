@@ -90,6 +90,7 @@ class StitchHarness(VisionNode):
         self.latest_wp = None
         self.frame_number = 1
         self.gps_buffer = deque(maxlen=200)
+        self.raw_frames_dir = 'raw_frames'
         self.raw_frames_cleared = True      # keep the filesystem out of it
         self.pipeline_calls = []
         self.detector = _StubDetector()
@@ -178,7 +179,7 @@ def test_transit_to_the_region_captures_nothing(ros):
         # The row only opens once the first scan waypoint is actually reached.
         harness.goto(0.0)
         harness.reach(0)
-        harness.fly(0.0)
+        harness.fly(SPACING_M / 2.0)
 
         assert [c.column for _p, c in harness.written()] == [1]
     finally:
@@ -234,7 +235,7 @@ def test_transit_to_scan_starts_first_stitch_row_without_waypoint_replay(ros):
 
         assert harness.curr_wp == 0
         assert harness.stitch_capture.active is True
-        harness.fly(0.0)
+        harness.fly(SPACING_M / 2.0)
         assert [c.column for _p, c in harness.written()] == [1]
     finally:
         Node.destroy_node(harness)
@@ -335,9 +336,9 @@ def test_reaching_the_loiter_point_resumes_the_same_row(node):
     # are absolute distances from the original anchor — the pause did not
     # shift the row's frame of reference.
     assert [c.column for _p, c in before] == [1, 2]
-    assert [c.column for _p, c in after] == [3, 4]
+    assert [c.column for _p, c in after] == [3]
     assert [c.target_m for _p, c in after] == pytest.approx(
-        [SPACING_M * 2, SPACING_M * 3])
+        [SPACING_M * 2.5])
 
 
 def test_localization_to_scan_resumes_the_same_row_in_place(node):
@@ -354,7 +355,7 @@ def test_localization_to_scan_resumes_the_same_row_in_place(node):
     fly_row(node, 75, 130)
     after = node.written()
     assert [c.column for _p, c in before] == [1, 2]
-    assert [c.column for _p, c in after] == [3, 4]
+    assert [c.column for _p, c in after] == [3]
 
 
 def test_missed_unpause_does_not_write_a_stale_endpoint(node):

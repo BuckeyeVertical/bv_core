@@ -23,6 +23,22 @@ def mission_config_path():
     )
 
 
+def package_source_dir():
+    """Return the source package directory when running in this workspace."""
+    from ament_index_python.packages import get_package_share_directory
+
+    share_dir = get_package_share_directory('bv_core')
+    candidates = [
+        os.path.abspath(os.path.join(
+            share_dir, '..', '..', '..', '..', 'src', 'bv_core')),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..')),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, 'package.xml')):
+            return candidate
+    return os.getcwd()
+
+
 def expand_lap_route(points, lap_count):
     """Expand one closed route into the requested number of laps."""
     route = list(points)
