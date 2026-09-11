@@ -318,6 +318,7 @@ def test_reaching_the_loiter_point_resumes_the_same_row(node):
     node.set_state('localize')
     node.set_state('deliver')
     node.set_state('scan')
+    assert node.stitch_paused is True
 
     # The prepended loiter waypoint: mid-row, so it matches no scan point.
     node.goto(75.0)
@@ -337,6 +338,23 @@ def test_reaching_the_loiter_point_resumes_the_same_row(node):
     assert [c.column for _p, c in after] == [3, 4]
     assert [c.target_m for _p, c in after] == pytest.approx(
         [SPACING_M * 2, SPACING_M * 3])
+
+
+def test_localization_to_scan_resumes_the_same_row_in_place(node):
+    fly_row(node, 0, 75)
+    before = node.written()
+    node.set_state('localize')
+
+    node.set_state('scan')
+
+    assert node.stitch_paused is False
+    assert node.curr_wp == 0
+    assert node.stitch_capture.active is True
+
+    fly_row(node, 75, 130)
+    after = node.written()
+    assert [c.column for _p, c in before] == [1, 2]
+    assert [c.column for _p, c in after] == [3, 4]
 
 
 def test_missed_unpause_does_not_write_a_stale_endpoint(node):

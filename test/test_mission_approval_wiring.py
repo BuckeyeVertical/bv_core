@@ -18,6 +18,7 @@ Requires bv_msgs on the path:  source ~/bv_ws/install/setup.bash
 
 import os
 import sys
+from unittest.mock import Mock
 
 from builtin_interfaces.msg import Time
 
@@ -98,6 +99,7 @@ class FakeMission:
     _on_approval_rejected = MissionRunner._on_approval_rejected
     _on_approval_callback_failed = MissionRunner._on_approval_callback_failed
     _resume_scan_in_place = MissionRunner._resume_scan_in_place
+    _on_localization_timeout = MissionRunner._on_localization_timeout
     on_vision_localization_complete = MissionRunner.on_vision_localization_complete
     request_localization_from_vision = MissionRunner.request_localization_from_vision
 
@@ -115,6 +117,8 @@ class FakeMission:
         self.approval_gate = None
         self.localization_retry_count = 0
         self._localize_retry_timer = None
+        self._localization_timeout_timer = None
+        self._localization_request_id = 0
         self.current_lat = 38.3876
         self.current_lon = -76.4191
         self.scan_waypoints = [[0.0, 0.0, 15.2]] * 6
@@ -471,6 +475,41 @@ class TestLocalizationFailureResume:
         assert mission.calls == ['enter_scan_state']
         assert mission.scan_waypoint_index_on_detection == 1
         assert mission.loiter_resume_coords is None
+
+    def test_missing_response_times_out_and_resumes_scan(self):
+        mission = FakeMission()
+        mission._localization_timeout_timer = Mock()
+
+        mission._on_localization_timeout()
+
+        assert mission._localization_timeout_timer is None
+        assert mission.calls == ['enter_scan_state']
+        assert mission.scan_waypoint_index_on_detection == 1
+        assert mission.confirmed_detection_id == ''
+
+    def test_success_cancels_the_response_watchdog(self):
+        mission = FakeMission()
+        timer = Mock()
+        mission._localization_timeout_timer = timer
+
+        mission.on_vision_localization_complete(
+            _FakeFuture(_localize_response()))
+
+        timer.cancel.assert_called_once()
+        assert mission._localization_timeout_timer is None
+        assert mission.calls == ['enter_deliver_state']
+
+    def test_late_response_after_timeout_is_ignored_in_later_localize_state(self):
+        mission = FakeMission()
+        mission._localization_timeout_timer = Mock()
+        old_request_id = mission._localization_request_id
+        mission._on_localization_timeout()
+        mission.current_state = STATE_LOCALIZE
+
+        mission.on_vision_localization_complete(
+            _FakeFuture(_localize_response()), old_request_id)
+
+        assert mission.calls == ['enter_scan_state']
 
 
 class TestApprovalCallbackRecovery:

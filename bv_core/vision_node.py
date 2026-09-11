@@ -551,6 +551,12 @@ class VisionNode(Node):
                     float(self.scan_points[0][1]),
                 )
                 self._start_stitch_row(0, scan_start)
+            if (self.prev_state == 'localize' and new_state == 'scan'
+                    and self.stitch_paused):
+                self.stitch_paused = False
+                self.get_logger().info(
+                    "Stitch capture resumed in place after localization"
+                )
             if (new_state == 'scan'
                     and not self.stitch_capture.active
                     and self.curr_wp + 1 >= len(self.scan_points)):

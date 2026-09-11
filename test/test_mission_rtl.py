@@ -15,10 +15,12 @@ def mission(state='localize'):
         set_flight_mode=Mock(), destroy_timer=Mock(), arm_vehicle=Mock(),
         reset_all_servos_to_default=Mock(), set_velocity=Mock(),
         create_timer=Mock(return_value=Mock()), desired_velocity=3.0,
+        rtl_velocity=5.0,
         last_waypoint_reached=None, expected_final_waypoint_index=0,
         has_armed=True, enter_deliver_state=Mock(),
         scan_route_pending=False, _pending_scan_confirmation=None,
         _localize_timer=Mock(), _localize_retry_timer=Mock(),
+        _localization_timeout_timer=Mock(), _localization_request_id=0,
         _velocity_delay_timer=Mock(),
     )
     for name in (
@@ -35,6 +37,7 @@ class TestMissionRTL(unittest.TestCase):
         node = mission('scan')
         node.enter_rtl_state()
         node.set_flight_mode.assert_called_once_with('AUTO.RTL')
+        node.set_velocity.assert_called_once_with(5.0)
         node.on_vehicle_state_changed(SimpleNamespace(mode='AUTO.RTL', armed=True))
         node.handle_state_completion()  # A leftover waypoint cannot imply landing.
         self.assertFalse(node.rtl_completed)
@@ -51,17 +54,20 @@ class TestMissionRTL(unittest.TestCase):
             with self.subTest(state=state):
                 node = mission(state)
                 timers = [node._localize_timer, node._localize_retry_timer,
+                          node._localization_timeout_timer,
                           node._velocity_delay_timer]
                 node.on_vehicle_state_changed(SimpleNamespace(mode='AUTO.RTL', armed=True))
                 self.assertEqual(node.current_state, 'return')
                 node.approval_gate.cancel.assert_called_once_with('rtl')
                 node.set_flight_mode.assert_not_called()
+                node.set_velocity.assert_called_once_with(5.0)
                 node.publish_mission_state.assert_called_once()
                 for timer in timers:
                     timer.cancel.assert_called_once()
                     node.destroy_timer.assert_any_call(timer)
                 self.assertIsNone(node._localize_timer)
                 self.assertIsNone(node._localize_retry_timer)
+                self.assertIsNone(node._localization_timeout_timer)
                 self.assertIsNone(node._velocity_delay_timer)
 
     def test_late_replies_and_approval_cannot_resume_mission(self):
@@ -90,8 +96,9 @@ class TestMissionRTL(unittest.TestCase):
         node.on_set_mode_complete(Mock(result=lambda: SimpleNamespace(mode_sent=True)))
         callback = node.create_timer.call_args.args[1]
         node.on_vehicle_state_changed(SimpleNamespace(mode='AUTO.RTL', armed=True))
+        node.set_velocity.assert_called_once_with(5.0)
         callback()
-        node.set_velocity.assert_not_called()
+        node.set_velocity.assert_called_once_with(5.0)
 
     def test_normal_mission_keeps_existing_behavior(self):
         node = mission('scan')

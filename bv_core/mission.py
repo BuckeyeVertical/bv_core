@@ -66,12 +66,11 @@ STATE_DELIVER  = "deliver"
 STATE_DEPLOY   = "deploy"
 STATE_RTL      = "return"
 
-# Floor for Approval_timeout_sec. The approval timeout is the ONLY thing that can
-# leave STATE_LOCALIZE when a verdict never arrives, so a configured 0 (or any
-# value the gate treats as "arm no timer") would let a dead ground station strand
-# the aircraft in an indefinite loiter. Clamping at the config boundary keeps the
-# fail-open guarantee true for every possible config.
+# Floor for Approval_timeout_sec. Once localization succeeds, this is the only
+# exit while waiting for an operator verdict. Clamping at the config boundary
+# keeps a dead ground station from leaving the aircraft in an indefinite loiter.
 MIN_APPROVAL_TIMEOUT_SEC = 10.0
+LOCALIZATION_TIMEOUT_SEC = 15.0
 
 
 def confirmation_rejection_reason(message, scan_started_ns, handled_ids):
@@ -135,6 +134,7 @@ class MissionRunner(Node):
             f"scan_transit_vel={self.scan_transit_velocity}m/s, "
             f"scan_vel={self.scan_velocity}m/s, "
             f"deliver_vel={self.deliver_velocity}m/s, "
+            f"rtl_vel={self.rtl_velocity}m/s, "
             f"scan_tol={self.scan_tolerance}m, "
             f"deliver_tol={self.deliver_tolerance}m")
 
@@ -165,6 +165,7 @@ class MissionRunner(Node):
             'Scan_transit_velocity', self.lap_velocity)
         self.scan_velocity = config.get('Scan_velocity', 2.5)
         self.deliver_velocity = config.get('Deliver_velocity', 5.0)
+        self.rtl_velocity = config.get('RTL_velocity', self.scan_velocity)
         
         # Waypoint acceptance tolerance (meters)
         self.lap_tolerance = config.get('Lap_tolerance', 2.0)
@@ -244,6 +245,8 @@ class MissionRunner(Node):
         self.scan_route_pending = False
         self._pending_scan_confirmation = None
         self._localize_retry_timer = None
+        self._localization_timeout_timer = None
+        self._localization_request_id = 0
         self.localization_retry_count = 0
 
         # Operator approval gate; None when flying fully autonomously
@@ -697,6 +700,11 @@ class MissionRunner(Node):
 
         # Publish state so vision node knows to keep pipeline running
         self.publish_mission_state()
+
+        if self._localization_timeout_timer is not None:
+            self._localization_timeout_timer.cancel()
+        self._localization_timeout_timer = self.create_timer(
+            LOCALIZATION_TIMEOUT_SEC, self._on_localization_timeout)
         
         # Request object location from vision_node via localize_object service
         self.request_localization_from_vision()
@@ -709,6 +717,9 @@ class MissionRunner(Node):
         if self._localize_retry_timer is not None:
             self._localize_retry_timer.cancel()
             self._localize_retry_timer = None
+        if self._localization_timeout_timer is not None:
+            self._localization_timeout_timer.cancel()
+            self._localization_timeout_timer = None
 
         self.current_state = STATE_DELIVER
         self.publish_mission_state()
@@ -773,7 +784,8 @@ class MissionRunner(Node):
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
-        for name in ('_localize_timer', '_localize_retry_timer', '_velocity_delay_timer'):
+        for name in ('_localize_timer', '_localize_retry_timer',
+                     '_localization_timeout_timer', '_velocity_delay_timer'):
             timer = getattr(self, name, None)
             if timer is not None:
                 timer.cancel()
@@ -784,6 +796,7 @@ class MissionRunner(Node):
         self.scan_route_pending = False
         self._pending_scan_confirmation = None
         self.in_auto_mission = False
+        self.desired_velocity = self.rtl_velocity
         self.publish_mission_state()
         self.is_transitioning = True
         
@@ -791,6 +804,7 @@ class MissionRunner(Node):
         self.get_logger().info("ENTERING STATE: RTL")
         self.get_logger().info("-" * 40)
         self.log.event('STATE_CHANGE', '-> rtl')
+        self.set_velocity(self.rtl_velocity)
 
         if command_mode:
             self.set_flight_mode("AUTO.RTL")
@@ -957,7 +971,45 @@ class MissionRunner(Node):
         )
         
         future = self.localize_object_client.call_async(request)
-        future.add_done_callback(self.on_vision_localization_complete)
+        self._localization_request_id += 1
+        request_id = self._localization_request_id
+        future.add_done_callback(
+            lambda completed, expected_id=request_id:
+                self.on_vision_localization_complete(completed, expected_id)
+        )
+
+    def _on_localization_timeout(self):
+        """Abandon a localization request that never produced a response."""
+        timer = self._localization_timeout_timer
+        if timer is None:
+            return
+        timer.cancel()
+        self._localization_timeout_timer = None
+        if self.current_state != STATE_LOCALIZE:
+            return
+
+        # Invalidate the outstanding callback so a very late response cannot
+        # affect a later localization attempt.
+        self._localization_request_id += 1
+        if self._localize_retry_timer is not None:
+            self._localize_retry_timer.cancel()
+            self._localize_retry_timer = None
+
+        self.get_logger().warn(
+            f"Localization produced no response within "
+            f"{LOCALIZATION_TIMEOUT_SEC:g} seconds - "
+            "abandoning this object and resuming scan"
+        )
+        self.log.event(
+            'LOCALIZE_TIMEOUT',
+            f'timeout={LOCALIZATION_TIMEOUT_SEC:g}s, '
+            'action=abandon_target_resume_scan')
+        self.current_target_coords = None
+        self.current_target_class_id = None
+        self.confirmed_detection_class_id = -1
+        self.confirmed_detection_id = ''
+        self.confirmed_detection_coords = None
+        self._resume_scan_in_place('localization_timeout')
 
     # Deploy servo logic
     def execute_deploy_servo_step(self):
@@ -1186,9 +1238,12 @@ class MissionRunner(Node):
         else:
             self.get_logger().warn("Failed to set velocity parameter")
 
-    def on_vision_localization_complete(self, future):
+    def on_vision_localization_complete(self, future, request_id=None):
         """Callback when vision node localization service returns."""
         if self.current_state != STATE_LOCALIZE:
+            return
+        if (request_id is not None
+                and request_id != self._localization_request_id):
             return
         
         response = future.result()
@@ -1207,6 +1262,9 @@ class MissionRunner(Node):
                 if self._localize_retry_timer is not None:
                     self._localize_retry_timer.cancel()
                     self._localize_retry_timer = None
+                if self._localization_timeout_timer is not None:
+                    self._localization_timeout_timer.cancel()
+                    self._localization_timeout_timer = None
                 # Clear current target/confirmation and resume scanning
                 self.current_target_coords = None
                 self.current_target_class_id = None
@@ -1236,6 +1294,9 @@ class MissionRunner(Node):
         if self._localize_retry_timer is not None:
             self._localize_retry_timer.cancel()
             self._localize_retry_timer = None
+        if self._localization_timeout_timer is not None:
+            self._localization_timeout_timer.cancel()
+            self._localization_timeout_timer = None
 
         self.current_target_coords = (response.latitude, response.longitude, response.altitude)
         self.current_target_class_id = int(response.class_id)
