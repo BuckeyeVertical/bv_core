@@ -3,7 +3,7 @@
 import pytest
 
 from bv_core.payload import parse_payload_block
-from bv_core.test_servo import describe, drop_schedule, parse_args
+from bv_core.test_servo import describe, parse_args
 
 from test_payload import _block
 
@@ -45,21 +45,3 @@ class TestShow:
         lines = describe(parse_payload_block(block))
         flagged = [line for line in lines if 'OUT OF RANGE' in line]
         assert len(flagged) == 1 and 'bottle_drop' in flagged[0]
-
-
-class TestDropSchedule:
-    def test_matches_the_mission_sequence(self):
-        config = parse_payload_block(_block()['payload'])
-        schedule = drop_schedule(config, 'bottle')
-        # Pre-brake on the held plate, then the drop at 1 s.
-        assert schedule[0] == (0.0, 1685, 1577)
-        assert schedule[1][1:] == (1685, 1900)
-        assert schedule[1][0] == pytest.approx(0.2)
-        first_drop = next(entry for entry in schedule if entry[1] == 2050)
-        assert first_drop[0] == pytest.approx(1.0, abs=0.02)
-        # Ends unclamped with the plate back at hold.
-        assert schedule[-1][1:] == (1685, 1900)
-        assert schedule[-1][0] <= config.total_duration_s + 0.02
-        # Only changes are listed.
-        pairs = [entry[1:] for entry in schedule]
-        assert all(a != b for a, b in zip(pairs, pairs[1:]))

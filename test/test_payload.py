@@ -183,6 +183,20 @@ class TestPayloadSelection:
 class TestDropSequence:
     """pre_drop_s = 1.0: brake on the held plate first, then the drop."""
 
+    @staticmethod
+    def clamp_runs(seq, until_s, step_s=0.001):
+        """Lengths (s) of each stretch where the clamp holds one position."""
+        runs, last, since = [], None, 0.0
+        steps = int(until_s / step_s)
+        for i in range(steps):
+            t = i * step_s
+            clamp = seq.positions_at(t)[1]
+            if last is not None and clamp != last:
+                runs.append(t - since)
+                since = t
+            last = clamp
+        return runs
+
     def test_pre_brake_clamps_while_the_plate_still_holds(self):
         seq = DropSequence(_config(), 'bottle')
         assert seq.positions_at(0.0) == (1685, 1577, False)
@@ -194,37 +208,43 @@ class TestDropSequence:
         assert seq.positions_at(0.41)[:2] == (1685, 1577)
         assert seq.positions_at(0.99)[0] == 1685
 
-    def test_plate_drops_after_the_pre_brake_with_braking_restarted(self):
+    def test_plate_drops_after_the_pre_brake(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(1.0) == (2050, 1577, False)
-        assert seq.positions_at(1.21)[1] == 1900
+        assert seq.positions_at(0.99)[0] == 1685
+        assert seq.positions_at(1.01)[0] == 2050
 
     def test_beacon_uses_its_own_drop_and_clamp(self):
         seq = DropSequence(_config(), 'beacon')
         assert seq.positions_at(0.0) == (1685, 1300, False)
-        assert seq.positions_at(1.0) == (1360, 1300, False)
-        assert seq.positions_at(1.21)[1] == 1900
+        assert seq.positions_at(0.21)[1] == 1900
+        assert seq.positions_at(1.01)[0] == 1360
+
+    def test_rhythm_never_pauses_at_a_phase_change(self):
+        # Each stretch lasts exactly one toggle interval of the phase it
+        # starts in: 200 ms, then 150 ms, then 100 ms. Never two in a row,
+        # which is what a pause at a phase change looked like.
+        cfg = _config()
+        runs = self.clamp_runs(DropSequence(cfg, 'bottle'),
+                               cfg.total_duration_s - 0.01)
+        assert max(runs) <= 0.2 + 0.002
+        assert runs[:5] == pytest.approx([0.2] * 5, abs=0.002)
+        assert any(run == pytest.approx(0.15, abs=0.002) for run in runs)
+        assert runs[-3:] == pytest.approx([0.1] * 3, abs=0.002)
 
     def test_braking_phases_keep_their_full_length(self):
-        seq = DropSequence(_config(), 'bottle')
-        pre = 1.0
-        # Phase 1: 200 ms toggles for 5.00 s after the plate moves.
-        assert seq.positions_at(pre + 4.99)[1] in (1577, 1900)
-        # Phase 2 starts at pre + 5.00 s, clamped, 150 ms toggles.
-        assert seq.positions_at(pre + 5.01)[1] == 1577
-        assert seq.positions_at(pre + 5.16)[1] == 1900
-        # Phase 3 starts at pre + 8.76 s, 100 ms toggles.
-        start = pre + 5.0 + 50 / 13.3
-        assert seq.positions_at(start + 0.01)[1] == 1577
-        assert seq.positions_at(start + 0.11)[1] == 1900
+        cfg = _config()
+        seq = DropSequence(cfg, 'bottle')
+        # The plate is at the drop position for the full 10.76 s of braking.
+        assert seq.positions_at(1.01)[0] == 2050
+        assert seq.positions_at(cfg.total_duration_s - 0.01)[0] == 2050
+        assert cfg.total_duration_s - cfg.pre_drop_s == pytest.approx(
+            10.759, abs=0.001)
 
     def test_ends_unclamped_with_plate_back_at_hold(self):
         cfg = _config()
         seq = DropSequence(cfg, 'bottle')
-        # The plate holds the drop position until the braking ends...
         plate, _, done = seq.positions_at(cfg.total_duration_s - 0.001)
         assert (plate, done) == (2050, False)
-        # ...then returns to hold, so the other payload is gripped again.
         assert seq.positions_at(cfg.total_duration_s) == (1685, 1900, True)
         assert seq.positions_at(60.0) == (1685, 1900, True)
 

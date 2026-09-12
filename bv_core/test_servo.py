@@ -34,7 +34,8 @@ from .payload import (
 )
 
 USAGE = __doc__.split('\n\n')[1]
-DROP_TICK_SEC = 0.02
+# Pause before re-sending a command PX4 did not confirm (as mission_node).
+RETRY_SEC = 0.2
 
 
 def parse_args(argv):
@@ -71,23 +72,6 @@ def describe(config):
     return lines
 
 
-def drop_schedule(config, payload, tick_s=DROP_TICK_SEC):
-    """(t, plate_us, clamp_us) at every position change in a drop."""
-    sequence = DropSequence(config, payload)
-    schedule = []
-    last = None
-    step = 0
-    while True:
-        t = step * tick_s
-        plate, clamp, done = sequence.positions_at(t)
-        if (plate, clamp) != last:
-            schedule.append((t, plate, clamp))
-            last = (plate, clamp)
-        if done:
-            return schedule
-        step += 1
-
-
 class ServoBench(Node):
     def __init__(self, config):
         super().__init__('servo_bench')
@@ -96,14 +80,22 @@ class ServoBench(Node):
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /mavros/cmd/command...')
 
-    def send(self, plate_us=None, clamp_us=None, quiet=False,
-             ack_timeout_s=6.0):
-        """Command the servos, addressed to PX4, and report its verdict.
+    def _call(self, plate_us, clamp_us):
+        """Send one command addressed to PX4; return the MAVROS future.
 
         Addressed, not broadcast: PX4 on the flight controller answers a
         broadcast MAV_CMD_DO_SET_ACTUATOR with UNSUPPORTED and ignores it.
-        Returns True when PX4 confirmed the command.
         """
+        command, params = actuator_params(self.config, plate_us, clamp_us)
+        request = CommandLong.Request()
+        request.broadcast = False
+        request.command = command
+        (request.param1, request.param2, request.param3, request.param4,
+         request.param5, request.param6, request.param7) = params
+        return self.client.call_async(request)
+
+    def send(self, plate_us=None, clamp_us=None):
+        """Command the servos and report PX4's verdict. True if confirmed."""
         for servo, pulse in ((self.config.plate, plate_us),
                              (self.config.clamp, clamp_us)):
             if pulse is None:
@@ -112,26 +104,16 @@ class ServoBench(Node):
             if reason:
                 self.get_logger().warn(
                     f"{servo.name}: {reason} - PX4 will limit it to the range")
-            if not quiet:
-                self.get_logger().info(
-                    f"{servo.name} (actuator set {servo.actuator_set}) -> "
-                    f"{pulse:g} us")
+            self.get_logger().info(
+                f"{servo.name} (actuator set {servo.actuator_set}) -> "
+                f"{pulse:g} us")
 
-        command, params = actuator_params(self.config, plate_us, clamp_us)
-        request = CommandLong.Request()
-        request.broadcast = False
-        request.command = command
-        (request.param1, request.param2, request.param3, request.param4,
-         request.param5, request.param6, request.param7) = params
-        future = self.client.call_async(request)
-        # The default waits past MAVROS's own 5 s ACK timeout, so its
-        # verdict arrives.
-        rclpy.spin_until_future_complete(
-            self, future, timeout_sec=ack_timeout_s)
+        future = self._call(plate_us, clamp_us)
+        # Waits past MAVROS's own 5 s ACK timeout, so its verdict arrives.
+        rclpy.spin_until_future_complete(self, future, timeout_sec=6.0)
         response = future.result()
         if response is not None and response.success:
-            if not quiet:
-                self.get_logger().info('PX4 accepted')
+            self.get_logger().info('PX4 accepted')
             return True
         if response is not None and response.result != 0:
             self.get_logger().error(f'PX4 rejected (result={response.result})')
@@ -144,26 +126,55 @@ class ServoBench(Node):
         return False
 
     def drop(self, payload):
-        schedule = drop_schedule(self.config, payload)
+        """Run the drop sequence the way mission_node does.
+
+        First the rest positions, confirmed: the first service call from a
+        freshly started program can take ~1 s, which would otherwise eat
+        the pre-brake. Then one command in flight at a time, always the
+        positions for *now*, re-sent after RETRY_SEC if PX4 did not confirm.
+        The sequence runs on the clock and never waits on a reply.
+        """
+        config = self.config
+        sequence = DropSequence(config, payload)
+        self.get_logger().info('Starting from rest (plate hold, clamp open)')
+        self.send(config.plate_hold_us, config.unclamped_us)
+
         self.get_logger().info(
-            f"Dropping {payload}: {len(schedule)} commands over "
-            f"{self.config.total_duration_s:.2f}s")
+            f"Dropping {payload}: clamp braking for {config.pre_drop_s:g}s, "
+            f"then the plate moves; {config.total_duration_s:.2f}s total")
         start = time.monotonic()
-        failed = 0
-        for t, plate, clamp in schedule:
-            delay = start + t - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
-            # Each command waits for PX4's reply (about 10 ms over serial);
-            # a short timeout keeps one lost reply from stalling the drop.
-            if not self.send(plate, clamp, quiet=True, ack_timeout_s=0.5):
-                failed += 1
-        remaining = start + self.config.total_duration_s - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining)
+        pending = None            # (future, positions) awaiting PX4's reply
+        confirmed = None
+        retry_at = 0.0
+        sent = accepted = 0
+        while True:
+            now = time.monotonic()
+            plate, clamp, done = sequence.positions_at(now - start)
+            desired = (plate, clamp)
+
+            if pending is not None and pending[0].done():
+                future, positions = pending
+                pending = None
+                response = future.result()
+                if response is not None and response.success:
+                    accepted += 1
+                    confirmed = positions
+                else:
+                    retry_at = now + RETRY_SEC
+
+            if pending is None and desired != confirmed and now >= retry_at:
+                pending = (self._call(plate, clamp), desired)
+                sent += 1
+
+            if done and pending is None and desired == confirmed:
+                break
+            if now - start > config.total_duration_s + 10.0:
+                self.get_logger().error('Gave up waiting for PX4 to confirm')
+                break
+            rclpy.spin_once(self, timeout_sec=0.005)
+
         self.get_logger().info(
-            f'Drop complete: {len(schedule) - failed}/{len(schedule)} '
-            f'commands confirmed by PX4')
+            f'Drop complete: {accepted}/{sent} commands confirmed by PX4')
 
 
 def main(args=None):

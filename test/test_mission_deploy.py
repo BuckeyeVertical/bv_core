@@ -136,14 +136,16 @@ class TestDeploy(DeployTestCase):
         self.assertEqual(sent(node), [(1685, 1577)])
         node.create_timer.assert_called_once()
         self.run_drop(node, 1.01)
-        self.assertEqual(sent(node)[-1], (2050, 1577))
+        self.assertEqual(sent(node)[-1][0], 2050)
 
     def test_tent_gets_beacon_clamp_then_beacon_drop(self):
         node = mission(payload_config(), class_id=1)
         node.enter_deploy_state()
         self.assertEqual(sent(node)[0], (1685, 1300))
         self.run_drop(node, 1.01)
-        self.assertEqual(sent(node)[-1], (1360, 1300))
+        self.assertEqual(sent(node)[-1][0], 1360)
+        # The beacon's own clamped value is used throughout.
+        self.assertEqual({clamp for _, clamp in sent(node)}, {1300, 1900})
 
     def test_commands_are_addressed_do_set_actuator(self):
         # PX4 on the flight controller rejects the broadcast form as
@@ -167,9 +169,11 @@ class TestDeploy(DeployTestCase):
         self.assertTrue(all(plate == 1685 for plate, _ in pre))
         self.run_drop(node, 1.0)
         after = sent(node)[len(pre):]
-        # The braking phase restarts clamped when the plate moves at 1 s.
-        self.assertEqual([clamp for _, clamp in after][:5],
-                         [1577, 1900, 1577, 1900, 1577])
+        # The clamp keeps one continuous rhythm through the plate moving:
+        # every command flips it, none repeats the previous position.
+        clamps = [clamp for _, clamp in pre + after]
+        self.assertTrue(all(a != b for a, b in zip(clamps, clamps[1:])))
+        self.assertEqual(set(clamps), {1577, 1900})
         # Every command re-asserts the drop, so a lost command cannot
         # leave the plate holding the payload.
         self.assertTrue(all(plate == 2050 for plate, _ in after))

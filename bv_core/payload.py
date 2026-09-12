@@ -22,6 +22,7 @@ output's PWM_MAIN_MINn..PWM_MAIN_MAXn. pwm_range_us must therefore equal those
 two parameters, and every position must lie inside it.
 """
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -242,12 +243,17 @@ class DropSequence:
     """Servo pulses over one drop, as a function of elapsed time.
 
     For the first pre_drop_s the plate stays at hold while the clamp already
-    brakes: it toggles between this payload's clamped position and unclamped
-    at the first phase's interval. Then the plate moves to this payload's
-    drop position and the braking phases run in full, each starting clamped
-    and toggling at its own interval. When the last phase ends the clamp
+    brakes. Then the plate moves to this payload's drop position for the
+    braking phases, which run in full. When the last phase ends the clamp
     opens and the plate returns to hold, so the payload still aboard is
     gripped again for the flight to the next target.
+
+    The clamp starts clamped and flips between this payload's clamped
+    position and unclamped in one continuous rhythm: every flip comes one
+    interval after the previous one, the interval being that of the phase
+    (the pre-brake uses the first phase's) in which it began. Restarting a
+    phase on "clamped" instead held the clamp for two intervals whenever the
+    previous phase also ended clamped, a visible pause at each phase change.
     """
 
     def __init__(self, config, payload):
@@ -257,29 +263,42 @@ class DropSequence:
         self.payload = payload
         self.plate_us = config.plate_drop_us(payload)
         self.clamped_us = config.clamped_us(payload)
+        self._flip_times = self._compute_flip_times()
+
+    def _compute_flip_times(self):
+        """Elapsed times at which the clamp changes position."""
+        phases = self.config.brake_phases
+        # (start_s, toggle_s) per segment, the pre-brake first.
+        segments = []
+        start = 0.0
+        if self.config.pre_drop_s > 0.0:
+            segments.append((0.0, phases[0].toggle_s))
+            start = self.config.pre_drop_s
+        for phase in phases:
+            segments.append((start, phase.toggle_s))
+            start += phase.duration_s
+        end = self.config.total_duration_s
+
+        flips = []
+        t = 0.0
+        while True:
+            toggle_s = next(toggle for seg_start, toggle in reversed(segments)
+                            if seg_start <= t)
+            t += toggle_s
+            if t >= end:
+                return flips
+            flips.append(t)
 
     def positions_at(self, elapsed_s):
         """(plate_us, clamp_us, done) at elapsed_s into the drop."""
-        if elapsed_s < self.config.pre_drop_s:
-            toggle_s = self.config.brake_phases[0].toggle_s
-            return (self.config.plate_hold_us,
-                    self._clamp_at(elapsed_s, toggle_s), False)
-
-        phase_start = self.config.pre_drop_s
-        for phase in self.config.brake_phases:
-            phase_end = phase_start + phase.duration_s
-            if elapsed_s < phase_end:
-                return (self.plate_us,
-                        self._clamp_at(elapsed_s - phase_start,
-                                       phase.toggle_s), False)
-            phase_start = phase_end
-        return self.config.plate_hold_us, self.config.unclamped_us, True
-
-    def _clamp_at(self, since_start_s, toggle_s):
-        """Clamped on even toggle counts, unclamped on odd, from clamped."""
-        toggles = int(max(0.0, since_start_s) // toggle_s)
-        return (self.clamped_us if toggles % 2 == 0
-                else self.config.unclamped_us)
+        if elapsed_s >= self.config.total_duration_s:
+            return self.config.plate_hold_us, self.config.unclamped_us, True
+        plate = (self.config.plate_hold_us
+                 if elapsed_s < self.config.pre_drop_s else self.plate_us)
+        flips = bisect.bisect_right(self._flip_times, elapsed_s)
+        clamp = (self.clamped_us if flips % 2 == 0
+                 else self.config.unclamped_us)
+        return plate, clamp, False
 
 
 # -- parsing helpers -------------------------------------------------------

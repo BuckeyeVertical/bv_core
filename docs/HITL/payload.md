@@ -27,7 +27,7 @@ outputs run at 50 Hz.
 | Plate | Drop bottle (person) | 2050 |
 | Clamp | Unclamped (also its rest position) | 1900 |
 | Clamp | Clamped for the bottle | 1577 |
-| Clamp | Clamped for the beacon | 1300 (placeholder, needs measuring) |
+| Clamp | Clamped for the beacon | 1710 |
 
 To change a position, measure it in QGC the same way, then type the new number into
 `real_params.yaml` and rebuild.
@@ -36,7 +36,9 @@ To change a position, measure it in QGC the same way, then type the new number i
 
 **Pre-brake (`pre_drop_s`, 1 s):** the clamp starts braking while the plate still
 holds. It toggles between that payload's clamped position and unclamped at the
-first phase's 200 ms rhythm.
+first phase's 200 ms rhythm. The rhythm is continuous for the whole drop: every
+flip comes one interval after the previous one, so the clamp never pauses where
+the interval changes.
 
 **Drop:** after the pre-brake, the plate moves to that payload's drop position.
 The three braking phases then run in full; the pre-brake doesn't shorten them.
@@ -48,7 +50,7 @@ Each phase lasts `drop_ft / speed_ftps` seconds:
 | 2 | 50 ft | 13.3 ft/s | 150 ms | 3.76 s |
 | 3 | 25 ft | 12.5 ft/s | 100 ms | 2.00 s |
 
-Every phase starts clamped. After the last phase the clamp opens (1900) and the
+After the last phase the clamp opens (1900) and the
 plate returns to hold (1685), so the payload still aboard is gripped again. The
 drone holds over the target for the whole drop, 1 s plus 10.76 s = 11.76 s, then
 resumes the scan.
