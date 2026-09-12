@@ -96,7 +96,14 @@ class ServoBench(Node):
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /mavros/cmd/command...')
 
-    def send(self, plate_us=None, clamp_us=None, wait_for_ack=True):
+    def send(self, plate_us=None, clamp_us=None, quiet=False,
+             ack_timeout_s=6.0):
+        """Command the servos, addressed to PX4, and report its verdict.
+
+        Addressed, not broadcast: PX4 on the flight controller answers a
+        broadcast MAV_CMD_DO_SET_ACTUATOR with UNSUPPORTED and ignores it.
+        Returns True when PX4 confirmed the command.
+        """
         for servo, pulse in ((self.config.plate, plate_us),
                              (self.config.clamp, clamp_us)):
             if pulse is None:
@@ -105,33 +112,36 @@ class ServoBench(Node):
             if reason:
                 self.get_logger().warn(
                     f"{servo.name}: {reason} - PX4 will limit it to the range")
-            self.get_logger().info(
-                f"{servo.name} (actuator set {servo.actuator_set}) -> "
-                f"{pulse:g} us")
+            if not quiet:
+                self.get_logger().info(
+                    f"{servo.name} (actuator set {servo.actuator_set}) -> "
+                    f"{pulse:g} us")
 
         command, params = actuator_params(self.config, plate_us, clamp_us)
         request = CommandLong.Request()
-        # Same as the mission during a drop: broadcast skips MAVROS's ACK wait.
-        request.broadcast = not wait_for_ack
+        request.broadcast = False
         request.command = command
         (request.param1, request.param2, request.param3, request.param4,
          request.param5, request.param6, request.param7) = params
         future = self.client.call_async(request)
-        if wait_for_ack:
-            # Past MAVROS's own 5 s ACK timeout, so its verdict arrives.
-            rclpy.spin_until_future_complete(self, future, timeout_sec=6.0)
-            response = future.result()
-            if response is not None and response.success:
+        # The default waits past MAVROS's own 5 s ACK timeout, so its
+        # verdict arrives.
+        rclpy.spin_until_future_complete(
+            self, future, timeout_sec=ack_timeout_s)
+        response = future.result()
+        if response is not None and response.success:
+            if not quiet:
                 self.get_logger().info('PX4 accepted')
-            elif response is not None and response.result != 0:
-                self.get_logger().error(
-                    f'PX4 rejected (result={response.result})')
-            else:
-                # MAVROS reports a missing ACK as success=False, result=0.
-                # The command may still have been applied: look at the servo.
-                self.get_logger().warn(
-                    'No ACK from PX4 - the command may still have been '
-                    'applied; check the servo')
+            return True
+        if response is not None and response.result != 0:
+            self.get_logger().error(f'PX4 rejected (result={response.result})')
+        else:
+            # MAVROS reports a missing ACK as success=False, result=0.
+            # The command may still have been applied: look at the servo.
+            self.get_logger().warn(
+                'No ACK from PX4 - the command may still have been applied; '
+                'check the servo')
+        return False
 
     def drop(self, payload):
         schedule = drop_schedule(self.config, payload)
@@ -139,16 +149,21 @@ class ServoBench(Node):
             f"Dropping {payload}: {len(schedule)} commands over "
             f"{self.config.total_duration_s:.2f}s")
         start = time.monotonic()
+        failed = 0
         for t, plate, clamp in schedule:
             delay = start + t - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
-            self.send(plate, clamp, wait_for_ack=False)
-            rclpy.spin_once(self, timeout_sec=0.0)
+            # Each command waits for PX4's reply (about 10 ms over serial);
+            # a short timeout keeps one lost reply from stalling the drop.
+            if not self.send(plate, clamp, quiet=True, ack_timeout_s=0.5):
+                failed += 1
         remaining = start + self.config.total_duration_s - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
-        self.get_logger().info('Drop complete')
+        self.get_logger().info(
+            f'Drop complete: {len(schedule) - failed}/{len(schedule)} '
+            f'commands confirmed by PX4')
 
 
 def main(args=None):

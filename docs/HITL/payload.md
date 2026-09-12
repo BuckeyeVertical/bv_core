@@ -87,10 +87,13 @@ pulse. `ros2 run bv_core test_servo show` prints the current `DIS` values.
 `mission_node` also sends the hold and unclamped positions once at startup, before
 arming.
 
-Commands go out as MAVLink broadcasts, so MAVROS doesn't wait for acknowledgements.
-MAVROS refuses a new command while an earlier one of the same type is still waiting
-for its acknowledgement, which can take up to 5 s. One lost acknowledgement would
-otherwise freeze the clamp in the middle of a drop.
+Commands are addressed to PX4. Don't switch them to broadcast: PX4 on the flight
+controller answers a broadcast `MAV_CMD_DO_SET_ACTUATOR` with UNSUPPORTED and leaves
+the outputs alone, even though SITL accepts it. An addressed command makes MAVROS
+wait for PX4's reply, which takes about 10 ms over serial, and MAVROS refuses a
+second command of the same type until then. So `mission_node` keeps only one
+command in flight. Newer positions wait for the reply, and a command PX4 didn't
+confirm is re-sent after 0.2 s. The drop timing follows the clock either way.
 
 ## Bench testing
 

@@ -2,7 +2,8 @@
 
 Runs the real MissionRunner methods on a stand-in object, like the other
 mission tests: MissionRunner.__init__ needs MAVROS and the installed config.
-The clock is patched so the drop sequence advances deterministically.
+The clock is patched so the drop sequence advances deterministically, and a
+fake MAVROS client decides when (and whether) PX4 confirms each command.
 """
 
 import math
@@ -11,17 +12,17 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from bv_core import mission as mission_module
-from bv_core.mission import MissionRunner, STATE_DEPLOY
+from bv_core.mission import MissionRunner, PAYLOAD_RETRY_SEC, STATE_DEPLOY
 from bv_core.payload import MAV_CMD_DO_SET_ACTUATOR, load_payload_config
 
 
 def payload_config():
     return load_payload_config({'payload': {
         'enabled': True,
-        'plate': {'actuator_set': 1, 'pwm_range_us': [800, 2200],
+        'plate': {'actuator_set': 2, 'pwm_range_us': [800, 2200],
                   'hold_us': 1685, 'beacon_drop_us': 1360,
                   'bottle_drop_us': 2050},
-        'clamp': {'actuator_set': 2, 'pwm_range_us': [800, 2200],
+        'clamp': {'actuator_set': 1, 'pwm_range_us': [800, 2200],
                   'unclamped_us': 1900, 'bottle_clamped_us': 1577,
                   'beacon_clamped_us': 1300},
         'brake_phases': [
@@ -32,37 +33,75 @@ def payload_config():
     }})
 
 
+class FakeFuture:
+    def __init__(self, client):
+        self.client = client
+        self.callback = None
+        self.response = None
+        self.error = None
+
+    def add_done_callback(self, callback):
+        self.callback = callback
+        if self.client.auto_reply is not None:
+            self.finish(**self.client.auto_reply)
+
+    def finish(self, success=True, result=0, error=None):
+        self.response = SimpleNamespace(success=success, result=result)
+        self.error = error
+        self.callback(self)
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class FakeCommandClient:
+    """MAVROS /mavros/cmd/command. Replies at once unless told otherwise."""
+
+    def __init__(self):
+        self.requests = []
+        self.futures = []
+        self.auto_reply = {'success': True}
+
+    def call_async(self, request):
+        self.requests.append(request)
+        future = FakeFuture(self)
+        self.futures.append(future)
+        return future
+
+
 def mission(payload=None, class_id=0, state='deliver'):
     node = SimpleNamespace(
         current_state=state, is_transitioning=True, payload=payload,
         current_target_class_id=class_id,
         objects_delivered_count=0, num_objects_to_find=2,
-        command_client=Mock(), log=Mock(),
+        command_client=FakeCommandClient(), log=Mock(),
         get_logger=Mock(return_value=Mock()), publish_mission_state=Mock(),
         create_timer=Mock(side_effect=lambda *_args: Mock()),
         destroy_timer=Mock(), on_deploy_complete=Mock(),
         approval_gate=None, set_velocity=Mock(), set_flight_mode=Mock(),
         rtl_velocity=5.0,
         _drop_sequence=None, _deploy_timer=None,
+        _payload_desired=None, _payload_confirmed=None,
+        _payload_pending=False, _payload_retry_at=0.0, _payload_failures=0,
     )
     for name in ('enter_deploy_state', '_on_deploy_tick', '_stop_drop',
-                 'send_payload_actuators', 'send_payload_rest_positions',
-                 'on_payload_command_complete', 'enter_rtl_state'):
+                 'set_payload_positions', 'send_payload_rest_positions',
+                 '_flush_payload', '_on_payload_reply', 'enter_rtl_state'):
         setattr(node, name, MethodType(getattr(MissionRunner, name), node))
     return node
 
 
+def decode(value, low=800, high=2200):
+    return None if math.isnan(value) else round(
+        low + (value + 1.0) / 2.0 * (high - low))
+
+
 def sent(node):
-    """(plate_us, clamp_us) per command, decoded from actuator values."""
-    decoded = []
-    for call in node.command_client.call_async.call_args_list:
-        request = call.args[0]
-        values = []
-        for value in (request.param1, request.param2):
-            values.append(None if math.isnan(value)
-                          else round(800 + (value + 1.0) / 2.0 * 1400))
-        decoded.append(tuple(values))
-    return decoded
+    """(plate_us, clamp_us) per command. Clamp is set 1, plate set 2."""
+    return [(decode(r.param2), decode(r.param1))
+            for r in node.command_client.requests]
 
 
 class Clock:
@@ -73,7 +112,7 @@ class Clock:
         return self.now
 
 
-class TestDeploy(unittest.TestCase):
+class DeployTestCase(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
         patcher = patch.object(mission_module.time, 'monotonic', self.clock)
@@ -86,6 +125,8 @@ class TestDeploy(unittest.TestCase):
             self.clock.now += step_s
             node._on_deploy_tick()
 
+
+class TestDeploy(DeployTestCase):
     def test_person_gets_bottle_drop_and_clamp_immediately(self):
         node = mission(payload_config(), class_id=0)
         node.enter_deploy_state()
@@ -98,14 +139,14 @@ class TestDeploy(unittest.TestCase):
         node.enter_deploy_state()
         self.assertEqual(sent(node)[0], (1360, 1300))
 
-    def test_commands_are_broadcast_do_set_actuator(self):
-        # Broadcast: MAVROS does not wait for an ACK, so one lost ACK cannot
-        # block the next clamp toggle for its 5 s ACK timeout.
+    def test_commands_are_addressed_do_set_actuator(self):
+        # PX4 on the flight controller rejects the broadcast form as
+        # UNSUPPORTED and leaves the outputs alone; addressed commands work.
         node = mission(payload_config())
         node.enter_deploy_state()
-        request = node.command_client.call_async.call_args.args[0]
+        request = node.command_client.requests[0]
         self.assertEqual(request.command, MAV_CMD_DO_SET_ACTUATOR)
-        self.assertTrue(request.broadcast)
+        self.assertFalse(request.broadcast)
         self.assertEqual(request.param7, 0)
         self.assertTrue(all(math.isnan(p) for p in (
             request.param3, request.param4, request.param5, request.param6)))
@@ -117,7 +158,7 @@ class TestDeploy(unittest.TestCase):
         commands = sent(node)
         self.assertEqual([clamp for _, clamp in commands],
                          [1577, 1900, 1577, 1900, 1577, 1900])
-        # Every command re-asserts the drop, so a dropped packet cannot
+        # Every command re-asserts the drop, so a lost command cannot
         # leave the plate holding the payload.
         self.assertTrue(all(plate == 2050 for plate, _ in commands))
 
@@ -141,14 +182,14 @@ class TestDeploy(unittest.TestCase):
     def test_disabled_payload_skips_straight_to_complete(self):
         node = mission(payload=None)
         node.enter_deploy_state()
-        node.command_client.call_async.assert_not_called()
+        self.assertEqual(sent(node), [])
         node.create_timer.assert_not_called()
         node.on_deploy_complete.assert_called_once()
 
     def test_unknown_class_skips_the_drop(self):
         node = mission(payload_config(), class_id=-1)
         node.enter_deploy_state()
-        node.command_client.call_async.assert_not_called()
+        self.assertEqual(sent(node), [])
         node.on_deploy_complete.assert_called_once()
         node.get_logger().error.assert_called()
 
@@ -172,10 +213,52 @@ class TestDeploy(unittest.TestCase):
     def test_rtl_without_payload_sends_nothing(self):
         node = mission(payload=None, state='scan')
         node.enter_rtl_state(command_mode=False)
-        node.command_client.call_async.assert_not_called()
+        self.assertEqual(sent(node), [])
 
 
-class TestRestPositions(unittest.TestCase):
+class TestPayloadWriter(DeployTestCase):
+    def test_one_command_in_flight_then_the_latest_positions(self):
+        node = mission(payload_config())
+        node.command_client.auto_reply = None     # PX4 has not answered yet
+        node.enter_deploy_state()
+        self.run_drop(node, 0.3)                  # clamp has toggled open
+        self.assertEqual(sent(node), [(2050, 1577)])
+        # The reply arrives: the writer sends where the clamp is NOW,
+        # skipping any positions it missed in between.
+        node.command_client.futures[0].finish(success=True)
+        self.assertEqual(sent(node), [(2050, 1577), (2050, 1900)])
+
+    def test_unconfirmed_command_is_resent_after_a_pause(self):
+        node = mission(payload_config())
+        node.command_client.auto_reply = {'success': False, 'result': 3}
+        node.send_payload_rest_positions()
+        self.assertEqual(len(sent(node)), 1)
+        node._flush_payload()                     # too soon: no resend
+        self.assertEqual(len(sent(node)), 1)
+        self.clock.now += PAYLOAD_RETRY_SEC + 0.01
+        node.command_client.auto_reply = {'success': True}
+        node._flush_payload()
+        self.assertEqual(sent(node), [(1685, 1900), (1685, 1900)])
+        self.assertEqual(node._payload_confirmed, (1685, 1900))
+        node.get_logger().warn.assert_called_once()
+
+    def test_confirmed_positions_are_not_resent(self):
+        node = mission(payload_config())
+        node.send_payload_rest_positions()
+        node._flush_payload()
+        node.send_payload_rest_positions()
+        self.assertEqual(len(sent(node)), 1)
+
+    def test_reply_exception_is_logged_not_raised(self):
+        node = mission(payload_config())
+        node.command_client.auto_reply = {'error': RuntimeError('link down')}
+        node.send_payload_rest_positions()
+        self.assertFalse(node._payload_pending)
+        self.assertIsNone(node._payload_confirmed)
+        node.get_logger().warn.assert_called_once()
+
+
+class TestRestPositions(DeployTestCase):
     def test_startup_sends_hold_and_rest(self):
         node = mission(payload_config(), state='takeoff')
         node.send_payload_rest_positions()
@@ -184,21 +267,7 @@ class TestRestPositions(unittest.TestCase):
     def test_startup_with_payload_disabled_sends_nothing(self):
         node = mission(payload=None, state='takeoff')
         node.send_payload_rest_positions()
-        node.command_client.call_async.assert_not_called()
-
-
-class TestCommandResult(unittest.TestCase):
-    def test_failed_command_is_logged_not_raised(self):
-        node = mission(payload_config())
-        future = Mock(result=Mock(side_effect=RuntimeError('link down')))
-        node.on_payload_command_complete(future)
-        node.get_logger().warn.assert_called()
-
-    def test_rejected_command_is_logged(self):
-        node = mission(payload_config())
-        future = Mock(result=lambda: SimpleNamespace(success=False, result=4))
-        node.on_payload_command_complete(future)
-        node.get_logger().warn.assert_called()
+        self.assertEqual(sent(node), [])
 
 
 if __name__ == '__main__':

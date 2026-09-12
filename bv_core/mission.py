@@ -62,6 +62,8 @@ from .payload import (
 # Drop sequence tick. The fastest clamp toggle is 100 ms, so 20 ms keeps each
 # toggle within a fifth of its interval; the 0.5 s main timer is far too coarse.
 DEPLOY_TICK_SEC = 0.02
+# Pause before re-sending a payload command PX4 did not confirm.
+PAYLOAD_RETRY_SEC = 0.2
 CLASS_NAMES = ("person", "tent")
 
 
@@ -279,8 +281,15 @@ class MissionRunner(Node):
         # Active payload drop; None outside DEPLOY
         self._drop_sequence = None
         self._drop_started = 0.0
-        self._drop_last_sent = None
         self._deploy_timer = None
+
+        # Payload writer: the servo positions we want, the last ones PX4
+        # confirmed, and whether a command is awaiting its reply.
+        self._payload_desired = None
+        self._payload_confirmed = None
+        self._payload_pending = False
+        self._payload_retry_at = 0.0
+        self._payload_failures = 0
         
         # Home position (set by GPS)
         self.home_lat = None
@@ -818,7 +827,6 @@ class MissionRunner(Node):
 
         self._drop_sequence = DropSequence(self.payload, payload)
         self._drop_started = time.monotonic()
-        self._drop_last_sent = None
         self.get_logger().info(
             f"[DEPLOY] dropping {payload}: plate -> "
             f"{self._drop_sequence.plate_us:g} us, clamp pulsing "
@@ -840,8 +848,8 @@ class MissionRunner(Node):
         """Advance the drop: command any change, finish when it ends.
 
         Timing follows the clock, never command replies: a slow or failed
-        command is logged by on_payload_command_complete, but the drop always
-        ends on schedule and the mission moves on.
+        command is retried by the payload writer, but the drop always ends on
+        schedule and the mission moves on.
         """
         sequence = self._drop_sequence
         if sequence is None:
@@ -853,11 +861,9 @@ class MissionRunner(Node):
 
         plate_us, clamp_us, done = sequence.positions_at(
             time.monotonic() - self._drop_started)
-        if (plate_us, clamp_us) != self._drop_last_sent:
-            # Always both servos: every clamp toggle re-asserts the plate's
-            # release, so one lost packet cannot leave the payload held.
-            self.send_payload_actuators(plate_us, clamp_us)
-            self._drop_last_sent = (plate_us, clamp_us)
+        # Always both servos: every clamp toggle re-asserts the plate's
+        # position, so one lost command cannot leave the payload held.
+        self.set_payload_positions(plate_us, clamp_us)
 
         if done:
             self._stop_drop()
@@ -1013,45 +1019,68 @@ class MissionRunner(Node):
         future = self.param_set_client.call_async(request)
         future.add_done_callback(self.on_velocity_set_complete)
 
-    def send_payload_actuators(self, plate_us=None, clamp_us=None):
-        """
-        Command the payload servos through PX4's MAV_CMD_DO_SET_ACTUATOR.
-
-        Positions are pulse widths in microseconds; a servo left as None is
-        not changed.
-
-        Sent as a broadcast so MAVROS does not wait for an ACK. MAVROS refuses
-        a command while the previous one of the same type awaits its ACK (up
-        to a 5 s timeout), so one lost ACK would otherwise freeze the clamp
-        mid-drop. PX4 accepts broadcast commands (target 0/0).
-        """
-        command, params = actuator_params(self.payload, plate_us, clamp_us)
-        request = CommandLong.Request()
-        request.broadcast = True
-        request.command = command
-        request.confirmation = 0
-        (request.param1, request.param2, request.param3, request.param4,
-         request.param5, request.param6, request.param7) = params
-        future = self.command_client.call_async(request)
-        future.add_done_callback(self.on_payload_command_complete)
+    def set_payload_positions(self, plate_us, clamp_us):
+        """Ask for these servo pulses (us); the payload writer sends them."""
+        self._payload_desired = (plate_us, clamp_us)
+        self._flush_payload()
 
     def send_payload_rest_positions(self):
         """Plate to hold, clamp open. No-op with the payload disabled."""
         if self.payload is None:
             return
-        self.send_payload_actuators(
+        self.set_payload_positions(
             self.payload.plate_hold_us, self.payload.unclamped_us)
 
-    def on_payload_command_complete(self, future):
-        """Log a payload command MAVROS could not send. Never raises."""
+    def _flush_payload(self):
+        """Send the wanted positions if PX4 has not confirmed them yet.
+
+        Commands go to PX4 addressed, not broadcast: PX4 on the flight
+        controller answers a broadcast MAV_CMD_DO_SET_ACTUATOR with
+        UNSUPPORTED and leaves the outputs alone. An addressed command makes
+        MAVROS wait for PX4's reply, and MAVROS refuses a second one of the
+        same type meanwhile, so only one is ever in flight: newer positions
+        wait for the reply (about 10 ms over serial). A command PX4 did not
+        confirm is re-sent after PAYLOAD_RETRY_SEC.
+
+        Called by the drop tick, by the reply callback and by the main
+        timer, which keeps retrying after the drop timer is gone.
+        """
+        desired = self._payload_desired
+        if (self.payload is None or desired is None or self._payload_pending
+                or desired == self._payload_confirmed
+                or time.monotonic() < self._payload_retry_at):
+            return
+        command, params = actuator_params(self.payload, *desired)
+        request = CommandLong.Request()
+        request.broadcast = False
+        request.command = command
+        request.confirmation = 0
+        (request.param1, request.param2, request.param3, request.param4,
+         request.param5, request.param6, request.param7) = params
+        self._payload_pending = True
+        future = self.command_client.call_async(request)
+        future.add_done_callback(
+            lambda done, sent=desired: self._on_payload_reply(done, sent))
+
+    def _on_payload_reply(self, future, sent):
+        """Record PX4's verdict on a payload command. Never raises."""
+        self._payload_pending = False
         try:
             response = future.result()
+            ok, detail = bool(response.success), f"result={response.result}"
         except Exception as exc:  # noqa: BLE001 - a callback must not raise
-            self.get_logger().warn(f"Payload servo command failed: {exc!r}")
-            return
-        if not response.success:
-            self.get_logger().warn(
-                f"Payload servo command rejected (result={response.result})")
+            ok, detail = False, repr(exc)
+        if ok:
+            self._payload_confirmed = sent
+            self._payload_failures = 0
+        else:
+            self._payload_failures += 1
+            self._payload_retry_at = time.monotonic() + PAYLOAD_RETRY_SEC
+            if self._payload_failures == 1 or self._payload_failures % 10 == 0:
+                self.get_logger().warn(
+                    f"Payload servo command not confirmed ({detail}); "
+                    f"retrying (failures={self._payload_failures})")
+        self._flush_payload()
 
     def _log_payload_config(self, payload):
         """Log every configured servo position."""
@@ -1656,8 +1685,10 @@ class MissionRunner(Node):
         """
         Main timer callback - runs every 0.5 seconds.
         Publishes state; the payload drop runs on its own DEPLOY_TICK_SEC timer.
+        Also retries any payload command PX4 has not confirmed.
         """
         self.publish_mission_state()
+        self._flush_payload()
 
 
 # Main entry point
