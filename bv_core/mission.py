@@ -12,7 +12,7 @@ Each detected object triggers the sequence:
     1. Stop drone (LOITER)
     2. Localize object using camera intrinsics
     3. Fly to localized object
-    4. Drop the payload: release slider + pulsed brake (see payload.py)
+    4. Drop the payload: plate release + pulsed clamp (see payload.py)
     5. Resume scanning from where we left off
 
 Stitching runs during RTL - the stitching node listens for "return" state.
@@ -54,13 +54,12 @@ from .payload import (
     DropSequence,
     actuator_params,
     altitude_mismatch_warning,
-    degrees_to_us,
     load_payload_config,
     payload_for_class,
 )
 
 # Mission configuration
-# Drop sequence tick. The fastest brake toggle is 100 ms, so 20 ms keeps each
+# Drop sequence tick. The fastest clamp toggle is 100 ms, so 20 ms keeps each
 # toggle within a fifth of its interval; the 0.5 s main timer is far too coarse.
 DEPLOY_TICK_SEC = 0.02
 CLASS_NAMES = ("person", "tent")
@@ -784,7 +783,7 @@ class MissionRunner(Node):
         """
         Drop the payload for this target while holding over it.
 
-        Runs the slider + brake sequence from payload.py on its own fast timer;
+        Runs the plate + clamp sequence from payload.py on its own fast timer;
         on_deploy_complete resumes the scan once the sequence ends.
         """
         self.current_state = STATE_DEPLOY
@@ -821,12 +820,14 @@ class MissionRunner(Node):
         self._drop_started = time.monotonic()
         self._drop_last_sent = None
         self.get_logger().info(
-            f"[DEPLOY] dropping {payload}: slider -> "
-            f"{self._drop_sequence.slider_deg:g} deg, brake pulsing for "
-            f"{self.payload.total_duration_s:.2f}s")
+            f"[DEPLOY] dropping {payload}: plate -> "
+            f"{self._drop_sequence.plate_us:g} us, clamp pulsing "
+            f"{self._drop_sequence.clamped_us:g}/{self.payload.unclamped_us:g} us "
+            f"for {self.payload.total_duration_s:.2f}s")
         self.log.event(
             'DEPLOY_START',
-            f"payload={payload}, slider_deg={self._drop_sequence.slider_deg:g}, "
+            f"payload={payload}, plate_us={self._drop_sequence.plate_us:g}, "
+            f"clamped_us={self._drop_sequence.clamped_us:g}, "
             f"duration={self.payload.total_duration_s:.2f}s")
 
         # First command now; the timer takes it from there.
@@ -850,13 +851,13 @@ class MissionRunner(Node):
             self._stop_drop()
             return
 
-        slider_deg, brake_deg, done = sequence.positions_at(
+        plate_us, clamp_us, done = sequence.positions_at(
             time.monotonic() - self._drop_started)
-        if (slider_deg, brake_deg) != self._drop_last_sent:
-            # Always both servos: every brake toggle re-asserts the release,
-            # so one lost packet cannot leave the payload held.
-            self.send_payload_actuators(slider_deg, brake_deg)
-            self._drop_last_sent = (slider_deg, brake_deg)
+        if (plate_us, clamp_us) != self._drop_last_sent:
+            # Always both servos: every clamp toggle re-asserts the plate's
+            # release, so one lost packet cannot leave the payload held.
+            self.send_payload_actuators(plate_us, clamp_us)
+            self._drop_last_sent = (plate_us, clamp_us)
 
         if done:
             self._stop_drop()
@@ -880,10 +881,10 @@ class MissionRunner(Node):
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
-        # Interrupted mid-drop: stop pulsing and leave the brake at rest.
+        # Interrupted mid-drop: stop pulsing and leave the clamp open.
         if getattr(self, '_drop_sequence', None) is not None:
             self._stop_drop()
-            self.send_payload_actuators(brake_deg=self.payload.brake_rest_deg)
+            self.send_payload_actuators(clamp_us=self.payload.unclamped_us)
             self.log.event('DEPLOY_ABORTED', 'reason=rtl')
 
         for name in ('_localize_timer', '_localize_retry_timer',
@@ -1012,19 +1013,19 @@ class MissionRunner(Node):
         future = self.param_set_client.call_async(request)
         future.add_done_callback(self.on_velocity_set_complete)
 
-    def send_payload_actuators(self, slider_deg=None, brake_deg=None):
+    def send_payload_actuators(self, plate_us=None, clamp_us=None):
         """
         Command the payload servos through PX4's MAV_CMD_DO_SET_ACTUATOR.
 
-        Positions are degrees (see payload.py for the conversion); a servo
-        left as None is not changed.
+        Positions are pulse widths in microseconds; a servo left as None is
+        not changed.
 
         Sent as a broadcast so MAVROS does not wait for an ACK. MAVROS refuses
         a command while the previous one of the same type awaits its ACK (up
-        to a 5 s timeout), so one lost ACK would otherwise freeze the brake
+        to a 5 s timeout), so one lost ACK would otherwise freeze the clamp
         mid-drop. PX4 accepts broadcast commands (target 0/0).
         """
-        command, params = actuator_params(self.payload, slider_deg, brake_deg)
+        command, params = actuator_params(self.payload, plate_us, clamp_us)
         request = CommandLong.Request()
         request.broadcast = True
         request.command = command
@@ -1035,11 +1036,11 @@ class MissionRunner(Node):
         future.add_done_callback(self.on_payload_command_complete)
 
     def send_payload_rest_positions(self):
-        """Slider to hold, brake to rest. No-op with the payload disabled."""
+        """Plate to hold, clamp open. No-op with the payload disabled."""
         if self.payload is None:
             return
         self.send_payload_actuators(
-            self.payload.slider_hold_deg, self.payload.brake_rest_deg)
+            self.payload.plate_hold_us, self.payload.unclamped_us)
 
     def on_payload_command_complete(self, future):
         """Log a payload command MAVROS could not send. Never raises."""
@@ -1053,16 +1054,14 @@ class MissionRunner(Node):
                 f"Payload servo command rejected (result={response.result})")
 
     def _log_payload_config(self, payload):
-        """Log every servo position with the pulse it becomes."""
+        """Log every configured servo position."""
         self.get_logger().info(
-            f"Payload ENABLED: slider=actuator set "
-            f"{payload.slider.actuator_set}, brake=actuator set "
-            f"{payload.brake.actuator_set}, drop={payload.drop_ft:g}ft over "
+            f"Payload ENABLED: plate=actuator set "
+            f"{payload.plate.actuator_set}, clamp=actuator set "
+            f"{payload.clamp.actuator_set}, drop={payload.drop_ft:g}ft over "
             f"{payload.total_duration_s:.2f}s")
-        for servo, label, degrees in payload.positions():
-            pulse = degrees_to_us(degrees, payload.arduino_pulse_range_us)
-            self.get_logger().info(
-                f"  {servo.name} {label}: {degrees:g} deg = {pulse:.0f} us")
+        for servo, name, pulse in payload.positions():
+            self.get_logger().info(f"  {servo.name} {name}: {pulse:g} us")
 
     def request_localization_from_vision(self):
         """Request object localization from vision node."""

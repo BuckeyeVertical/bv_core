@@ -15,7 +15,7 @@ pkill -u "$USER" -f '/\.vscode-server/'
 `mission.launch.py` arms the aircraft automatically. Before starting it:
 
 - Confirm the payload servos are set up and bench-tested per
-  [payload.md](payload.md), including their disarmed PWM (slider hold, brake rest).
+  [payload.md](payload.md), including their disarmed PWM (plate 1685 hold, clamp 1900 open).
   `mission_node` refuses to start if a payload position is out of PWM range.
 
 - Clear the aircraft and propeller area.

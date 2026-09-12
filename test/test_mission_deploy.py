@@ -18,12 +18,12 @@ from bv_core.payload import MAV_CMD_DO_SET_ACTUATOR, load_payload_config
 def payload_config():
     return load_payload_config({'payload': {
         'enabled': True,
-        'arduino_pulse_range_us': [544, 2400],
-        'slider': {'actuator_set': 1, 'zero_deg': 100,
-                   'beacon_offset_deg': 0, 'hold_offset_deg': 30,
-                   'bottle_offset_deg': 70, 'pwm_range_us': [544, 2400]},
-        'brake': {'actuator_set': 2, 'zero_deg': 107, 'pulse_offset_deg': 0,
-                  'rest_offset_deg': 18, 'pwm_range_us': [544, 2400]},
+        'plate': {'actuator_set': 1, 'pwm_range_us': [800, 2200],
+                  'hold_us': 1685, 'beacon_drop_us': 1360,
+                  'bottle_drop_us': 2050},
+        'clamp': {'actuator_set': 2, 'pwm_range_us': [800, 2200],
+                  'unclamped_us': 1900, 'bottle_clamped_us': 1577,
+                  'beacon_clamped_us': 1300},
         'brake_phases': [
             {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
             {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},
@@ -53,14 +53,14 @@ def mission(payload=None, class_id=0, state='deliver'):
 
 
 def sent(node):
-    """(slider_deg, brake_deg) per command, decoded from actuator values."""
+    """(plate_us, clamp_us) per command, decoded from actuator values."""
     decoded = []
     for call in node.command_client.call_async.call_args_list:
         request = call.args[0]
         values = []
         for value in (request.param1, request.param2):
             values.append(None if math.isnan(value)
-                          else round((value + 1.0) * 90.0))
+                          else round(800 + (value + 1.0) / 2.0 * 1400))
         decoded.append(tuple(values))
     return decoded
 
@@ -86,21 +86,21 @@ class TestDeploy(unittest.TestCase):
             self.clock.now += step_s
             node._on_deploy_tick()
 
-    def test_person_gets_bottle_release_and_brake_pulse_immediately(self):
+    def test_person_gets_bottle_drop_and_clamp_immediately(self):
         node = mission(payload_config(), class_id=0)
         node.enter_deploy_state()
         self.assertEqual(node.current_state, STATE_DEPLOY)
-        self.assertEqual(sent(node), [(170, 107)])
+        self.assertEqual(sent(node), [(2050, 1577)])
         node.create_timer.assert_called_once()
 
-    def test_tent_gets_beacon_release(self):
+    def test_tent_gets_beacon_drop_and_beacon_clamp(self):
         node = mission(payload_config(), class_id=1)
         node.enter_deploy_state()
-        self.assertEqual(sent(node)[0], (100, 107))
+        self.assertEqual(sent(node)[0], (1360, 1300))
 
     def test_commands_are_broadcast_do_set_actuator(self):
         # Broadcast: MAVROS does not wait for an ACK, so one lost ACK cannot
-        # block the next brake toggle for its 5 s ACK timeout.
+        # block the next clamp toggle for its 5 s ACK timeout.
         node = mission(payload_config())
         node.enter_deploy_state()
         request = node.command_client.call_async.call_args.args[0]
@@ -110,16 +110,16 @@ class TestDeploy(unittest.TestCase):
         self.assertTrue(all(math.isnan(p) for p in (
             request.param3, request.param4, request.param5, request.param6)))
 
-    def test_brake_toggles_and_slider_is_repeated(self):
+    def test_clamp_toggles_and_plate_is_repeated(self):
         node = mission(payload_config())
         node.enter_deploy_state()
         self.run_drop(node, 1.0)
         commands = sent(node)
-        self.assertEqual([brake for _, brake in commands],
-                         [107, 125, 107, 125, 107, 125])
-        # Every command re-asserts the release, so a dropped packet cannot
-        # leave the slider holding the payload.
-        self.assertTrue(all(slider == 170 for slider, _ in commands))
+        self.assertEqual([clamp for _, clamp in commands],
+                         [1577, 1900, 1577, 1900, 1577, 1900])
+        # Every command re-asserts the drop, so a dropped packet cannot
+        # leave the plate holding the payload.
+        self.assertTrue(all(plate == 2050 for plate, _ in commands))
 
     def test_sends_only_on_change(self):
         node = mission(payload_config())
@@ -127,14 +127,14 @@ class TestDeploy(unittest.TestCase):
         self.run_drop(node, 0.19, step_s=0.01)
         self.assertEqual(len(sent(node)), 1)
 
-    def test_completes_after_the_full_sequence_with_brake_at_rest(self):
+    def test_completes_after_the_full_sequence_unclamped(self):
         node = mission(payload_config())
         node.enter_deploy_state()
         self.run_drop(node, 10.0)
         node.on_deploy_complete.assert_not_called()
         self.run_drop(node, 1.0)
         node.on_deploy_complete.assert_called_once()
-        self.assertEqual(sent(node)[-1], (170, 125))
+        self.assertEqual(sent(node)[-1], (2050, 1900))
         self.assertIsNone(node._drop_sequence)
         node.destroy_timer.assert_called()
 
@@ -161,12 +161,12 @@ class TestDeploy(unittest.TestCase):
         self.assertIsNone(node._drop_sequence)
         node.on_deploy_complete.assert_not_called()
 
-    def test_rtl_mid_drop_rests_the_brake(self):
+    def test_rtl_mid_drop_opens_the_clamp(self):
         node = mission(payload_config())
         node.enter_deploy_state()
         node.enter_rtl_state(command_mode=False)
         self.assertIsNone(node._drop_sequence)
-        self.assertEqual(sent(node)[-1], (None, 125))
+        self.assertEqual(sent(node)[-1], (None, 1900))
         node.on_deploy_complete.assert_not_called()
 
     def test_rtl_without_payload_sends_nothing(self):
@@ -179,7 +179,7 @@ class TestRestPositions(unittest.TestCase):
     def test_startup_sends_hold_and_rest(self):
         node = mission(payload_config(), state='takeoff')
         node.send_payload_rest_positions()
-        self.assertEqual(sent(node), [(130, 125)])
+        self.assertEqual(sent(node), [(1685, 1900)])
 
     def test_startup_with_payload_disabled_sends_nothing(self):
         node = mission(payload=None, state='takeoff')

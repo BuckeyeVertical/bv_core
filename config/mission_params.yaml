@@ -86,7 +86,7 @@ Deliver_tolerance: 1.0  # Tight - need accurate drop position
 
 # PAYLOAD RELEASE
 
-# Slider + brake servos, configured in real_params.yaml (see
+# Plate + clamp servos, configured in real_params.yaml (see
 # docs/HITL/payload.md). Disabled here: DEPLOY skips the drop.
 payload:
   enabled: false

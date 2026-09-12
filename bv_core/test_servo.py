@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Bench tool for the payload servos, in the same degrees as the mission config.
+"""Bench tool for the payload servos, in microseconds like the mission config.
 
-    ros2 run bv_core test_servo show            # positions, pulses, DIS values
-    ros2 run bv_core test_servo slider 130      # one servo to an angle
-    ros2 run bv_core test_servo brake 107
-    ros2 run bv_core test_servo rest            # slider hold + brake rest
+    ros2 run bv_core test_servo show            # configured pulses, DIS values
+    ros2 run bv_core test_servo plate 1685      # one servo to a pulse width
+    ros2 run bv_core test_servo clamp 1900
+    ros2 run bv_core test_servo rest            # plate hold + clamp open
     ros2 run bv_core test_servo drop bottle     # full drop sequence (or beacon)
 
 Reads the payload block from the mission config selected by BV_MISSION_CONFIG
-(default real_params.yaml), ignoring payload.enabled and the startup range check:
-finding a position the flight controller can reach is what this tool is for.
+(default real_params.yaml), ignoring payload.enabled and the startup range
+check, so it works while the payload is disabled.
 
 PX4 only drives peripheral outputs while armed or pre-armed. On the bench,
 remove the propellers and either arm or set COM_PREARM_MODE = 2 (Always).
@@ -29,7 +29,6 @@ from .payload import (
     PAYLOADS,
     DropSequence,
     actuator_params,
-    degrees_to_us,
     parse_payload_block,
     unreachable_reason,
 )
@@ -39,7 +38,7 @@ DROP_TICK_SEC = 0.02
 
 
 def parse_args(argv):
-    """('servo', name, deg) | ('show',) | ('rest',) | ('drop', payload).
+    """('servo', name, us) | ('show',) | ('rest',) | ('drop', payload).
 
     Raises SystemExit with the usage text on anything else.
     """
@@ -47,7 +46,7 @@ def parse_args(argv):
         return (argv[0],)
     if len(argv) == 2 and argv[0] == 'drop' and argv[1] in PAYLOADS:
         return ('drop', argv[1])
-    if len(argv) == 2 and argv[0] in ('slider', 'brake'):
+    if len(argv) == 2 and argv[0] in ('plate', 'clamp'):
         try:
             return ('servo', argv[0], float(argv[1]))
         except ValueError:
@@ -56,37 +55,34 @@ def parse_args(argv):
 
 
 def describe(config):
-    """Every position with its pulse and range status, then the DIS values.
+    """Every position with its range status, then the DIS values.
 
-    Run after entering a new zero_deg: it shows whether everything fits and
-    which disarmed pulses to set on the flight controller.
+    Shows whether everything fits the PWM range and which disarmed pulses to
+    set on the flight controller.
     """
     lines = []
-    for servo, label, degrees in config.positions():
-        pulse = degrees_to_us(degrees, config.arduino_pulse_range_us)
-        reason = unreachable_reason(config, servo, degrees)
+    for servo, name, pulse in config.positions():
+        reason = unreachable_reason(servo, pulse)
         status = f"OUT OF RANGE: {reason}" if reason else "ok"
-        lines.append(f"{servo.name} {label}: {degrees:g} deg = {pulse:.0f} us "
-                     f"[{status}]")
-    for servo, degrees in ((config.slider, config.slider_hold_deg),
-                           (config.brake, config.brake_rest_deg)):
-        pulse = degrees_to_us(degrees, config.arduino_pulse_range_us)
-        lines.append(f"PWM_MAIN_DIS ({servo.name}): {pulse:.0f}")
+        lines.append(f"{servo.name} {name}: {pulse:g} us [{status}]")
+    for servo, pulse in ((config.plate, config.plate_hold_us),
+                         (config.clamp, config.unclamped_us)):
+        lines.append(f"PWM_MAIN_DIS ({servo.name}): {pulse:g}")
     return lines
 
 
 def drop_schedule(config, payload, tick_s=DROP_TICK_SEC):
-    """(t, slider_deg, brake_deg) at every position change in a drop."""
+    """(t, plate_us, clamp_us) at every position change in a drop."""
     sequence = DropSequence(config, payload)
     schedule = []
     last = None
     step = 0
     while True:
         t = step * tick_s
-        slider, brake, done = sequence.positions_at(t)
-        if (slider, brake) != last:
-            schedule.append((t, slider, brake))
-            last = (slider, brake)
+        plate, clamp, done = sequence.positions_at(t)
+        if (plate, clamp) != last:
+            schedule.append((t, plate, clamp))
+            last = (plate, clamp)
         if done:
             return schedule
         step += 1
@@ -100,21 +96,20 @@ class ServoBench(Node):
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /mavros/cmd/command...')
 
-    def send(self, slider_deg=None, brake_deg=None, wait_for_ack=True):
-        for servo, degrees in ((self.config.slider, slider_deg),
-                               (self.config.brake, brake_deg)):
-            if degrees is None:
+    def send(self, plate_us=None, clamp_us=None, wait_for_ack=True):
+        for servo, pulse in ((self.config.plate, plate_us),
+                             (self.config.clamp, clamp_us)):
+            if pulse is None:
                 continue
-            pulse = degrees_to_us(degrees, self.config.arduino_pulse_range_us)
-            reason = unreachable_reason(self.config, servo, degrees)
+            reason = unreachable_reason(servo, pulse)
             if reason:
                 self.get_logger().warn(
-                    f"{servo.name}: {reason} - PX4 will clamp it")
+                    f"{servo.name}: {reason} - PX4 will limit it to the range")
             self.get_logger().info(
                 f"{servo.name} (actuator set {servo.actuator_set}) -> "
-                f"{degrees:g} deg = {pulse:.0f} us")
+                f"{pulse:g} us")
 
-        command, params = actuator_params(self.config, slider_deg, brake_deg)
+        command, params = actuator_params(self.config, plate_us, clamp_us)
         request = CommandLong.Request()
         # Same as the mission during a drop: broadcast skips MAVROS's ACK wait.
         request.broadcast = not wait_for_ack
@@ -144,11 +139,11 @@ class ServoBench(Node):
             f"Dropping {payload}: {len(schedule)} commands over "
             f"{self.config.total_duration_s:.2f}s")
         start = time.monotonic()
-        for t, slider, brake in schedule:
+        for t, plate, clamp in schedule:
             delay = start + t - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
-            self.send(slider, brake, wait_for_ack=False)
+            self.send(plate, clamp, wait_for_ack=False)
             rclpy.spin_once(self, timeout_sec=0.0)
         remaining = start + self.config.total_duration_s - time.monotonic()
         if remaining > 0:
@@ -161,9 +156,16 @@ def main(args=None):
     argv = rclpy.utilities.remove_ros_args(sys.argv)[1:]
     action = parse_args(argv)
 
-    with open(mission_config_path(), 'r') as stream:
+    path = mission_config_path()
+    with open(path, 'r') as stream:
         mission = yaml.safe_load(stream)
-    config = parse_payload_block(mission.get('payload'))
+    try:
+        config = parse_payload_block(mission.get('payload'))
+    except ValueError as exc:
+        rclpy.shutdown()
+        raise SystemExit(
+            f"{path}: {exc}\nThis config has no servo values; pick one that "
+            f"does, e.g. BV_MISSION_CONFIG=real_params.yaml") from None
 
     if action[0] == 'show':
         # Pure config readout; needs no MAVROS.
@@ -175,13 +177,13 @@ def main(args=None):
     node = ServoBench(config)
     try:
         if action[0] == 'rest':
-            node.send(config.slider_hold_deg, config.brake_rest_deg)
+            node.send(config.plate_hold_us, config.unclamped_us)
         elif action[0] == 'drop':
             node.drop(action[1])
-        elif action[1] == 'slider':
-            node.send(slider_deg=action[2])
+        elif action[1] == 'plate':
+            node.send(plate_us=action[2])
         else:
-            node.send(brake_deg=action[2])
+            node.send(clamp_us=action[2])
     finally:
         node.destroy_node()
         rclpy.shutdown()

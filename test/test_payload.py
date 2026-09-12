@@ -9,7 +9,6 @@ from bv_core.payload import (
     MAV_CMD_DO_SET_ACTUATOR,
     actuator_params,
     altitude_mismatch_warning,
-    degrees_to_us,
     load_payload_config,
     parse_payload_block,
     payload_for_class,
@@ -20,24 +19,22 @@ from bv_core.payload import (
 
 
 def _block(**overrides):
-    """A payload block matching the tested Arduino values."""
+    """A payload block with the values measured in QGC."""
     block = {
         'enabled': True,
-        'arduino_pulse_range_us': [544, 2400],
-        'slider': {
+        'plate': {
             'actuator_set': 1,
-            'zero_deg': 100,
-            'beacon_offset_deg': 0,
-            'hold_offset_deg': 30,
-            'bottle_offset_deg': 70,
-            'pwm_range_us': [544, 2400],
+            'pwm_range_us': [800, 2200],
+            'hold_us': 1685,
+            'beacon_drop_us': 1360,
+            'bottle_drop_us': 2050,
         },
-        'brake': {
+        'clamp': {
             'actuator_set': 2,
-            'zero_deg': 107,
-            'pulse_offset_deg': 0,
-            'rest_offset_deg': 18,
-            'pwm_range_us': [544, 2400],
+            'pwm_range_us': [800, 2200],
+            'unclamped_us': 1900,
+            'bottle_clamped_us': 1577,
+            'beacon_clamped_us': 1300,
         },
         'brake_phases': [
             {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
@@ -54,54 +51,23 @@ def _config(**overrides):
 
 
 class TestConversion:
-    def test_arduino_servo_library_mapping(self):
-        # Servo.write(deg) on an AVR board: 0-180 deg -> 544-2400 us.
-        assert degrees_to_us(0, (544, 2400)) == pytest.approx(544)
-        assert degrees_to_us(180, (544, 2400)) == pytest.approx(2400)
-        assert degrees_to_us(130, (544, 2400)) == pytest.approx(1884.4, abs=0.1)
-        assert degrees_to_us(170, (544, 2400)) == pytest.approx(2296.9, abs=0.1)
-
     def test_pulse_to_px4_actuator_value(self):
-        assert us_to_actuator_value(1000, (1000, 2000)) == pytest.approx(-1.0)
-        assert us_to_actuator_value(1500, (1000, 2000)) == pytest.approx(0.0)
-        assert us_to_actuator_value(2000, (1000, 2000)) == pytest.approx(1.0)
-
-    def test_matching_ranges_reduce_to_degrees_over_ninety(self):
-        # With the FC range equal to the Arduino range, value = deg / 90 - 1.
-        for deg in (100, 107, 125, 130, 170):
-            us = degrees_to_us(deg, (544, 2400))
-            assert us_to_actuator_value(us, (544, 2400)) == pytest.approx(
-                deg / 90.0 - 1.0)
+        assert us_to_actuator_value(800, (800, 2200)) == pytest.approx(-1.0)
+        assert us_to_actuator_value(1500, (800, 2200)) == pytest.approx(0.0)
+        assert us_to_actuator_value(2200, (800, 2200)) == pytest.approx(1.0)
+        assert us_to_actuator_value(1685, (800, 2200)) == pytest.approx(
+            2 * 885 / 1400 - 1)
 
 
 class TestLoading:
-    def test_positions_are_zero_plus_offset(self):
+    def test_positions_are_the_configured_pulses(self):
         cfg = _config()
-        assert cfg.slider_hold_deg == 130
-        assert cfg.release_deg('beacon') == 100
-        assert cfg.release_deg('bottle') == 170
-        assert cfg.brake_rest_deg == 125
-        assert cfg.brake_pulse_deg == 107
-
-    def test_rezero_moves_every_position_of_that_servo(self):
-        # Re-mounting the horn so the beacon release sits at 58 deg keeps the
-        # 0/30/70 spacing and brings the bottle release inside PX4's range.
-        block = _block()
-        block['payload']['slider']['zero_deg'] = 58
-        block['payload']['slider']['pwm_range_us'] = [800, 2200]
-        cfg = load_payload_config(block)
-        assert cfg.release_deg('beacon') == 58
-        assert cfg.slider_hold_deg == 88
-        assert cfg.release_deg('bottle') == 128
-        # The brake keeps its own zero.
-        assert cfg.brake_rest_deg == 125
-        assert cfg.brake_pulse_deg == 107
-
-    def test_old_schema_names_the_missing_offset(self):
-        block = _block()
-        del block['payload']['slider']['hold_offset_deg']
-        with pytest.raises(ValueError, match='hold_offset_deg'):
-            load_payload_config(block)
+        assert cfg.plate_hold_us == 1685
+        assert cfg.plate_drop_us('beacon') == 1360
+        assert cfg.plate_drop_us('bottle') == 2050
+        assert cfg.unclamped_us == 1900
+        assert cfg.clamped_us('bottle') == 1577
+        assert cfg.clamped_us('beacon') == 1300
 
     def test_phase_durations_come_from_distance_over_speed(self):
         cfg = _config()
@@ -113,23 +79,36 @@ class TestLoading:
     def test_disabled_needs_nothing_else(self):
         assert load_payload_config({'payload': {'enabled': False}}) is None
 
-    def test_missing_block_is_an_error(self):
-        with pytest.raises(ValueError, match='payload'):
+    def test_missing_block_says_to_rebuild(self):
+        with pytest.raises(ValueError, match='colcon build'):
             load_payload_config({})
+
+    def test_unindented_block_is_explained(self):
+        # "payload:" followed by unindented lines parses as an empty value.
+        with pytest.raises(ValueError, match='indent'):
+            load_payload_config({'payload': None, 'enabled': False})
+        with pytest.raises(ValueError, match='indent'):
+            load_payload_config({'payload': 'enabled: false'})
 
     def test_enabled_must_be_boolean(self):
         with pytest.raises(ValueError, match='enabled'):
             load_payload_config({'payload': {'enabled': 'yes'}})
 
+    def test_every_position_is_required(self):
+        block = _block()
+        del block['payload']['clamp']['beacon_clamped_us']
+        with pytest.raises(ValueError, match='beacon_clamped_us'):
+            load_payload_config(block)
+
     def test_servos_need_distinct_actuator_sets(self):
         block = _block()
-        block['payload']['brake']['actuator_set'] = 1
+        block['payload']['clamp']['actuator_set'] = 1
         with pytest.raises(ValueError, match='actuator_set'):
             load_payload_config(block)
 
     def test_actuator_set_must_exist_on_px4(self):
         block = _block()
-        block['payload']['slider']['actuator_set'] = 7
+        block['payload']['plate']['actuator_set'] = 7
         with pytest.raises(ValueError, match='actuator_set'):
             load_payload_config(block)
 
@@ -144,40 +123,35 @@ class TestLoading:
 
 
 class TestRangeCheck:
-    def test_positions_inside_fc_range_pass(self):
-        _config()  # Arduino-equal range: everything reachable
+    def test_measured_values_fit_the_default_range(self):
+        assert unreachable_positions(_config()) == []
 
     def test_unreachable_position_names_the_position(self):
         block = _block()
-        block['payload']['slider']['pwm_range_us'] = [800, 2200]
+        block['payload']['plate']['bottle_drop_us'] = 2300
         with pytest.raises(ValueError) as error:
             load_payload_config(block)
         message = str(error.value)
-        assert 'bottle' in message
-        assert '170' in message
+        assert 'bottle_drop' in message and '2300' in message
         assert '2200' in message
-        # Reachable positions are not reported.
-        assert 'beacon' not in message
+        assert 'beacon_drop' not in message
 
     def test_bench_parse_skips_enabled_and_reachability(self):
         block = _block(enabled=False)['payload']
-        block['slider']['pwm_range_us'] = [800, 2200]
+        block['plate']['bottle_drop_us'] = 2300
         cfg = parse_payload_block(block)
-        assert cfg.release_deg('bottle') == 170
+        assert cfg.plate_drop_us('bottle') == 2300
         problems = unreachable_positions(cfg)
-        assert len(problems) == 1 and 'bottle' in problems[0]
+        assert len(problems) == 1 and 'bottle_drop' in problems[0]
 
-    def test_unreachable_reason_for_a_single_angle(self):
+    def test_unreachable_reason_for_a_single_pulse(self):
         cfg = _config()
-        assert unreachable_reason(cfg, cfg.slider, 130) is None
-        block = _block()['payload']
-        block['slider']['pwm_range_us'] = [800, 2200]
-        narrow = parse_payload_block(block)
-        assert '2200' in unreachable_reason(narrow, narrow.slider, 170)
+        assert unreachable_reason(cfg.plate, 1685) is None
+        assert '2200' in unreachable_reason(cfg.plate, 2300)
 
     def test_range_must_be_ordered(self):
         block = _block()
-        block['payload']['brake']['pwm_range_us'] = [2000, 1000]
+        block['payload']['clamp']['pwm_range_us'] = [2000, 1000]
         with pytest.raises(ValueError, match='pwm_range_us'):
             load_payload_config(block)
 
@@ -194,39 +168,40 @@ class TestPayloadSelection:
 
 
 class TestDropSequence:
-    def test_starts_with_release_and_brake_pulse(self):
+    def test_starts_with_drop_and_clamp(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(0.0) == (170, 107, False)
+        assert seq.positions_at(0.0) == (2050, 1577, False)
 
-    def test_beacon_uses_its_own_release(self):
+    def test_beacon_uses_its_own_drop_and_clamp(self):
         seq = DropSequence(_config(), 'beacon')
-        assert seq.positions_at(0.0)[0] == 100
+        assert seq.positions_at(0.0) == (1360, 1300, False)
+        assert seq.positions_at(0.21)[1] == 1900
 
     def test_phase_one_toggles_every_200ms(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(0.19)[1] == 107
-        assert seq.positions_at(0.21)[1] == 125
-        assert seq.positions_at(0.41)[1] == 107
+        assert seq.positions_at(0.19)[1] == 1577
+        assert seq.positions_at(0.21)[1] == 1900
+        assert seq.positions_at(0.41)[1] == 1577
 
-    def test_phase_two_toggles_every_150ms_and_starts_on_pulse(self):
+    def test_phase_two_toggles_every_150ms_and_starts_clamped(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(5.01)[1] == 107
-        assert seq.positions_at(5.16)[1] == 125
-        assert seq.positions_at(5.31)[1] == 107
+        assert seq.positions_at(5.01)[1] == 1577
+        assert seq.positions_at(5.16)[1] == 1900
+        assert seq.positions_at(5.31)[1] == 1577
 
     def test_phase_three_toggles_every_100ms(self):
         seq = DropSequence(_config(), 'bottle')
         start = 5.0 + 50 / 13.3
-        assert seq.positions_at(start + 0.01)[1] == 107
-        assert seq.positions_at(start + 0.11)[1] == 125
-        assert seq.positions_at(start + 0.21)[1] == 107
+        assert seq.positions_at(start + 0.01)[1] == 1577
+        assert seq.positions_at(start + 0.11)[1] == 1900
+        assert seq.positions_at(start + 0.21)[1] == 1577
 
-    def test_ends_with_brake_at_rest_and_slider_left_released(self):
+    def test_ends_unclamped_with_plate_left_at_drop(self):
         cfg = _config()
         seq = DropSequence(cfg, 'bottle')
         assert seq.positions_at(cfg.total_duration_s - 0.001)[2] is False
-        assert seq.positions_at(cfg.total_duration_s) == (170, 125, True)
-        assert seq.positions_at(60.0) == (170, 125, True)
+        assert seq.positions_at(cfg.total_duration_s) == (2050, 1900, True)
+        assert seq.positions_at(60.0) == (2050, 1900, True)
 
     def test_unknown_payload_rejected(self):
         with pytest.raises(ValueError):
@@ -236,10 +211,10 @@ class TestDropSequence:
 class TestCommand:
     def test_only_the_named_actuator_sets_are_touched(self):
         cfg = _config()
-        command, params = actuator_params(cfg, slider_deg=130)
+        command, params = actuator_params(cfg, plate_us=1685)
         assert command == MAV_CMD_DO_SET_ACTUATOR
         assert len(params) == 7
-        assert params[0] == pytest.approx(130 / 90 - 1)
+        assert params[0] == pytest.approx(us_to_actuator_value(1685, (800, 2200)))
         assert all(math.isnan(p) for p in params[1:6])
         assert params[6] == 0  # actuator set index
         # CommandLong fields are float32; rosidl rejects an int.
@@ -247,9 +222,9 @@ class TestCommand:
 
     def test_both_servos_in_one_command(self):
         cfg = _config()
-        _, params = actuator_params(cfg, slider_deg=170, brake_deg=107)
-        assert params[0] == pytest.approx(170 / 90 - 1)
-        assert params[1] == pytest.approx(107 / 90 - 1)
+        _, params = actuator_params(cfg, plate_us=2050, clamp_us=1577)
+        assert params[0] == pytest.approx(us_to_actuator_value(2050, (800, 2200)))
+        assert params[1] == pytest.approx(us_to_actuator_value(1577, (800, 2200)))
 
 
 class TestAltitudeWarning:

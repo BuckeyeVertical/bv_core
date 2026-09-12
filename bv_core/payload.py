@@ -1,27 +1,25 @@
-"""Payload release: the slider and brake servo sequence, driven through PX4.
+"""Payload release: the plate and clamp servo sequence, driven through PX4.
 
 Pure logic, no ROS, so it is unit-tested standalone. mission_node owns the timer
 and the MAVROS client; this module only answers "where should each servo be at
 time t" and "what MAVLink command puts them there".
 
-The hardware, as tested with an Arduino before moving to the flight controller:
+The hardware:
 
-    slider  holds both payloads in the middle; one side drops the beacon, the
-            other the bottle
-    brake   rests; during a drop it toggles between its pulse position and
-            rest, faster as the payload nears the ground
+    plate   sits under both payloads and holds them up; moving it one way drops
+            the beacon, the other way the bottle
+    clamp   grips the line to slow the payload's fall (it holds nothing up);
+            during a drop it toggles between clamped and unclamped, faster as
+            the payload nears the ground. Each payload has its own clamped
+            position, since they weigh different amounts.
 
-Positions are configured in degrees as one zero per servo plus a fixed offset
-for each position (slider: beacon 0, hold 30, bottle 70). The offsets are the
-mechanism's geometry and never change; the zero is wherever the horn happens to
-sit on the spline. Re-mounting a horn means measuring and entering its new zero,
-and it is also how the positions are moved into the flight controller's range.
+Positions are pulse widths in microseconds, read straight off QGC's Actuators
+page (type a value into an output's disarmed field and watch the servo).
 
-Degrees become a pulse width the way Arduino's Servo.write() does it, so the
-flight controller reproduces the pulses the team tested with. PX4 does not take a
-pulse width: MAV_CMD_DO_SET_ACTUATOR carries -1..1 per "Peripheral via Actuator
-Set N" output, which PX4 maps onto that output's PWM_MAIN_MINn..PWM_MAIN_MAXn. So
-the second step converts the pulse into that range, which must match the FC.
+PX4 does not take a pulse width in a command: MAV_CMD_DO_SET_ACTUATOR carries
+-1..1 per "Peripheral via Actuator Set N" output, which PX4 maps onto that
+output's PWM_MAIN_MINn..PWM_MAIN_MAXn. pwm_range_us must therefore equal those
+two parameters, and every position must lie inside it.
 """
 
 import math
@@ -36,14 +34,12 @@ NUM_ACTUATOR_SETS = 6
 PAYLOAD_BY_CLASS = {0: 'bottle', 1: 'beacon'}
 PAYLOADS = ('bottle', 'beacon')
 
+# Config keys per servo, without the _us suffix.
+PLATE_POSITIONS = ('hold', 'beacon_drop', 'bottle_drop')
+CLAMP_POSITIONS = ('unclamped', 'bottle_clamped', 'beacon_clamped')
+
 FT_PER_M = 1.0 / 0.3048
 ALTITUDE_WARNING_TOLERANCE_FT = 2.0
-
-
-def degrees_to_us(degrees, pulse_range_us):
-    """Pulse width for an angle, as Arduino's Servo.write() computes it."""
-    low, high = pulse_range_us
-    return low + degrees * (high - low) / 180.0
 
 
 def us_to_actuator_value(pulse_us, pwm_range_us):
@@ -63,8 +59,8 @@ def payload_for_class(class_id):
 class ServoConfig:
     name: str
     actuator_set: int
-    zero_deg: float
     pwm_range_us: tuple
+    positions_us: dict   # position name -> pulse width
 
 
 @dataclass(frozen=True)
@@ -84,27 +80,23 @@ class BrakePhase:
 
 @dataclass(frozen=True)
 class PayloadConfig:
-    slider: ServoConfig
-    brake: ServoConfig
-    slider_offsets_deg: dict   # 'hold', 'beacon', 'bottle'
-    brake_offsets_deg: dict    # 'rest', 'pulse'
-    arduino_pulse_range_us: tuple
+    plate: ServoConfig
+    clamp: ServoConfig
     brake_phases: tuple
 
     @property
-    def slider_hold_deg(self):
-        return self.slider.zero_deg + self.slider_offsets_deg['hold']
+    def plate_hold_us(self):
+        return self.plate.positions_us['hold']
 
-    def release_deg(self, payload):
-        return self.slider.zero_deg + self.slider_offsets_deg[payload]
-
-    @property
-    def brake_rest_deg(self):
-        return self.brake.zero_deg + self.brake_offsets_deg['rest']
+    def plate_drop_us(self, payload):
+        return self.plate.positions_us[f'{payload}_drop']
 
     @property
-    def brake_pulse_deg(self):
-        return self.brake.zero_deg + self.brake_offsets_deg['pulse']
+    def unclamped_us(self):
+        return self.clamp.positions_us['unclamped']
+
+    def clamped_us(self, payload):
+        return self.clamp.positions_us[f'{payload}_clamped']
 
     @property
     def total_duration_s(self):
@@ -115,18 +107,13 @@ class PayloadConfig:
         return sum(phase.drop_ft for phase in self.brake_phases)
 
     def positions(self):
-        """Every commanded position as (servo, label, degrees)."""
-        return [
-            (self.slider, 'hold', self.slider_hold_deg),
-            *((self.slider, f'{payload} release', self.release_deg(payload))
-              for payload in PAYLOADS),
-            (self.brake, 'rest', self.brake_rest_deg),
-            (self.brake, 'pulse', self.brake_pulse_deg),
-        ]
+        """Every configured position as (servo, name, pulse_us)."""
+        return [(servo, name, pulse)
+                for servo in (self.plate, self.clamp)
+                for name, pulse in servo.positions_us.items()]
 
-    def actuator_value(self, servo, degrees):
-        pulse = degrees_to_us(degrees, self.arduino_pulse_range_us)
-        return us_to_actuator_value(pulse, servo.pwm_range_us)
+    def actuator_value(self, servo, pulse_us):
+        return us_to_actuator_value(pulse_us, servo.pwm_range_us)
 
 
 def load_payload_config(mission_config):
@@ -135,16 +122,25 @@ def load_payload_config(mission_config):
     Returns None when the payload is disabled; nothing else in the block is read
     then, so a test flight works before the numbers are filled in.
 
-    Raises ValueError for anything malformed, and for any position the flight
-    controller's PWM range cannot reach. A servo that is quietly clamped to the
-    nearest reachable pulse can look fine on the ground and never release in
-    the air, so an unreachable position stops the mission before takeoff.
+    Raises ValueError for anything malformed, and for any position outside its
+    servo's PWM range. PX4 would clamp such a position to the range's edge,
+    which can look fine on the ground and never release in the air, so it
+    stops the mission before takeoff instead.
     """
-    block = mission_config.get('payload')
+    if 'payload' not in mission_config:
+        raise ValueError(
+            "mission config has no 'payload' block. If the YAML file does "
+            "contain one, rebuild (colcon build --packages-select bv_core): "
+            "mission_node reads the installed copy of the config")
+    block = mission_config['payload']
+    if block is None:
+        raise ValueError(
+            "payload block is empty: indent the lines under 'payload:' "
+            "(e.g. '  enabled: false')")
     if not isinstance(block, dict):
         raise ValueError(
-            "mission config is missing the 'payload' block "
-            "(set payload.enabled: false to fly without one)")
+            f"payload must be a mapping, got {block!r}: check that the lines "
+            f"under 'payload:' are indented")
 
     enabled = block.get('enabled')
     if not isinstance(enabled, bool):
@@ -157,11 +153,10 @@ def load_payload_config(mission_config):
     problems = unreachable_positions(config)
     if problems:
         raise ValueError(
-            "payload positions the flight controller cannot reach: "
+            "payload positions outside the flight controller's PWM range: "
             + "; ".join(problems)
-            + ". Re-mount the servo horn and enter its new zero_deg "
-            "(docs/HITL/payload.md), or widen PWM_MAIN_MINn/MAXn on the FC "
-            "and pwm_range_us to match.")
+            + ". Fix the position, or set PWM_MAIN_MINn/MAXn on the FC and "
+            "pwm_range_us to match.")
     return config
 
 
@@ -169,55 +164,38 @@ def parse_payload_block(block):
     """Parse the payload block's values, ignoring enabled and reachability.
 
     For the bench tool, which must work while the payload is disabled or a
-    position is still out of range: finding a reachable position is its job.
+    position is still out of range.
     """
     block = _mapping(block, 'payload')
-    arduino_range = _pulse_range(
-        block.get('arduino_pulse_range_us'), 'payload.arduino_pulse_range_us')
-    slider_block = _mapping(block.get('slider'), 'payload.slider')
-    brake_block = _mapping(block.get('brake'), 'payload.brake')
-    slider = _servo('slider', slider_block)
-    brake = _servo('brake', brake_block)
-    if slider.actuator_set == brake.actuator_set:
+    plate = _servo('plate', block, PLATE_POSITIONS)
+    clamp = _servo('clamp', block, CLAMP_POSITIONS)
+    if plate.actuator_set == clamp.actuator_set:
         raise ValueError(
-            "payload.slider.actuator_set and payload.brake.actuator_set must "
-            f"differ (both are {slider.actuator_set})")
-
-    config = PayloadConfig(
-        slider=slider,
-        brake=brake,
-        slider_offsets_deg={
-            name: _number(slider_block, f'{name}_offset_deg', 'payload.slider')
-            for name in ('hold', *PAYLOADS)
-        },
-        brake_offsets_deg={
-            name: _number(brake_block, f'{name}_offset_deg', 'payload.brake')
-            for name in ('rest', 'pulse')
-        },
-        arduino_pulse_range_us=arduino_range,
+            "payload.plate.actuator_set and payload.clamp.actuator_set must "
+            f"differ (both are {plate.actuator_set})")
+    return PayloadConfig(
+        plate=plate,
+        clamp=clamp,
         brake_phases=_phases(block.get('brake_phases')),
     )
-    return config
 
 
 def unreachable_positions(config):
     """One message per position outside its servo's PWM range."""
     problems = []
-    for servo, label, degrees in config.positions():
-        problem = unreachable_reason(config, servo, degrees)
+    for servo, name, pulse in config.positions():
+        problem = unreachable_reason(servo, pulse)
         if problem:
-            problems.append(f"{servo.name} {label} {problem}")
+            problems.append(f"{servo.name} {name} {problem}")
     return problems
 
 
-def unreachable_reason(config, servo, degrees):
-    """Why a servo cannot reach this angle, or None when it can."""
-    pulse = degrees_to_us(degrees, config.arduino_pulse_range_us)
+def unreachable_reason(servo, pulse_us):
+    """Why a servo cannot emit this pulse, or None when it can."""
     low, high = servo.pwm_range_us
-    if low <= pulse <= high:
+    if low <= pulse_us <= high:
         return None
-    return (f"{degrees:g} deg needs {pulse:.0f} us, outside pwm_range_us "
-            f"[{low:g}, {high:g}]")
+    return f"{pulse_us:g} us is outside pwm_range_us [{low:g}, {high:g}]"
 
 
 def altitude_mismatch_warning(config, altitude_m):
@@ -227,22 +205,21 @@ def altitude_mismatch_warning(config, altitude_m):
         return None
     return (
         f"payload.brake_phases cover a {config.drop_ft:g} ft drop but delivery "
-        f"altitude is {altitude_ft:.0f} ft: the brake timing will not match "
+        f"altitude is {altitude_ft:.0f} ft: the clamp timing will not match "
         f"the payload's descent")
 
 
-def actuator_params(config, slider_deg=None, brake_deg=None):
-    """MAV_CMD_DO_SET_ACTUATOR and its seven params for the given positions.
+def actuator_params(config, plate_us=None, clamp_us=None):
+    """MAV_CMD_DO_SET_ACTUATOR and its seven params for the given pulses.
 
     A servo left as None gets NaN, which PX4 treats as "leave unchanged", so
     commanding one servo never disturbs the other.
     """
     params = [math.nan] * 7
-    for servo, degrees in ((config.slider, slider_deg),
-                           (config.brake, brake_deg)):
-        if degrees is not None:
+    for servo, pulse in ((config.plate, plate_us), (config.clamp, clamp_us)):
+        if pulse is not None:
             params[servo.actuator_set - 1] = config.actuator_value(
-                servo, degrees)
+                servo, pulse)
     # Actuator set index: param1..6 address sets 1..6. A float, because the
     # CommandLong fields are float32 and rosidl rejects an int.
     params[6] = 0.0
@@ -250,13 +227,13 @@ def actuator_params(config, slider_deg=None, brake_deg=None):
 
 
 class DropSequence:
-    """Servo positions over one drop, as a function of elapsed time.
+    """Servo pulses over one drop, as a function of elapsed time.
 
-    Mirrors the tested Arduino dropBeacon()/dropBottle(): the slider moves to
-    the release and the brake to its pulse position at t=0; the brake then
-    toggles between pulse and rest at each phase's interval, restarting on
-    pulse at each phase boundary; when the last phase ends the brake rests and
-    the slider stays at the release position.
+    At t=0 the plate moves to this payload's drop position and the clamp
+    grips. The clamp then toggles between this payload's clamped position and
+    unclamped at each phase's interval, restarting clamped at each phase
+    boundary. When the last phase ends the clamp is left unclamped and the
+    plate stays at the drop position, as in the tested Arduino sequence.
     """
 
     def __init__(self, config, payload):
@@ -264,21 +241,22 @@ class DropSequence:
             raise ValueError(f"unknown payload {payload!r}")
         self.config = config
         self.payload = payload
-        self.slider_deg = config.release_deg(payload)
+        self.plate_us = config.plate_drop_us(payload)
+        self.clamped_us = config.clamped_us(payload)
 
     def positions_at(self, elapsed_s):
-        """(slider_deg, brake_deg, done) at elapsed_s into the drop."""
+        """(plate_us, clamp_us, done) at elapsed_s into the drop."""
         phase_start = 0.0
         for phase in self.config.brake_phases:
             phase_end = phase_start + phase.duration_s
             if elapsed_s < phase_end:
                 toggles = int(max(0.0, elapsed_s - phase_start)
                               // phase.toggle_s)
-                brake = (self.config.brake_pulse_deg if toggles % 2 == 0
-                         else self.config.brake_rest_deg)
-                return self.slider_deg, brake, False
+                clamp = (self.clamped_us if toggles % 2 == 0
+                         else self.config.unclamped_us)
+                return self.plate_us, clamp, False
             phase_start = phase_end
-        return self.slider_deg, self.config.brake_rest_deg, True
+        return self.plate_us, self.config.unclamped_us, True
 
 
 # -- parsing helpers -------------------------------------------------------
@@ -310,8 +288,9 @@ def _pulse_range(value, where):
     return low, high
 
 
-def _servo(name, block):
+def _servo(name, payload_block, position_names):
     where = f'payload.{name}'
+    block = _mapping(payload_block.get(name), where)
     actuator_set = block.get('actuator_set')
     if (isinstance(actuator_set, bool) or not isinstance(actuator_set, int)
             or not 1 <= actuator_set <= NUM_ACTUATOR_SETS):
@@ -321,9 +300,12 @@ def _servo(name, block):
     return ServoConfig(
         name=name,
         actuator_set=actuator_set,
-        zero_deg=_number(block, 'zero_deg', where),
         pwm_range_us=_pulse_range(
             block.get('pwm_range_us'), f'{where}.pwm_range_us'),
+        positions_us={
+            position: _number(block, f'{position}_us', where)
+            for position in position_names
+        },
     )
 
 

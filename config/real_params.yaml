@@ -38,42 +38,34 @@ Deliver_tolerance: 1.0
 # ------------------------------------------------------------
 # PAYLOAD RELEASE (bv_core/payload.py, docs/HITL/payload.md)
 # ------------------------------------------------------------
-# Enabled for flight. Set false to fly without payload hardware.
+# true: drop payloads at each target. false: fly the same mission without
+# payload hardware (DEPLOY skips the drop).
 payload:
   enabled: false
 
-  # Each servo = one zero_deg (where the horn sits on the spline) plus fixed
-  # offsets (the mechanism's geometry, never change). After re-mounting a
-  # horn, measure its new zero with the bench tool and enter it here; every
-  # position of that servo moves with it (docs/HITL/payload.md).
-  # Degrees -> pulse uses Arduino Servo.write()'s mapping, so the flight
-  # controller emits the pulses that were tested on the bench.
-  arduino_pulse_range_us: [544, 2400]   # AVR Servo library: 0-180 deg
+  # Pulse widths in microseconds, measured on QGC's Actuators page (type a
+  # value into the output's disarmed field, watch the servo). 50 Hz outputs.
+  # See docs/HITL/payload.md.
 
-  slider:
+  # Plate: sits under both payloads and holds them up.
+  plate:
     actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
-    # zero = the beacon release. 100 matches the horn as mounted for the
-    # Arduino test; RE-ZERO before flight (bottle at zero+70 must fit the range).
-    zero_deg: 100
-    beacon_offset_deg: 0     # drops the beacon (tent)
-    hold_offset_deg: 30      # holds both payloads
-    bottle_offset_deg: 70    # drops the bottle (person)
-    # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn on this output. 800-2200 us
-    # reaches ~25-160 deg, so zero_deg must be ~25-90 for zero+70 to fit;
-    # ~55-60 leaves margin on both sides. With zero 100 the bottle needs 170
-    # deg and mission_node refuses to start until the horn is re-zeroed.
-    pwm_range_us: [800, 2200]
+    pwm_range_us: [800, 2200]  # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn
+    hold_us: 1685            # both payloads held
+    beacon_drop_us: 1360     # drops the beacon (tent)
+    bottle_drop_us: 2050     # drops the bottle (person)
 
-  brake:
+  # Clamp: grips the line to slow the fall; holds nothing up.
+  clamp:
     actuator_set: 2          # PWM_MAIN_FUNCn = 302 (Peripheral via Actuator Set 2)
-    zero_deg: 107            # zero = the pulse position
-    pulse_offset_deg: 0      # toggled against rest during a drop
-    rest_offset_deg: 18      # rest (125 deg with this zero)
-    pwm_range_us: [800, 2200]
+    pwm_range_us: [800, 2200]  # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn
+    unclamped_us: 1900       # open; also its position at rest
+    bottle_clamped_us: 1577  # gripping for the water bottle
+    beacon_clamped_us: 1300  # PLACEHOLDER - replace with the measured value
 
-  # The brake toggles pulse <-> rest every toggle_ms; each phase lasts
-  # drop_ft / speed_ftps seconds. The drops should sum to the delivery
-  # altitude (150 ft = 45.72 m); mission_node warns at startup if not.
+  # During a drop the clamp toggles clamped <-> unclamped every toggle_ms;
+  # each phase lasts drop_ft / speed_ftps seconds. The drops should sum to
+  # the delivery altitude (150 ft = 45.72 m); mission_node warns if not.
   brake_phases:
     - {drop_ft: 75, speed_ftps: 15.0, toggle_ms: 200}   # 5.00 s
     - {drop_ft: 50, speed_ftps: 13.3, toggle_ms: 150}   # 3.76 s
