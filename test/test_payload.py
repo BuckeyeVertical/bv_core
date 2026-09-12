@@ -36,6 +36,7 @@ def _block(**overrides):
             'bottle_clamped_us': 1577,
             'beacon_clamped_us': 1300,
         },
+        'pre_drop_s': 1.0,
         'brake_phases': [
             {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
             {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},
@@ -73,8 +74,20 @@ class TestLoading:
         cfg = _config()
         durations = [phase.duration_s for phase in cfg.brake_phases]
         assert durations == pytest.approx([5.0, 50 / 13.3, 2.0])
-        assert cfg.total_duration_s == pytest.approx(10.759, abs=0.001)
+        assert cfg.brake_duration_s == pytest.approx(10.759, abs=0.001)
+        # The 1 s pre-brake comes on top; it doesn't shorten the braking.
+        assert cfg.total_duration_s == pytest.approx(11.759, abs=0.001)
         assert cfg.drop_ft == pytest.approx(150)
+
+    def test_pre_drop_is_required_and_not_negative(self):
+        block = _block()
+        del block['payload']['pre_drop_s']
+        with pytest.raises(ValueError, match='pre_drop_s'):
+            load_payload_config(block)
+        with pytest.raises(ValueError, match='pre_drop_s'):
+            _config(pre_drop_s=-1)
+        assert _config(pre_drop_s=0).total_duration_s == pytest.approx(
+            10.759, abs=0.001)
 
     def test_disabled_needs_nothing_else(self):
         assert load_payload_config({'payload': {'enabled': False}}) is None
@@ -168,43 +181,56 @@ class TestPayloadSelection:
 
 
 class TestDropSequence:
-    def test_starts_with_drop_and_clamp(self):
+    """pre_drop_s = 1.0: brake on the held plate first, then the drop."""
+
+    def test_pre_brake_clamps_while_the_plate_still_holds(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(0.0) == (2050, 1577, False)
+        assert seq.positions_at(0.0) == (1685, 1577, False)
+
+    def test_pre_brake_toggles_at_the_first_phase_rhythm(self):
+        seq = DropSequence(_config(), 'bottle')
+        assert seq.positions_at(0.19)[:2] == (1685, 1577)
+        assert seq.positions_at(0.21)[:2] == (1685, 1900)
+        assert seq.positions_at(0.41)[:2] == (1685, 1577)
+        assert seq.positions_at(0.99)[0] == 1685
+
+    def test_plate_drops_after_the_pre_brake_with_braking_restarted(self):
+        seq = DropSequence(_config(), 'bottle')
+        assert seq.positions_at(1.0) == (2050, 1577, False)
+        assert seq.positions_at(1.21)[1] == 1900
 
     def test_beacon_uses_its_own_drop_and_clamp(self):
         seq = DropSequence(_config(), 'beacon')
-        assert seq.positions_at(0.0) == (1360, 1300, False)
-        assert seq.positions_at(0.21)[1] == 1900
+        assert seq.positions_at(0.0) == (1685, 1300, False)
+        assert seq.positions_at(1.0) == (1360, 1300, False)
+        assert seq.positions_at(1.21)[1] == 1900
 
-    def test_phase_one_toggles_every_200ms(self):
+    def test_braking_phases_keep_their_full_length(self):
         seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(0.19)[1] == 1577
-        assert seq.positions_at(0.21)[1] == 1900
-        assert seq.positions_at(0.41)[1] == 1577
-
-    def test_phase_two_toggles_every_150ms_and_starts_clamped(self):
-        seq = DropSequence(_config(), 'bottle')
-        assert seq.positions_at(5.01)[1] == 1577
-        assert seq.positions_at(5.16)[1] == 1900
-        assert seq.positions_at(5.31)[1] == 1577
-
-    def test_phase_three_toggles_every_100ms(self):
-        seq = DropSequence(_config(), 'bottle')
-        start = 5.0 + 50 / 13.3
+        pre = 1.0
+        # Phase 1: 200 ms toggles for 5.00 s after the plate moves.
+        assert seq.positions_at(pre + 4.99)[1] in (1577, 1900)
+        # Phase 2 starts at pre + 5.00 s, clamped, 150 ms toggles.
+        assert seq.positions_at(pre + 5.01)[1] == 1577
+        assert seq.positions_at(pre + 5.16)[1] == 1900
+        # Phase 3 starts at pre + 8.76 s, 100 ms toggles.
+        start = pre + 5.0 + 50 / 13.3
         assert seq.positions_at(start + 0.01)[1] == 1577
         assert seq.positions_at(start + 0.11)[1] == 1900
-        assert seq.positions_at(start + 0.21)[1] == 1577
 
     def test_ends_unclamped_with_plate_back_at_hold(self):
         cfg = _config()
         seq = DropSequence(cfg, 'bottle')
-        # The plate holds the drop position for the whole brake sequence...
+        # The plate holds the drop position until the braking ends...
         plate, _, done = seq.positions_at(cfg.total_duration_s - 0.001)
         assert (plate, done) == (2050, False)
         # ...then returns to hold, so the other payload is gripped again.
         assert seq.positions_at(cfg.total_duration_s) == (1685, 1900, True)
         assert seq.positions_at(60.0) == (1685, 1900, True)
+
+    def test_no_pre_brake_drops_at_once(self):
+        seq = DropSequence(_config(pre_drop_s=0), 'bottle')
+        assert seq.positions_at(0.0) == (2050, 1577, False)
 
     def test_unknown_payload_rejected(self):
         with pytest.raises(ValueError):

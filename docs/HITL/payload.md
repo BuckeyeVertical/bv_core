@@ -34,9 +34,13 @@ To change a position, measure it in QGC the same way, then type the new number i
 
 ## Drop sequence
 
-At t = 0 the plate moves to that payload's drop position and the clamp closes on
-that payload's clamped position. The clamp then toggles between clamped and
-unclamped through three phases. Each phase lasts `drop_ft / speed_ftps` seconds:
+**Pre-brake (`pre_drop_s`, 1 s):** the clamp starts braking while the plate still
+holds. It toggles between that payload's clamped position and unclamped at the
+first phase's 200 ms rhythm.
+
+**Drop:** after the pre-brake, the plate moves to that payload's drop position.
+The three braking phases then run in full; the pre-brake doesn't shorten them.
+Each phase lasts `drop_ft / speed_ftps` seconds:
 
 | Phase | Distance | Speed | Toggle interval | Duration |
 |---|---|---|---|---|
@@ -46,7 +50,8 @@ unclamped through three phases. Each phase lasts `drop_ft / speed_ftps` seconds:
 
 Every phase starts clamped. After the last phase the clamp opens (1900) and the
 plate returns to hold (1685), so the payload still aboard is gripped again. The
-drone holds over the target for the full 10.76 s, then resumes the scan.
+drone holds over the target for the whole drop, 1 s plus 10.76 s = 11.76 s, then
+resumes the scan.
 Deliveries can happen in either order. If RTL interrupts a drop, both servos go
 back to rest the same way.
 
@@ -105,7 +110,7 @@ ros2 run bv_core test_servo show            # configured pulses, range check, DI
 ros2 run bv_core test_servo rest            # plate hold + clamp open
 ros2 run bv_core test_servo plate 1685      # one servo to a pulse
 ros2 run bv_core test_servo clamp 1577
-ros2 run bv_core test_servo drop bottle     # full 10.76 s sequence (or: beacon)
+ros2 run bv_core test_servo drop bottle     # full 11.76 s sequence (or: beacon)
 ```
 
 The tool reads the mission config selected by `BV_MISSION_CONFIG` (default

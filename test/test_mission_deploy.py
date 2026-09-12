@@ -25,6 +25,7 @@ def payload_config():
         'clamp': {'actuator_set': 1, 'pwm_range_us': [800, 2200],
                   'unclamped_us': 1900, 'bottle_clamped_us': 1577,
                   'beacon_clamped_us': 1300},
+        'pre_drop_s': 1.0,
         'brake_phases': [
             {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
             {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},
@@ -127,17 +128,22 @@ class DeployTestCase(unittest.TestCase):
 
 
 class TestDeploy(DeployTestCase):
-    def test_person_gets_bottle_drop_and_clamp_immediately(self):
+    def test_person_gets_bottle_clamp_then_bottle_drop(self):
         node = mission(payload_config(), class_id=0)
         node.enter_deploy_state()
         self.assertEqual(node.current_state, STATE_DEPLOY)
-        self.assertEqual(sent(node), [(2050, 1577)])
+        # Pre-brake: the clamp grips while the plate still holds.
+        self.assertEqual(sent(node), [(1685, 1577)])
         node.create_timer.assert_called_once()
+        self.run_drop(node, 1.01)
+        self.assertEqual(sent(node)[-1], (2050, 1577))
 
-    def test_tent_gets_beacon_drop_and_beacon_clamp(self):
+    def test_tent_gets_beacon_clamp_then_beacon_drop(self):
         node = mission(payload_config(), class_id=1)
         node.enter_deploy_state()
-        self.assertEqual(sent(node)[0], (1360, 1300))
+        self.assertEqual(sent(node)[0], (1685, 1300))
+        self.run_drop(node, 1.01)
+        self.assertEqual(sent(node)[-1], (1360, 1300))
 
     def test_commands_are_addressed_do_set_actuator(self):
         # PX4 on the flight controller rejects the broadcast form as
@@ -151,16 +157,22 @@ class TestDeploy(DeployTestCase):
         self.assertTrue(all(math.isnan(p) for p in (
             request.param3, request.param4, request.param5, request.param6)))
 
-    def test_clamp_toggles_and_plate_is_repeated(self):
+    def test_plate_holds_during_the_pre_brake_then_drops(self):
         node = mission(payload_config())
         node.enter_deploy_state()
+        self.run_drop(node, 0.99)
+        pre = sent(node)
+        self.assertEqual([clamp for _, clamp in pre],
+                         [1577, 1900, 1577, 1900, 1577])
+        self.assertTrue(all(plate == 1685 for plate, _ in pre))
         self.run_drop(node, 1.0)
-        commands = sent(node)
-        self.assertEqual([clamp for _, clamp in commands],
-                         [1577, 1900, 1577, 1900, 1577, 1900])
+        after = sent(node)[len(pre):]
+        # The braking phase restarts clamped when the plate moves at 1 s.
+        self.assertEqual([clamp for _, clamp in after][:5],
+                         [1577, 1900, 1577, 1900, 1577])
         # Every command re-asserts the drop, so a lost command cannot
         # leave the plate holding the payload.
-        self.assertTrue(all(plate == 2050 for plate, _ in commands))
+        self.assertTrue(all(plate == 2050 for plate, _ in after))
 
     def test_sends_only_on_change(self):
         node = mission(payload_config())
@@ -171,9 +183,10 @@ class TestDeploy(DeployTestCase):
     def test_completes_unclamped_with_plate_back_at_hold(self):
         node = mission(payload_config())
         node.enter_deploy_state()
-        self.run_drop(node, 10.0)
+        # 1 s pre-brake + 10.76 s of braking: still running at 11.5 s.
+        self.run_drop(node, 11.5)
         node.on_deploy_complete.assert_not_called()
-        self.run_drop(node, 1.0)
+        self.run_drop(node, 0.5)
         node.on_deploy_complete.assert_called_once()
         self.assertEqual(sent(node)[-1], (1685, 1900))
         self.assertIsNone(node._drop_sequence)
@@ -222,11 +235,11 @@ class TestPayloadWriter(DeployTestCase):
         node.command_client.auto_reply = None     # PX4 has not answered yet
         node.enter_deploy_state()
         self.run_drop(node, 0.3)                  # clamp has toggled open
-        self.assertEqual(sent(node), [(2050, 1577)])
+        self.assertEqual(sent(node), [(1685, 1577)])
         # The reply arrives: the writer sends where the clamp is NOW,
         # skipping any positions it missed in between.
         node.command_client.futures[0].finish(success=True)
-        self.assertEqual(sent(node), [(2050, 1577), (2050, 1900)])
+        self.assertEqual(sent(node), [(1685, 1577), (1685, 1900)])
 
     def test_unconfirmed_command_is_resent_after_a_pause(self):
         node = mission(payload_config())

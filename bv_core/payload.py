@@ -82,6 +82,7 @@ class BrakePhase:
 class PayloadConfig:
     plate: ServoConfig
     clamp: ServoConfig
+    pre_drop_s: float   # clamp brakes this long before the plate moves
     brake_phases: tuple
 
     @property
@@ -99,8 +100,14 @@ class PayloadConfig:
         return self.clamp.positions_us[f'{payload}_clamped']
 
     @property
-    def total_duration_s(self):
+    def brake_duration_s(self):
+        """The braking phases after the plate moves."""
         return sum(phase.duration_s for phase in self.brake_phases)
+
+    @property
+    def total_duration_s(self):
+        """The whole drop: pre-brake plus the braking phases."""
+        return self.pre_drop_s + self.brake_duration_s
 
     @property
     def drop_ft(self):
@@ -173,9 +180,14 @@ def parse_payload_block(block):
         raise ValueError(
             "payload.plate.actuator_set and payload.clamp.actuator_set must "
             f"differ (both are {plate.actuator_set})")
+    pre_drop_s = _number(block, 'pre_drop_s', 'payload')
+    if pre_drop_s < 0.0:
+        raise ValueError(
+            f"payload.pre_drop_s must not be negative, got {pre_drop_s:g}")
     return PayloadConfig(
         plate=plate,
         clamp=clamp,
+        pre_drop_s=pre_drop_s,
         brake_phases=_phases(block.get('brake_phases')),
     )
 
@@ -229,12 +241,13 @@ def actuator_params(config, plate_us=None, clamp_us=None):
 class DropSequence:
     """Servo pulses over one drop, as a function of elapsed time.
 
-    At t=0 the plate moves to this payload's drop position and the clamp
-    grips. The clamp then toggles between this payload's clamped position and
-    unclamped at each phase's interval, restarting clamped at each phase
-    boundary. When the last phase ends the clamp opens and the plate returns
-    to hold, so the payload still aboard is gripped again for the flight to
-    the next target.
+    For the first pre_drop_s the plate stays at hold while the clamp already
+    brakes: it toggles between this payload's clamped position and unclamped
+    at the first phase's interval. Then the plate moves to this payload's
+    drop position and the braking phases run in full, each starting clamped
+    and toggling at its own interval. When the last phase ends the clamp
+    opens and the plate returns to hold, so the payload still aboard is
+    gripped again for the flight to the next target.
     """
 
     def __init__(self, config, payload):
@@ -247,17 +260,26 @@ class DropSequence:
 
     def positions_at(self, elapsed_s):
         """(plate_us, clamp_us, done) at elapsed_s into the drop."""
-        phase_start = 0.0
+        if elapsed_s < self.config.pre_drop_s:
+            toggle_s = self.config.brake_phases[0].toggle_s
+            return (self.config.plate_hold_us,
+                    self._clamp_at(elapsed_s, toggle_s), False)
+
+        phase_start = self.config.pre_drop_s
         for phase in self.config.brake_phases:
             phase_end = phase_start + phase.duration_s
             if elapsed_s < phase_end:
-                toggles = int(max(0.0, elapsed_s - phase_start)
-                              // phase.toggle_s)
-                clamp = (self.clamped_us if toggles % 2 == 0
-                         else self.config.unclamped_us)
-                return self.plate_us, clamp, False
+                return (self.plate_us,
+                        self._clamp_at(elapsed_s - phase_start,
+                                       phase.toggle_s), False)
             phase_start = phase_end
         return self.config.plate_hold_us, self.config.unclamped_us, True
+
+    def _clamp_at(self, since_start_s, toggle_s):
+        """Clamped on even toggle counts, unclamped on odd, from clamped."""
+        toggles = int(max(0.0, since_start_s) // toggle_s)
+        return (self.clamped_us if toggles % 2 == 0
+                else self.config.unclamped_us)
 
 
 # -- parsing helpers -------------------------------------------------------

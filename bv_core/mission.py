@@ -828,14 +828,16 @@ class MissionRunner(Node):
         self._drop_sequence = DropSequence(self.payload, payload)
         self._drop_started = time.monotonic()
         self.get_logger().info(
-            f"[DEPLOY] dropping {payload}: plate -> "
-            f"{self._drop_sequence.plate_us:g} us, clamp pulsing "
-            f"{self._drop_sequence.clamped_us:g}/{self.payload.unclamped_us:g} us "
-            f"for {self.payload.total_duration_s:.2f}s")
+            f"[DEPLOY] dropping {payload}: clamp pulsing "
+            f"{self._drop_sequence.clamped_us:g}/{self.payload.unclamped_us:g} us, "
+            f"plate -> {self._drop_sequence.plate_us:g} us after "
+            f"{self.payload.pre_drop_s:g}s, {self.payload.total_duration_s:.2f}s "
+            f"total")
         self.log.event(
             'DEPLOY_START',
             f"payload={payload}, plate_us={self._drop_sequence.plate_us:g}, "
             f"clamped_us={self._drop_sequence.clamped_us:g}, "
+            f"pre_drop={self.payload.pre_drop_s:g}s, "
             f"duration={self.payload.total_duration_s:.2f}s")
 
         # First command now; the timer takes it from there.

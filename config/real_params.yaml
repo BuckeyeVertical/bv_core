@@ -63,9 +63,14 @@ payload:
     bottle_clamped_us: 1577  # gripping for the water bottle
     beacon_clamped_us: 1300  # PLACEHOLDER - replace with the measured value
 
-  # During a drop the clamp toggles clamped <-> unclamped every toggle_ms;
-  # each phase lasts drop_ft / speed_ftps seconds. The drops should sum to
-  # the delivery altitude (150 ft = 45.72 m); mission_node warns if not.
+  # The clamp starts braking this long before the plate moves, while the
+  # plate still holds (toggling at the first phase's interval). It comes on
+  # top of brake_phases; it doesn't shorten them.
+  pre_drop_s: 1.0
+
+  # Once the plate moves, the clamp toggles clamped <-> unclamped every
+  # toggle_ms; each phase lasts drop_ft / speed_ftps seconds. The drops should
+  # sum to the delivery altitude (150 ft = 45.72 m); mission_node warns if not.
   brake_phases:
     - {drop_ft: 75, speed_ftps: 15.0, toggle_ms: 200}   # 5.00 s
     - {drop_ft: 50, speed_ftps: 13.3, toggle_ms: 150}   # 3.76 s
