@@ -196,12 +196,15 @@ class TestDropSequence:
         assert seq.positions_at(start + 0.11)[1] == 1900
         assert seq.positions_at(start + 0.21)[1] == 1577
 
-    def test_ends_unclamped_with_plate_left_at_drop(self):
+    def test_ends_unclamped_with_plate_back_at_hold(self):
         cfg = _config()
         seq = DropSequence(cfg, 'bottle')
-        assert seq.positions_at(cfg.total_duration_s - 0.001)[2] is False
-        assert seq.positions_at(cfg.total_duration_s) == (2050, 1900, True)
-        assert seq.positions_at(60.0) == (2050, 1900, True)
+        # The plate holds the drop position for the whole brake sequence...
+        plate, _, done = seq.positions_at(cfg.total_duration_s - 0.001)
+        assert (plate, done) == (2050, False)
+        # ...then returns to hold, so the other payload is gripped again.
+        assert seq.positions_at(cfg.total_duration_s) == (1685, 1900, True)
+        assert seq.positions_at(60.0) == (1685, 1900, True)
 
     def test_unknown_payload_rejected(self):
         with pytest.raises(ValueError):

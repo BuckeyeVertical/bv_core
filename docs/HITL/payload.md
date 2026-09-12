@@ -45,9 +45,10 @@ unclamped through three phases. Each phase lasts `drop_ft / speed_ftps` seconds:
 | 3 | 25 ft | 12.5 ft/s | 100 ms | 2.00 s |
 
 Every phase starts clamped. After the last phase the clamp opens (1900) and the
-plate stays at the drop position. The drone holds over the target for the full
-10.76 s, then resumes the scan. Deliveries can happen in either order. If RTL
-interrupts a drop, the clamp opens.
+plate returns to hold (1685), so the payload still aboard is gripped again. The
+drone holds over the target for the full 10.76 s, then resumes the scan.
+Deliveries can happen in either order. If RTL interrupts a drop, both servos go
+back to rest the same way.
 
 At startup `mission_node` warns if the phase distances don't add up to the delivery
 altitude.

@@ -54,8 +54,8 @@ class TestDropSchedule:
         assert schedule[0] == (0.0, 2050, 1577)
         assert schedule[1][1:] == (2050, 1900)
         assert schedule[1][0] == pytest.approx(0.2)
-        # Ends unclamped, sent no later than the sequence end.
-        assert schedule[-1][1:] == (2050, 1900)
+        # Ends unclamped with the plate back at hold.
+        assert schedule[-1][1:] == (1685, 1900)
         assert schedule[-1][0] <= config.total_duration_s + 0.02
         # Only changes are listed.
         pairs = [entry[1:] for entry in schedule]

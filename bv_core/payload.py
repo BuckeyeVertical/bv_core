@@ -232,8 +232,9 @@ class DropSequence:
     At t=0 the plate moves to this payload's drop position and the clamp
     grips. The clamp then toggles between this payload's clamped position and
     unclamped at each phase's interval, restarting clamped at each phase
-    boundary. When the last phase ends the clamp is left unclamped and the
-    plate stays at the drop position, as in the tested Arduino sequence.
+    boundary. When the last phase ends the clamp opens and the plate returns
+    to hold, so the payload still aboard is gripped again for the flight to
+    the next target.
     """
 
     def __init__(self, config, payload):
@@ -256,7 +257,7 @@ class DropSequence:
                          else self.config.unclamped_us)
                 return self.plate_us, clamp, False
             phase_start = phase_end
-        return self.plate_us, self.config.unclamped_us, True
+        return self.config.plate_hold_us, self.config.unclamped_us, True
 
 
 # -- parsing helpers -------------------------------------------------------

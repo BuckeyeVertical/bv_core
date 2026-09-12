@@ -881,10 +881,10 @@ class MissionRunner(Node):
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
-        # Interrupted mid-drop: stop pulsing and leave the clamp open.
+        # Interrupted mid-drop: stop pulsing, plate back to hold, clamp open.
         if getattr(self, '_drop_sequence', None) is not None:
             self._stop_drop()
-            self.send_payload_actuators(clamp_us=self.payload.unclamped_us)
+            self.send_payload_rest_positions()
             self.log.event('DEPLOY_ABORTED', 'reason=rtl')
 
         for name in ('_localize_timer', '_localize_retry_timer',

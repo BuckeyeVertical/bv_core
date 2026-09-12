@@ -127,14 +127,14 @@ class TestDeploy(unittest.TestCase):
         self.run_drop(node, 0.19, step_s=0.01)
         self.assertEqual(len(sent(node)), 1)
 
-    def test_completes_after_the_full_sequence_unclamped(self):
+    def test_completes_unclamped_with_plate_back_at_hold(self):
         node = mission(payload_config())
         node.enter_deploy_state()
         self.run_drop(node, 10.0)
         node.on_deploy_complete.assert_not_called()
         self.run_drop(node, 1.0)
         node.on_deploy_complete.assert_called_once()
-        self.assertEqual(sent(node)[-1], (2050, 1900))
+        self.assertEqual(sent(node)[-1], (1685, 1900))
         self.assertIsNone(node._drop_sequence)
         node.destroy_timer.assert_called()
 
@@ -161,12 +161,12 @@ class TestDeploy(unittest.TestCase):
         self.assertIsNone(node._drop_sequence)
         node.on_deploy_complete.assert_not_called()
 
-    def test_rtl_mid_drop_opens_the_clamp(self):
+    def test_rtl_mid_drop_returns_to_rest(self):
         node = mission(payload_config())
         node.enter_deploy_state()
         node.enter_rtl_state(command_mode=False)
         self.assertIsNone(node._drop_sequence)
-        self.assertEqual(sent(node)[-1], (None, 1900))
+        self.assertEqual(sent(node)[-1], (1685, 1900))
         node.on_deploy_complete.assert_not_called()
 
     def test_rtl_without_payload_sends_nothing(self):
