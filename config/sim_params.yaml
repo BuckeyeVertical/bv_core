@@ -55,7 +55,7 @@ payload:
 
   # Plate: sits under both payloads and holds them up.
   plate:
-    actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
+    actuator_set: 2          # PWM_MAIN_FUNCn = 302 (Peripheral via Actuator Set 2)
     pwm_range_us: [800, 2200]  # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn
     hold_us: 1685            # both payloads held
     beacon_drop_us: 1360     # drops the beacon (tent)
@@ -63,7 +63,7 @@ payload:
 
   # Clamp: grips the line to slow the fall; holds nothing up.
   clamp:
-    actuator_set: 2          # PWM_MAIN_FUNCn = 302 (Peripheral via Actuator Set 2)
+    actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
     pwm_range_us: [800, 2200]  # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn
     unclamped_us: 1900       # open; also its position at rest
     bottle_clamped_us: 1577  # gripping for the water bottle

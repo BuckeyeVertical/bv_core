@@ -70,7 +70,7 @@ servos are on the AUX rail, the parameters are named `PWM_AUX_*` instead.
 
 | Parameter | Plate (*p*) | Clamp (*c*) | Why |
 |---|---|---|---|
-| `PWM_MAIN_FUNCp` / `FUNCc` | 301 | 302 | Actuator Set 1 and 2. These must match `actuator_set`. |
+| `PWM_MAIN_FUNCp` / `FUNCc` | 302 | 301 | Plate = Actuator Set 2, clamp = Actuator Set 1. These must match `actuator_set`. |
 | `PWM_MAIN_MINp` / `MINc` | 800 | 800 | Must equal `pwm_range_us[0]`. |
 | `PWM_MAIN_MAXp` / `MAXc` | 2200 | 2200 | Must equal `pwm_range_us[1]`. |
 | `PWM_MAIN_DISp` / `DISc` | **1685** | **1900** | The pulse sent while disarmed: plate holding, clamp open. |
