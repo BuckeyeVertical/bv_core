@@ -8,8 +8,8 @@ from bv_core.payload import (
     DropSequence,
     MAV_CMD_DO_SET_ACTUATOR,
     actuator_params,
-    altitude_mismatch_warning,
     load_payload_config,
+    parse_brake_phases,
     parse_payload_block,
     payload_for_class,
     unreachable_positions,
@@ -38,9 +38,9 @@ def _block(**overrides):
         },
         'pre_drop_s': 1.0,
         'brake_phases': [
-            {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
-            {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},
-            {'drop_ft': 25, 'speed_ftps': 12.5, 'toggle_ms': 100},
+            {'duration_s': 5.0, 'toggle_ms': 200},
+            {'duration_s': 3.76, 'toggle_ms': 150},
+            {'duration_s': 2.0, 'toggle_ms': 100},
         ],
     }
     block.update(overrides)
@@ -70,14 +70,13 @@ class TestLoading:
         assert cfg.clamped_us('bottle') == 1577
         assert cfg.clamped_us('beacon') == 1300
 
-    def test_phase_durations_come_from_distance_over_speed(self):
+    def test_phase_durations_are_configured_in_seconds(self):
         cfg = _config()
         durations = [phase.duration_s for phase in cfg.brake_phases]
-        assert durations == pytest.approx([5.0, 50 / 13.3, 2.0])
-        assert cfg.brake_duration_s == pytest.approx(10.759, abs=0.001)
+        assert durations == pytest.approx([5.0, 3.76, 2.0])
+        assert cfg.brake_duration_s == pytest.approx(10.76)
         # The 1 s pre-brake comes on top; it doesn't shorten the braking.
-        assert cfg.total_duration_s == pytest.approx(11.759, abs=0.001)
-        assert cfg.drop_ft == pytest.approx(150)
+        assert cfg.total_duration_s == pytest.approx(11.76)
 
     def test_pre_drop_is_required_and_not_negative(self):
         block = _block()
@@ -86,8 +85,7 @@ class TestLoading:
             load_payload_config(block)
         with pytest.raises(ValueError, match='pre_drop_s'):
             _config(pre_drop_s=-1)
-        assert _config(pre_drop_s=0).total_duration_s == pytest.approx(
-            10.759, abs=0.001)
+        assert _config(pre_drop_s=0).total_duration_s == pytest.approx(10.76)
 
     def test_disabled_needs_nothing_else(self):
         assert load_payload_config({'payload': {'enabled': False}}) is None
@@ -129,10 +127,40 @@ class TestLoading:
         with pytest.raises(ValueError, match='brake_phases'):
             _config(brake_phases=[])
 
-    def test_phase_values_must_be_positive(self):
-        with pytest.raises(ValueError, match='speed_ftps'):
+    def test_toggle_must_be_positive(self):
+        with pytest.raises(ValueError, match='toggle_ms'):
+            _config(brake_phases=[{'duration_s': 3.0, 'toggle_ms': 0}])
+
+    def test_duration_must_not_be_negative(self):
+        with pytest.raises(ValueError, match='duration_s'):
+            _config(brake_phases=[{'duration_s': -1, 'toggle_ms': 200}])
+
+    def test_zero_duration_skips_the_phase(self):
+        cfg = _config(brake_phases=[
+            {'duration_s': 0, 'toggle_ms': 200},
+            {'duration_s': 3.0, 'toggle_ms': 150},
+            {'duration_s': 0, 'toggle_ms': 100},
+        ])
+        assert cfg.brake_duration_s == pytest.approx(3.0)
+
+    def test_phases_cannot_all_be_zero(self):
+        # The plate would move out and straight back before anything fell.
+        with pytest.raises(ValueError, match='more than 0'):
+            _config(brake_phases=[{'duration_s': 0, 'toggle_ms': 200},
+                                  {'duration_s': 0, 'toggle_ms': 150}])
+
+    def test_old_distance_speed_format_is_explained(self):
+        with pytest.raises(ValueError, match='duration_s'):
             _config(brake_phases=[
-                {'drop_ft': 75, 'speed_ftps': 0, 'toggle_ms': 200}])
+                {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200}])
+
+    def test_phases_from_the_command_line(self):
+        phases = parse_brake_phases(['150:3', '100:2.5'])
+        assert [(p.toggle_ms, p.duration_s) for p in phases] == [
+            (150, 3.0), (100, 2.5)]
+        for bad in (['150'], ['x:3'], ['0:3'], ['150:0']):
+            with pytest.raises(ValueError):
+                parse_brake_phases(bad)
 
 
 class TestRangeCheck:
@@ -237,8 +265,7 @@ class TestDropSequence:
         # The plate is at the drop position for the full 10.76 s of braking.
         assert seq.positions_at(1.01)[0] == 2050
         assert seq.positions_at(cfg.total_duration_s - 0.01)[0] == 2050
-        assert cfg.total_duration_s - cfg.pre_drop_s == pytest.approx(
-            10.759, abs=0.001)
+        assert cfg.total_duration_s - cfg.pre_drop_s == pytest.approx(10.76)
 
     def test_ends_unclamped_with_plate_back_at_hold(self):
         cfg = _config()
@@ -251,6 +278,21 @@ class TestDropSequence:
     def test_no_pre_brake_drops_at_once(self):
         seq = DropSequence(_config(pre_drop_s=0), 'bottle')
         assert seq.positions_at(0.0) == (2050, 1577, False)
+
+    def test_skipped_phase_keeps_the_rhythm_continuous(self):
+        # Only the 150 ms phase runs: the pre-brake takes the first phase
+        # that actually runs, so the whole drop is one even 150 ms rhythm.
+        cfg = _config(brake_phases=[
+            {'duration_s': 0, 'toggle_ms': 200},
+            {'duration_s': 3.0, 'toggle_ms': 150},
+            {'duration_s': 0, 'toggle_ms': 100},
+        ])
+        seq = DropSequence(cfg, 'bottle')
+        runs = self.clamp_runs(seq, cfg.total_duration_s - 0.01)
+        assert runs == pytest.approx([0.15] * len(runs), abs=0.002)
+        assert seq.positions_at(0.99)[0] == 1685
+        assert seq.positions_at(1.01)[0] == 2050
+        assert seq.positions_at(cfg.total_duration_s)[2] is True
 
     def test_unknown_payload_rejected(self):
         with pytest.raises(ValueError):
@@ -274,14 +316,3 @@ class TestCommand:
         _, params = actuator_params(cfg, plate_us=2050, clamp_us=1577)
         assert params[0] == pytest.approx(us_to_actuator_value(2050, (800, 2200)))
         assert params[1] == pytest.approx(us_to_actuator_value(1577, (800, 2200)))
-
-
-class TestAltitudeWarning:
-    def test_matching_altitude_is_quiet(self):
-        # 45.72 m is exactly 150 ft, the phases' total drop.
-        assert altitude_mismatch_warning(_config(), 45.72) is None
-
-    def test_mismatched_altitude_explains_itself(self):
-        warning = altitude_mismatch_warning(_config(), 60.96)
-        assert warning is not None
-        assert '150' in warning and '200' in warning

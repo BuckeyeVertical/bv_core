@@ -53,7 +53,6 @@ from .scan_plan import load_scan_plan
 from .payload import (
     DropSequence,
     actuator_params,
-    altitude_mismatch_warning,
     load_payload_config,
     payload_for_class,
 )
@@ -210,10 +209,6 @@ class MissionRunner(Node):
                 "Payload DISABLED - DEPLOY will skip the drop")
         else:
             self._log_payload_config(self.payload)
-            warning = altitude_mismatch_warning(
-                self.payload, scan_plan.altitude_m)
-            if warning:
-                self.get_logger().warn(warning)
 
         # Required mission parameters
         if 'num_objects' not in config:
@@ -1089,8 +1084,9 @@ class MissionRunner(Node):
         self.get_logger().info(
             f"Payload ENABLED: plate=actuator set "
             f"{payload.plate.actuator_set}, clamp=actuator set "
-            f"{payload.clamp.actuator_set}, drop={payload.drop_ft:g}ft over "
-            f"{payload.total_duration_s:.2f}s")
+            f"{payload.clamp.actuator_set}, drop {payload.total_duration_s:.2f}s "
+            f"({payload.pre_drop_s:g}s pre-brake + "
+            f"{payload.brake_duration_s:.2f}s braking)")
         for servo, name, pulse in payload.positions():
             self.get_logger().info(f"  {servo.name} {name}: {pulse:g} us")
 

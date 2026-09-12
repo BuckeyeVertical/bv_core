@@ -36,19 +36,24 @@ To change a position, measure it in QGC the same way, then type the new number i
 
 **Pre-brake (`pre_drop_s`, 1 s):** the clamp starts braking while the plate still
 holds. It toggles between that payload's clamped position and unclamped at the
-first phase's 200 ms rhythm. The rhythm is continuous for the whole drop: every
+first phase's 200 ms rhythm (the first phase that actually runs). The rhythm is continuous for the whole drop: every
 flip comes one interval after the previous one, so the clamp never pauses where
 the interval changes.
 
 **Drop:** after the pre-brake, the plate moves to that payload's drop position.
-The three braking phases then run in full; the pre-brake doesn't shorten them.
-Each phase lasts `drop_ft / speed_ftps` seconds:
+The braking phases then run in full; the pre-brake doesn't shorten them. Each
+phase is `{duration_s, toggle_ms}`:
 
-| Phase | Distance | Speed | Toggle interval | Duration |
-|---|---|---|---|---|
-| 1 | 75 ft | 15.0 ft/s | 200 ms | 5.00 s |
-| 2 | 50 ft | 13.3 ft/s | 150 ms | 3.76 s |
-| 3 | 25 ft | 12.5 ft/s | 100 ms | 2.00 s |
+| Phase | `toggle_ms` | `duration_s` | Worked out from |
+|---|---|---|---|
+| 1 | 200 | 5.0 | 75 ft at 15 ft/s |
+| 2 | 150 | 3.76 | 50 ft at 13.3 ft/s |
+| 3 | 100 | 2.0 | 25 ft at 12.5 ft/s |
+
+A phase with `duration_s: 0` is skipped, so zeroing two phases tests the third
+on its own. `toggle_ms` must stay above 0, and together the phases must last more
+than 0 s. Otherwise `mission_node` refuses to start, because the plate would move
+out and straight back before anything fell.
 
 After the last phase the clamp opens (1900) and the
 plate returns to hold (1685), so the payload still aboard is gripped again. The
@@ -56,9 +61,6 @@ drone holds over the target for the whole drop, 1 s plus 10.76 s = 11.76 s, then
 resumes the scan.
 Deliveries can happen in either order. If RTL interrupts a drop, both servos go
 back to rest the same way.
-
-At startup `mission_node` warns if the phase distances don't add up to the delivery
-altitude.
 
 ## How the pulse reaches the servo
 
@@ -113,7 +115,12 @@ ros2 run bv_core test_servo rest            # plate hold + clamp open
 ros2 run bv_core test_servo plate 1685      # one servo to a pulse
 ros2 run bv_core test_servo clamp 1577
 ros2 run bv_core test_servo drop bottle     # full 11.76 s sequence (or: beacon)
+ros2 run bv_core test_servo drop bottle 150:3   # braking at 150 ms for 3 s only
 ```
+
+Brake phases after the payload name (`toggle_ms:duration_s`, one or more, e.g.
+`200:5 150:3.76 100:2`) replace the configured ones for that drop only. The 1 s
+pre-brake still runs first, at the first given rhythm. The YAML isn't touched.
 
 The tool reads the mission config selected by `BV_MISSION_CONFIG` (default
 `real_params.yaml`). It ignores `payload.enabled` and the startup range check. Set

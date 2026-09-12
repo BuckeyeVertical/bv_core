@@ -27,9 +27,9 @@ def payload_config():
                   'beacon_clamped_us': 1300},
         'pre_drop_s': 1.0,
         'brake_phases': [
-            {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200},
-            {'drop_ft': 50, 'speed_ftps': 13.3, 'toggle_ms': 150},
-            {'drop_ft': 25, 'speed_ftps': 12.5, 'toggle_ms': 100},
+            {'duration_s': 5.0, 'toggle_ms': 200},
+            {'duration_s': 3.76, 'toggle_ms': 150},
+            {'duration_s': 2.0, 'toggle_ms': 100},
         ],
     }})
 

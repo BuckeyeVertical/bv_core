@@ -6,6 +6,10 @@
     ros2 run bv_core test_servo clamp 1900
     ros2 run bv_core test_servo rest            # plate hold + clamp open
     ros2 run bv_core test_servo drop bottle     # full drop sequence (or beacon)
+    ros2 run bv_core test_servo drop bottle 150:3   # ...braking at 150 ms for 3 s
+
+Brake phases given after the payload (toggle_ms:duration_s, one or more)
+replace the configured ones for that drop only; the YAML is not touched.
 
 Reads the payload block from the mission config selected by BV_MISSION_CONFIG
 (default real_params.yaml), ignoring payload.enabled and the startup range
@@ -16,6 +20,7 @@ remove the propellers and either arm or set COM_PREARM_MODE = 2 (Always).
 See docs/HITL/payload.md.
 """
 
+import dataclasses
 import sys
 import time
 
@@ -29,6 +34,7 @@ from .payload import (
     PAYLOADS,
     DropSequence,
     actuator_params,
+    parse_brake_phases,
     parse_payload_block,
     unreachable_reason,
 )
@@ -39,14 +45,21 @@ RETRY_SEC = 0.2
 
 
 def parse_args(argv):
-    """('servo', name, us) | ('show',) | ('rest',) | ('drop', payload).
+    """('servo', name, us) | ('show',) | ('rest',) | ('drop', payload, phases).
 
-    Raises SystemExit with the usage text on anything else.
+    phases is None for the configured brake phases, else a tuple of
+    BrakePhase from 'toggle_ms:duration_s' arguments. Raises SystemExit with
+    the usage text on anything else.
     """
     if argv in (['show'], ['rest']):
         return (argv[0],)
-    if len(argv) == 2 and argv[0] == 'drop' and argv[1] in PAYLOADS:
-        return ('drop', argv[1])
+    if len(argv) >= 2 and argv[0] == 'drop' and argv[1] in PAYLOADS:
+        if len(argv) == 2:
+            return ('drop', argv[1], None)
+        try:
+            return ('drop', argv[1], parse_brake_phases(argv[2:]))
+        except ValueError as exc:
+            raise SystemExit(f"{exc}\nusage:\n{USAGE}") from None
     if len(argv) == 2 and argv[0] in ('plate', 'clamp'):
         try:
             return ('servo', argv[0], float(argv[1]))
@@ -205,6 +218,13 @@ def main(args=None):
         if action[0] == 'rest':
             node.send(config.plate_hold_us, config.unclamped_us)
         elif action[0] == 'drop':
+            if action[2] is not None:
+                node.config = dataclasses.replace(
+                    config, brake_phases=action[2])
+                node.get_logger().info(
+                    'Brake phases from the command line: ' + ', '.join(
+                        f'{p.toggle_ms:g} ms for {p.duration_s:g} s'
+                        for p in action[2]))
             node.drop(action[1])
         elif action[1] == 'plate':
             node.send(plate_us=action[2])

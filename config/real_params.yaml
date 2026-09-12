@@ -69,12 +69,14 @@ payload:
   pre_drop_s: 1.0
 
   # Once the plate moves, the clamp toggles clamped <-> unclamped every
-  # toggle_ms; each phase lasts drop_ft / speed_ftps seconds. The drops should
-  # sum to the delivery altitude (150 ft = 45.72 m); mission_node warns if not.
+  # toggle_ms for duration_s, phase after phase, in one continuous rhythm.
+  # duration_s: 0 skips a phase. These times were worked out for a 150 ft drop
+  # as 75 ft at 15 ft/s, 50 ft at 13.3 ft/s and 25 ft at 12.5 ft/s. Bench runs
+  # can override them: ros2 run bv_core test_servo drop bottle 150:3
   brake_phases:
-    - {drop_ft: 75, speed_ftps: 15.0, toggle_ms: 200}   # 5.00 s
-    - {drop_ft: 50, speed_ftps: 13.3, toggle_ms: 150}   # 3.76 s
-    - {drop_ft: 25, speed_ftps: 12.5, toggle_ms: 100}   # 2.00 s
+    - {duration_s: 5.0,  toggle_ms: 200}
+    - {duration_s: 3.76, toggle_ms: 150}
+    - {duration_s: 2.0,  toggle_ms: 100}
 
 Approval_required: true
 Approval_timeout_sec: 180.0

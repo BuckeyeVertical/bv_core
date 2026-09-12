@@ -39,9 +39,6 @@ PAYLOADS = ('bottle', 'beacon')
 PLATE_POSITIONS = ('hold', 'beacon_drop', 'bottle_drop')
 CLAMP_POSITIONS = ('unclamped', 'bottle_clamped', 'beacon_clamped')
 
-FT_PER_M = 1.0 / 0.3048
-ALTITUDE_WARNING_TOLERANCE_FT = 2.0
-
 
 def us_to_actuator_value(pulse_us, pwm_range_us):
     """PX4 actuator value (-1..1) that makes an output emit this pulse."""
@@ -66,13 +63,8 @@ class ServoConfig:
 
 @dataclass(frozen=True)
 class BrakePhase:
-    drop_ft: float
-    speed_ftps: float
+    duration_s: float   # 0 skips the phase
     toggle_ms: float
-
-    @property
-    def duration_s(self):
-        return self.drop_ft / self.speed_ftps
 
     @property
     def toggle_s(self):
@@ -109,10 +101,6 @@ class PayloadConfig:
     def total_duration_s(self):
         """The whole drop: pre-brake plus the braking phases."""
         return self.pre_drop_s + self.brake_duration_s
-
-    @property
-    def drop_ft(self):
-        return sum(phase.drop_ft for phase in self.brake_phases)
 
     def positions(self):
         """Every configured position as (servo, name, pulse_us)."""
@@ -189,7 +177,7 @@ def parse_payload_block(block):
         plate=plate,
         clamp=clamp,
         pre_drop_s=pre_drop_s,
-        brake_phases=_phases(block.get('brake_phases')),
+        brake_phases=parse_brake_phases(block.get('brake_phases')),
     )
 
 
@@ -209,17 +197,6 @@ def unreachable_reason(servo, pulse_us):
     if low <= pulse_us <= high:
         return None
     return f"{pulse_us:g} us is outside pwm_range_us [{low:g}, {high:g}]"
-
-
-def altitude_mismatch_warning(config, altitude_m):
-    """Warn when the brake phases were tuned for a different drop height."""
-    altitude_ft = altitude_m * FT_PER_M
-    if abs(config.drop_ft - altitude_ft) <= ALTITUDE_WARNING_TOLERANCE_FT:
-        return None
-    return (
-        f"payload.brake_phases cover a {config.drop_ft:g} ft drop but delivery "
-        f"altitude is {altitude_ft:.0f} ft: the clamp timing will not match "
-        f"the payload's descent")
 
 
 def actuator_params(config, plate_us=None, clamp_us=None):
@@ -244,14 +221,14 @@ class DropSequence:
 
     For the first pre_drop_s the plate stays at hold while the clamp already
     brakes. Then the plate moves to this payload's drop position for the
-    braking phases, which run in full. When the last phase ends the clamp
-    opens and the plate returns to hold, so the payload still aboard is
-    gripped again for the flight to the next target.
+    braking phases, which run in full; a phase lasting 0 s is skipped. When
+    the last phase ends the clamp opens and the plate returns to hold, so the
+    payload still aboard is gripped again for the flight to the next target.
 
     The clamp starts clamped and flips between this payload's clamped
     position and unclamped in one continuous rhythm: every flip comes one
     interval after the previous one, the interval being that of the phase
-    (the pre-brake uses the first phase's) in which it began. Restarting a
+    (the pre-brake uses the first phase that runs) in which it began. Restarting a
     phase on "clamped" instead held the clamp for two intervals whenever the
     previous phase also ended clamped, a visible pause at each phase change.
     """
@@ -267,7 +244,7 @@ class DropSequence:
 
     def _compute_flip_times(self):
         """Elapsed times at which the clamp changes position."""
-        phases = self.config.brake_phases
+        phases = [p for p in self.config.brake_phases if p.duration_s > 0.0]
         # (start_s, toggle_s) per segment, the pre-brake first.
         segments = []
         start = 0.0
@@ -351,18 +328,49 @@ def _servo(name, payload_block, position_names):
     )
 
 
-def _phases(value):
+def parse_brake_phases(value):
+    """Brake phases from the YAML list or bench 'toggle_ms:duration_s' text.
+
+    duration_s of 0 skips a phase; toggle_ms must be positive; together the
+    phases must last more than 0 s, or the plate would move out and straight
+    back before anything fell.
+    """
+    if isinstance(value, list) and value and all(
+            isinstance(item, str) for item in value):
+        value = [_phase_from_text(item) for item in value]
     if not isinstance(value, list) or not value:
         raise ValueError("payload.brake_phases must be a non-empty list")
     phases = []
     for index, raw in enumerate(value):
         where = f'payload.brake_phases[{index}]'
         raw = _mapping(raw, where)
-        values = {key: _number(raw, key, where)
-                  for key in ('drop_ft', 'speed_ftps', 'toggle_ms')}
-        for key, number in values.items():
-            if number <= 0.0:
-                raise ValueError(
-                    f"{where}.{key} must be positive, got {number:g}")
-        phases.append(BrakePhase(**values))
+        if 'duration_s' not in raw and 'drop_ft' in raw:
+            raise ValueError(
+                f"{where} uses drop_ft/speed_ftps; phases are now "
+                f"{{duration_s: <seconds>, toggle_ms: <ms>}} (duration_s = "
+                f"drop_ft / speed_ftps)")
+        duration_s = _number(raw, 'duration_s', where)
+        toggle_ms = _number(raw, 'toggle_ms', where)
+        if duration_s < 0.0:
+            raise ValueError(
+                f"{where}.duration_s must not be negative, got {duration_s:g}")
+        if toggle_ms <= 0.0:
+            raise ValueError(
+                f"{where}.toggle_ms must be positive, got {toggle_ms:g}")
+        phases.append(BrakePhase(duration_s=duration_s, toggle_ms=toggle_ms))
+    if sum(phase.duration_s for phase in phases) <= 0.0:
+        raise ValueError(
+            "payload.brake_phases must last more than 0 s in total: with every "
+            "phase skipped the plate would move out and straight back")
     return tuple(phases)
+
+
+def _phase_from_text(text):
+    """'150:3' -> {'toggle_ms': 150.0, 'duration_s': 3.0}."""
+    try:
+        toggle, duration = text.split(':')
+        return {'toggle_ms': float(toggle), 'duration_s': float(duration)}
+    except ValueError:
+        raise ValueError(
+            f"brake phase {text!r} must be toggle_ms:duration_s, e.g. 150:3"
+        ) from None

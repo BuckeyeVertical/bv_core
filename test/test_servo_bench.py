@@ -16,8 +16,17 @@ class TestParseArgs:
     def test_rest_and_drop(self):
         assert parse_args(['show']) == ('show',)
         assert parse_args(['rest']) == ('rest',)
-        assert parse_args(['drop', 'bottle']) == ('drop', 'bottle')
-        assert parse_args(['drop', 'beacon']) == ('drop', 'beacon')
+        assert parse_args(['drop', 'bottle']) == ('drop', 'bottle', None)
+        assert parse_args(['drop', 'beacon']) == ('drop', 'beacon', None)
+
+    def test_drop_with_phases_from_the_command_line(self):
+        action = parse_args(['drop', 'bottle', '150:3'])
+        assert action[:2] == ('drop', 'bottle')
+        assert [(p.toggle_ms, p.duration_s) for p in action[2]] == [(150, 3.0)]
+
+    def test_bad_phase_prints_usage(self):
+        with pytest.raises(SystemExit, match='usage'):
+            parse_args(['drop', 'bottle', '150'])
 
     @pytest.mark.parametrize('argv', [
         [], ['plate'], ['plate', 'abc'], ['slider', '1500'],
