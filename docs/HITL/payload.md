@@ -117,12 +117,33 @@ flight too, so there's nothing to change. With another value you'd have to arm t
 bench-test. Start MAVROS and run:
 
 ```bash
+# Watch what PX4 outputs (channel 1 = clamp, channel 2 = plate)
+ros2 topic echo /mavros/rc/out --field channels
+
 ros2 run bv_core test_servo show            # configured pulses, range check, DIS values
 ros2 run bv_core test_servo rest            # plate hold + clamp open
-ros2 run bv_core test_servo plate 1685      # one servo to a pulse
-ros2 run bv_core test_servo clamp 1577
-ros2 run bv_core test_servo drop bottle     # full 11.76 s sequence (or: beacon)
-ros2 run bv_core test_servo drop bottle 150:3   # braking at 150 ms for 3 s only
+
+# Plate
+ros2 run bv_core test_servo plate 1685      # hold both
+ros2 run bv_core test_servo plate 1360      # beacon drop
+ros2 run bv_core test_servo plate 2050      # bottle drop
+
+# Clamp
+ros2 run bv_core test_servo clamp 1900      # unclamped
+ros2 run bv_core test_servo clamp 1577      # clamped, bottle
+ros2 run bv_core test_servo clamp 1710      # clamped, beacon
+
+# Drops: full sequence from the config (11.76 s)
+ros2 run bv_core test_servo drop bottle
+ros2 run bv_core test_servo drop beacon
+
+# Drops: one rhythm at a time (toggle_ms:duration_s)
+ros2 run bv_core test_servo drop bottle 200:3
+ros2 run bv_core test_servo drop bottle 150:3
+ros2 run bv_core test_servo drop bottle 100:3
+ros2 run bv_core test_servo drop beacon 200:3
+ros2 run bv_core test_servo drop beacon 150:3
+ros2 run bv_core test_servo drop beacon 100:3
 ```
 
 Brake phases after the payload name (`toggle_ms:duration_s`, one or more, e.g.
