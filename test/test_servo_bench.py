@@ -47,6 +47,9 @@ class TestShow:
         assert 'PWM_MAIN_DIS (plate): 1685' in text
         assert 'PWM_MAIN_DIS (clamp): 1900' in text
         assert 'OUT OF RANGE' not in text
+        # Each payload's brake phases and total drop time.
+        assert 'bottle brake: 200 ms x 5 s, 150 ms x 3.76 s, 100 ms x 2 s' in text
+        assert 'beacon brake:' in text and '11.76 s total' in text
 
     def test_flags_unreachable_positions(self):
         block = _block()['payload']

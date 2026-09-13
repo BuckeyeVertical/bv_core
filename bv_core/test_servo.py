@@ -71,14 +71,21 @@ def parse_args(argv):
 def describe(config):
     """Every position with its range status, then the DIS values.
 
-    Shows whether everything fits the PWM range and which disarmed pulses to
-    set on the flight controller.
+    Shows whether everything fits the PWM range, each payload's brake
+    phases, and which disarmed pulses to set on the flight controller.
     """
     lines = []
     for servo, name, pulse in config.positions():
         reason = unreachable_reason(servo, pulse)
         status = f"OUT OF RANGE: {reason}" if reason else "ok"
         lines.append(f"{servo.name} {name}: {pulse:g} us [{status}]")
+    for payload in PAYLOADS:
+        phases = ', '.join(f'{p.toggle_ms:g} ms x {p.duration_s:g} s'
+                           for p in config.brake_phases[payload])
+        lines.append(
+            f"{payload} brake: {phases} "
+            f"({config.pre_drop_s:g} s pre-brake, "
+            f"{config.total_duration_s(payload):.2f} s total)")
     for servo, pulse in ((config.plate, config.plate_hold_us),
                          (config.clamp, config.unclamped_us)):
         lines.append(f"PWM_MAIN_DIS ({servo.name}): {pulse:g}")
@@ -146,7 +153,7 @@ class ServoBench(Node):
 
         self.get_logger().info(
             f"Dropping {payload}: clamp braking for {config.pre_drop_s:g}s, "
-            f"then the plate moves; {config.total_duration_s:.2f}s total")
+            f"then the plate moves; {sequence.total_s:.2f}s total")
         start = time.monotonic()
         sent_before, accepted_before = writer.sent, writer.accepted
         while True:
@@ -155,7 +162,7 @@ class ServoBench(Node):
             writer.flush()
             if done and writer.settled:
                 break
-            if time.monotonic() - start > config.total_duration_s + 10.0:
+            if time.monotonic() - start > sequence.total_s + 10.0:
                 self.get_logger().error('Gave up waiting for PX4 to confirm')
                 break
             rclpy.spin_once(self, timeout_sec=DROP_TICK_SEC)
@@ -203,7 +210,8 @@ def main(args=None):
         elif action[0] == 'drop':
             if action[2] is not None:
                 node.config = dataclasses.replace(
-                    config, brake_phases=action[2])
+                    config, brake_phases={**config.brake_phases,
+                                          action[1]: action[2]})
                 node.get_logger().info(
                     'Brake phases from the command line: ' + ', '.join(
                         f'{p.toggle_ms:g} ms for {p.duration_s:g} s'

@@ -18,6 +18,13 @@ from bv_core.payload import (
 )
 
 
+CONFIGURED_PHASES = [
+    {'duration_s': 5.0, 'toggle_ms': 200},
+    {'duration_s': 3.76, 'toggle_ms': 150},
+    {'duration_s': 2.0, 'toggle_ms': 100},
+]
+
+
 def _block(**overrides):
     """A payload block with the values measured in QGC."""
     block = {
@@ -37,14 +44,15 @@ def _block(**overrides):
             'beacon_clamped_us': 1300,
         },
         'pre_drop_s': 1.0,
-        'brake_phases': [
-            {'duration_s': 5.0, 'toggle_ms': 200},
-            {'duration_s': 3.76, 'toggle_ms': 150},
-            {'duration_s': 2.0, 'toggle_ms': 100},
-        ],
+        'brake_phases': _both(CONFIGURED_PHASES),
     }
     block.update(overrides)
     return {'payload': block}
+
+
+def _both(phases):
+    """The same brake phase list for both payloads."""
+    return {'bottle': list(phases), 'beacon': list(phases)}
 
 
 def _config(**overrides):
@@ -72,11 +80,29 @@ class TestLoading:
 
     def test_phase_durations_are_configured_in_seconds(self):
         cfg = _config()
-        durations = [phase.duration_s for phase in cfg.brake_phases]
+        durations = [phase.duration_s for phase in cfg.brake_phases['bottle']]
         assert durations == pytest.approx([5.0, 3.76, 2.0])
-        assert cfg.brake_duration_s == pytest.approx(10.76)
+        assert cfg.brake_duration_s('bottle') == pytest.approx(10.76)
         # The 1 s pre-brake comes on top; it doesn't shorten the braking.
-        assert cfg.total_duration_s == pytest.approx(11.76)
+        assert cfg.total_duration_s('bottle') == pytest.approx(11.76)
+
+    def test_each_payload_has_its_own_phases(self):
+        cfg = _config(brake_phases={
+            'bottle': [{'duration_s': 4.0, 'toggle_ms': 200}],
+            'beacon': [{'duration_s': 1.0, 'toggle_ms': 250},
+                       {'duration_s': 2.0, 'toggle_ms': 120}],
+        })
+        assert cfg.total_duration_s('bottle') == pytest.approx(5.0)
+        assert cfg.total_duration_s('beacon') == pytest.approx(4.0)
+        assert [p.toggle_ms for p in cfg.brake_phases['beacon']] == [250, 120]
+
+    def test_both_payloads_need_phases(self):
+        with pytest.raises(ValueError, match='beacon'):
+            _config(brake_phases={'bottle': CONFIGURED_PHASES})
+
+    def test_old_single_list_format_is_explained(self):
+        with pytest.raises(ValueError, match='bottle'):
+            _config(brake_phases=CONFIGURED_PHASES)
 
     def test_pre_drop_is_required_and_not_negative(self):
         block = _block()
@@ -85,7 +111,8 @@ class TestLoading:
             load_payload_config(block)
         with pytest.raises(ValueError, match='pre_drop_s'):
             _config(pre_drop_s=-1)
-        assert _config(pre_drop_s=0).total_duration_s == pytest.approx(10.76)
+        assert _config(pre_drop_s=0).total_duration_s('beacon') == pytest.approx(
+            10.76)
 
     def test_disabled_needs_nothing_else(self):
         assert load_payload_config({'payload': {'enabled': False}}) is None
@@ -125,34 +152,34 @@ class TestLoading:
 
     def test_brake_phases_required(self):
         with pytest.raises(ValueError, match='brake_phases'):
-            _config(brake_phases=[])
+            _config(brake_phases=_both([]))
 
     def test_toggle_must_be_positive(self):
         with pytest.raises(ValueError, match='toggle_ms'):
-            _config(brake_phases=[{'duration_s': 3.0, 'toggle_ms': 0}])
+            _config(brake_phases=_both([{'duration_s': 3.0, 'toggle_ms': 0}]))
 
     def test_duration_must_not_be_negative(self):
         with pytest.raises(ValueError, match='duration_s'):
-            _config(brake_phases=[{'duration_s': -1, 'toggle_ms': 200}])
+            _config(brake_phases=_both([{'duration_s': -1, 'toggle_ms': 200}]))
 
     def test_zero_duration_skips_the_phase(self):
-        cfg = _config(brake_phases=[
+        cfg = _config(brake_phases=_both([
             {'duration_s': 0, 'toggle_ms': 200},
             {'duration_s': 3.0, 'toggle_ms': 150},
             {'duration_s': 0, 'toggle_ms': 100},
-        ])
-        assert cfg.brake_duration_s == pytest.approx(3.0)
+        ]))
+        assert cfg.brake_duration_s('bottle') == pytest.approx(3.0)
 
     def test_phases_cannot_all_be_zero(self):
         # The plate would move out and straight back before anything fell.
         with pytest.raises(ValueError, match='more than 0'):
-            _config(brake_phases=[{'duration_s': 0, 'toggle_ms': 200},
-                                  {'duration_s': 0, 'toggle_ms': 150}])
+            _config(brake_phases=_both([{'duration_s': 0, 'toggle_ms': 200},
+                                        {'duration_s': 0, 'toggle_ms': 150}]))
 
     def test_old_distance_speed_format_is_explained(self):
         with pytest.raises(ValueError, match='duration_s'):
-            _config(brake_phases=[
-                {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200}])
+            _config(brake_phases=_both([
+                {'drop_ft': 75, 'speed_ftps': 15.0, 'toggle_ms': 200}]))
 
     def test_phases_from_the_command_line(self):
         phases = parse_brake_phases(['150:3', '100:2.5'])
@@ -253,7 +280,7 @@ class TestDropSequence:
         # which is what a pause at a phase change looked like.
         cfg = _config()
         runs = self.clamp_runs(DropSequence(cfg, 'bottle'),
-                               cfg.total_duration_s - 0.01)
+                               cfg.total_duration_s('bottle') - 0.01)
         assert max(runs) <= 0.2 + 0.002
         assert runs[:5] == pytest.approx([0.2] * 5, abs=0.002)
         assert any(run == pytest.approx(0.15, abs=0.002) for run in runs)
@@ -264,15 +291,15 @@ class TestDropSequence:
         seq = DropSequence(cfg, 'bottle')
         # The plate is at the drop position for the full 10.76 s of braking.
         assert seq.positions_at(1.01)[0] == 2050
-        assert seq.positions_at(cfg.total_duration_s - 0.01)[0] == 2050
-        assert cfg.total_duration_s - cfg.pre_drop_s == pytest.approx(10.76)
+        assert seq.positions_at(cfg.total_duration_s('bottle') - 0.01)[0] == 2050
+        assert cfg.brake_duration_s('bottle') == pytest.approx(10.76)
 
     def test_ends_unclamped_with_plate_back_at_hold(self):
         cfg = _config()
         seq = DropSequence(cfg, 'bottle')
-        plate, _, done = seq.positions_at(cfg.total_duration_s - 0.001)
+        plate, _, done = seq.positions_at(cfg.total_duration_s('bottle') - 0.001)
         assert (plate, done) == (2050, False)
-        assert seq.positions_at(cfg.total_duration_s) == (1685, 1900, True)
+        assert seq.positions_at(cfg.total_duration_s('bottle')) == (1685, 1900, True)
         assert seq.positions_at(60.0) == (1685, 1900, True)
 
     def test_no_pre_brake_drops_at_once(self):
@@ -282,17 +309,29 @@ class TestDropSequence:
     def test_skipped_phase_keeps_the_rhythm_continuous(self):
         # Only the 150 ms phase runs: the pre-brake takes the first phase
         # that actually runs, so the whole drop is one even 150 ms rhythm.
-        cfg = _config(brake_phases=[
+        cfg = _config(brake_phases=_both([
             {'duration_s': 0, 'toggle_ms': 200},
             {'duration_s': 3.0, 'toggle_ms': 150},
             {'duration_s': 0, 'toggle_ms': 100},
-        ])
+        ]))
         seq = DropSequence(cfg, 'bottle')
-        runs = self.clamp_runs(seq, cfg.total_duration_s - 0.01)
+        runs = self.clamp_runs(seq, cfg.total_duration_s('bottle') - 0.01)
         assert runs == pytest.approx([0.15] * len(runs), abs=0.002)
         assert seq.positions_at(0.99)[0] == 1685
         assert seq.positions_at(1.01)[0] == 2050
-        assert seq.positions_at(cfg.total_duration_s)[2] is True
+        assert seq.positions_at(cfg.total_duration_s('bottle'))[2] is True
+
+    def test_sequence_uses_the_payloads_own_phases(self):
+        cfg = _config(brake_phases={
+            'bottle': [{'duration_s': 3.0, 'toggle_ms': 200}],
+            'beacon': [{'duration_s': 2.0, 'toggle_ms': 100}],
+        })
+        beacon = DropSequence(cfg, 'beacon')
+        runs = self.clamp_runs(beacon, cfg.total_duration_s('beacon') - 0.01)
+        assert runs == pytest.approx([0.1] * len(runs), abs=0.002)
+        assert beacon.positions_at(3.0)[2] is True          # 1 s + 2 s
+        bottle = DropSequence(cfg, 'bottle')
+        assert bottle.positions_at(3.0)[2] is False         # 1 s + 3 s
 
     def test_unknown_payload_rejected(self):
         with pytest.raises(ValueError):

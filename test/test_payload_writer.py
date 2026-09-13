@@ -19,7 +19,10 @@ def config():
                   'unclamped_us': 1900, 'bottle_clamped_us': 1577,
                   'beacon_clamped_us': 1710},
         'pre_drop_s': 1.0,
-        'brake_phases': [{'duration_s': 3.0, 'toggle_ms': 200}],
+        'brake_phases': {
+            'bottle': [{'duration_s': 3.0, 'toggle_ms': 200}],
+            'beacon': [{'duration_s': 3.0, 'toggle_ms': 200}],
+        },
     }})
 
 

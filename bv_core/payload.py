@@ -76,7 +76,7 @@ class PayloadConfig:
     plate: ServoConfig
     clamp: ServoConfig
     pre_drop_s: float   # clamp brakes this long before the plate moves
-    brake_phases: tuple
+    brake_phases: dict  # payload -> tuple of BrakePhase
 
     @property
     def plate_hold_us(self):
@@ -92,15 +92,13 @@ class PayloadConfig:
     def clamped_us(self, payload):
         return self.clamp.positions_us[f'{payload}_clamped']
 
-    @property
-    def brake_duration_s(self):
-        """The braking phases after the plate moves."""
-        return sum(phase.duration_s for phase in self.brake_phases)
+    def brake_duration_s(self, payload):
+        """This payload's braking phases, after the plate moves."""
+        return sum(phase.duration_s for phase in self.brake_phases[payload])
 
-    @property
-    def total_duration_s(self):
-        """The whole drop: pre-brake plus the braking phases."""
-        return self.pre_drop_s + self.brake_duration_s
+    def total_duration_s(self, payload):
+        """This payload's whole drop: pre-brake plus its braking phases."""
+        return self.pre_drop_s + self.brake_duration_s(payload)
 
     def positions(self):
         """Every configured position as (servo, name, pulse_us)."""
@@ -177,7 +175,7 @@ def parse_payload_block(block):
         plate=plate,
         clamp=clamp,
         pre_drop_s=pre_drop_s,
-        brake_phases=parse_brake_phases(block.get('brake_phases')),
+        brake_phases=_payload_phases(block.get('brake_phases')),
     )
 
 
@@ -240,11 +238,13 @@ class DropSequence:
         self.payload = payload
         self.plate_us = config.plate_drop_us(payload)
         self.clamped_us = config.clamped_us(payload)
+        self.phases = config.brake_phases[payload]
+        self.total_s = config.total_duration_s(payload)
         self._flip_times = self._compute_flip_times()
 
     def _compute_flip_times(self):
         """Elapsed times at which the clamp changes position."""
-        phases = [p for p in self.config.brake_phases if p.duration_s > 0.0]
+        phases = [p for p in self.phases if p.duration_s > 0.0]
         # (start_s, toggle_s) per segment, the pre-brake first.
         segments = []
         start = 0.0
@@ -254,7 +254,7 @@ class DropSequence:
         for phase in phases:
             segments.append((start, phase.toggle_s))
             start += phase.duration_s
-        end = self.config.total_duration_s
+        end = self.total_s
 
         flips = []
         t = 0.0
@@ -268,7 +268,7 @@ class DropSequence:
 
     def positions_at(self, elapsed_s):
         """(plate_us, clamp_us, done) at elapsed_s into the drop."""
-        if elapsed_s >= self.config.total_duration_s:
+        if elapsed_s >= self.total_s:
             return self.config.plate_hold_us, self.config.unclamped_us, True
         plate = (self.config.plate_hold_us
                  if elapsed_s < self.config.pre_drop_s else self.plate_us)
@@ -328,8 +328,24 @@ def _servo(name, payload_block, position_names):
     )
 
 
-def parse_brake_phases(value):
-    """Brake phases from the YAML list or bench 'toggle_ms:duration_s' text.
+def _payload_phases(value):
+    """{payload: phases} from brake_phases: one list per payload."""
+    if not isinstance(value, dict):
+        raise ValueError(
+            "payload.brake_phases must give each payload its own list: "
+            "brake_phases: {bottle: [...], beacon: [...]}")
+    missing = [payload for payload in PAYLOADS if payload not in value]
+    if missing:
+        raise ValueError(
+            f"payload.brake_phases has no list for {', '.join(missing)} "
+            f"(needs bottle and beacon)")
+    return {payload: parse_brake_phases(
+                value[payload], where=f'payload.brake_phases.{payload}')
+            for payload in PAYLOADS}
+
+
+def parse_brake_phases(value, where='brake phases'):
+    """One payload's phases, from its YAML list or 'toggle_ms:duration_s' text.
 
     duration_s of 0 skips a phase; toggle_ms must be positive; together the
     phases must last more than 0 s, or the plate would move out and straight
@@ -339,29 +355,29 @@ def parse_brake_phases(value):
             isinstance(item, str) for item in value):
         value = [_phase_from_text(item) for item in value]
     if not isinstance(value, list) or not value:
-        raise ValueError("payload.brake_phases must be a non-empty list")
+        raise ValueError(f"{where} must be a non-empty list")
     phases = []
     for index, raw in enumerate(value):
-        where = f'payload.brake_phases[{index}]'
-        raw = _mapping(raw, where)
+        item = f'{where}[{index}]'
+        raw = _mapping(raw, item)
         if 'duration_s' not in raw and 'drop_ft' in raw:
             raise ValueError(
-                f"{where} uses drop_ft/speed_ftps; phases are now "
+                f"{item} uses drop_ft/speed_ftps; phases are now "
                 f"{{duration_s: <seconds>, toggle_ms: <ms>}} (duration_s = "
                 f"drop_ft / speed_ftps)")
-        duration_s = _number(raw, 'duration_s', where)
-        toggle_ms = _number(raw, 'toggle_ms', where)
+        duration_s = _number(raw, 'duration_s', item)
+        toggle_ms = _number(raw, 'toggle_ms', item)
         if duration_s < 0.0:
             raise ValueError(
-                f"{where}.duration_s must not be negative, got {duration_s:g}")
+                f"{item}.duration_s must not be negative, got {duration_s:g}")
         if toggle_ms <= 0.0:
             raise ValueError(
-                f"{where}.toggle_ms must be positive, got {toggle_ms:g}")
+                f"{item}.toggle_ms must be positive, got {toggle_ms:g}")
         phases.append(BrakePhase(duration_s=duration_s, toggle_ms=toggle_ms))
     if sum(phase.duration_s for phase in phases) <= 0.0:
         raise ValueError(
-            "payload.brake_phases must last more than 0 s in total: with every "
-            "phase skipped the plate would move out and straight back")
+            f"{where} must last more than 0 s in total: with every phase "
+            f"skipped the plate would move out and straight back")
     return tuple(phases)
 
 

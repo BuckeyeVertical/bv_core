@@ -70,13 +70,19 @@ payload:
 
   # Once the plate moves, the clamp toggles clamped <-> unclamped every
   # toggle_ms for duration_s, phase after phase, in one continuous rhythm.
-  # duration_s: 0 skips a phase. These times were worked out for a 150 ft drop
-  # as 75 ft at 15 ft/s, 50 ft at 13.3 ft/s and 25 ft at 12.5 ft/s. Bench runs
-  # can override them: ros2 run bv_core test_servo drop bottle 150:3
+  # Each payload has its own list; duration_s: 0 skips a phase. The starting
+  # times were worked out for a 150 ft drop as 75 ft at 15 ft/s, 50 ft at
+  # 13.3 ft/s and 25 ft at 12.5 ft/s. Bench runs can override one payload's
+  # list: ros2 run bv_core test_servo drop bottle 150:3
   brake_phases:
-    - {duration_s: 5.0,  toggle_ms: 200}
-    - {duration_s: 3.76, toggle_ms: 150}
-    - {duration_s: 2.0,  toggle_ms: 100}
+    bottle:
+      - {duration_s: 5.0,  toggle_ms: 200}
+      - {duration_s: 3.76, toggle_ms: 150}
+      - {duration_s: 2.0,  toggle_ms: 100}
+    beacon:
+      - {duration_s: 5.0,  toggle_ms: 200}
+      - {duration_s: 3.76, toggle_ms: 150}
+      - {duration_s: 2.0,  toggle_ms: 100}
 
 Approval_required: true
 Approval_timeout_sec: 180.0

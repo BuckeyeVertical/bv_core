@@ -826,14 +826,14 @@ class MissionRunner(Node):
             f"[DEPLOY] dropping {payload}: clamp pulsing "
             f"{self._drop_sequence.clamped_us:g}/{self.payload.unclamped_us:g} us, "
             f"plate -> {self._drop_sequence.plate_us:g} us after "
-            f"{self.payload.pre_drop_s:g}s, {self.payload.total_duration_s:.2f}s "
+            f"{self.payload.pre_drop_s:g}s, {self._drop_sequence.total_s:.2f}s "
             f"total")
         self.log.event(
             'DEPLOY_START',
             f"payload={payload}, plate_us={self._drop_sequence.plate_us:g}, "
             f"clamped_us={self._drop_sequence.clamped_us:g}, "
             f"pre_drop={self.payload.pre_drop_s:g}s, "
-            f"duration={self.payload.total_duration_s:.2f}s")
+            f"duration={self._drop_sequence.total_s:.2f}s")
 
         # First command now; the timer takes it from there.
         self._on_deploy_tick()
@@ -1033,9 +1033,9 @@ class MissionRunner(Node):
         self.get_logger().info(
             f"Payload ENABLED: plate=actuator set "
             f"{payload.plate.actuator_set}, clamp=actuator set "
-            f"{payload.clamp.actuator_set}, drop {payload.total_duration_s:.2f}s "
-            f"({payload.pre_drop_s:g}s pre-brake + "
-            f"{payload.brake_duration_s:.2f}s braking)")
+            f"{payload.clamp.actuator_set}, pre-brake {payload.pre_drop_s:g}s, "
+            f"drop bottle {payload.total_duration_s('bottle'):.2f}s / "
+            f"beacon {payload.total_duration_s('beacon'):.2f}s")
         for servo, name, pulse in payload.positions():
             self.get_logger().info(f"  {servo.name} {name}: {pulse:g} us")
 

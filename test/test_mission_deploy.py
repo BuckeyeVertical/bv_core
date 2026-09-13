@@ -30,11 +30,14 @@ def payload_config():
                   'unclamped_us': 1900, 'bottle_clamped_us': 1577,
                   'beacon_clamped_us': 1300},
         'pre_drop_s': 1.0,
-        'brake_phases': [
-            {'duration_s': 5.0, 'toggle_ms': 200},
-            {'duration_s': 3.76, 'toggle_ms': 150},
-            {'duration_s': 2.0, 'toggle_ms': 100},
-        ],
+        'brake_phases': {
+            payload: [
+                {'duration_s': 5.0, 'toggle_ms': 200},
+                {'duration_s': 3.76, 'toggle_ms': 150},
+                {'duration_s': 2.0, 'toggle_ms': 100},
+            ]
+            for payload in ('bottle', 'beacon')
+        },
     }})
 
 
