@@ -100,9 +100,13 @@ Commands are addressed to PX4. Don't switch them to broadcast: PX4 on the flight
 controller answers a broadcast `MAV_CMD_DO_SET_ACTUATOR` with UNSUPPORTED and leaves
 the outputs alone, even though SITL accepts it. An addressed command makes MAVROS
 wait for PX4's reply, which takes about 10 ms over serial, and MAVROS refuses a
-second command of the same type until then. So `mission_node` keeps only one
-command in flight. Newer positions wait for the reply, and a command PX4 didn't
-confirm is re-sent after 0.2 s. The drop timing follows the clock either way.
+second command of the same type until then. So only one command is ever in
+flight. Newer positions wait for the reply, and a command PX4 didn't confirm is
+re-sent after 0.2 s. The drop timing follows the clock either way.
+
+This is all in one class, `PayloadWriter` (`bv_core/payload_writer.py`). The
+mission's DEPLOY and `test_servo drop` both use it, with the same `DropSequence`,
+so a bench drop runs exactly the code that flies. Only the trigger differs.
 
 ## Bench testing
 

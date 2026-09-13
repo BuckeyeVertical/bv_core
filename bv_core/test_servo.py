@@ -33,15 +33,15 @@ from .mission_config import mission_config_path
 from .payload import (
     PAYLOADS,
     DropSequence,
-    actuator_params,
     parse_brake_phases,
     parse_payload_block,
     unreachable_reason,
 )
+from .payload_writer import PayloadWriter, actuator_request
 
 USAGE = __doc__.split('\n\n')[1]
-# Pause before re-sending a command PX4 did not confirm (as mission_node).
-RETRY_SEC = 0.2
+# Loop period while driving a drop; mission_node's DEPLOY timer is 20 ms.
+DROP_TICK_SEC = 0.005
 
 
 def parse_args(argv):
@@ -93,22 +93,8 @@ class ServoBench(Node):
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /mavros/cmd/command...')
 
-    def _call(self, plate_us, clamp_us):
-        """Send one command addressed to PX4; return the MAVROS future.
-
-        Addressed, not broadcast: PX4 on the flight controller answers a
-        broadcast MAV_CMD_DO_SET_ACTUATOR with UNSUPPORTED and ignores it.
-        """
-        command, params = actuator_params(self.config, plate_us, clamp_us)
-        request = CommandLong.Request()
-        request.broadcast = False
-        request.command = command
-        (request.param1, request.param2, request.param3, request.param4,
-         request.param5, request.param6, request.param7) = params
-        return self.client.call_async(request)
-
     def send(self, plate_us=None, clamp_us=None):
-        """Command the servos and report PX4's verdict. True if confirmed."""
+        """Command the servos once and report PX4's verdict. True if confirmed."""
         for servo, pulse in ((self.config.plate, plate_us),
                              (self.config.clamp, clamp_us)):
             if pulse is None:
@@ -121,7 +107,8 @@ class ServoBench(Node):
                 f"{servo.name} (actuator set {servo.actuator_set}) -> "
                 f"{pulse:g} us")
 
-        future = self._call(plate_us, clamp_us)
+        future = self.client.call_async(
+            actuator_request(self.config, plate_us, clamp_us))
         # Waits past MAVROS's own 5 s ACK timeout, so its verdict arrives.
         rclpy.spin_until_future_complete(self, future, timeout_sec=6.0)
         response = future.result()
@@ -139,55 +126,51 @@ class ServoBench(Node):
         return False
 
     def drop(self, payload):
-        """Run the drop sequence the way mission_node does.
+        """Run a drop through mission_node's own code.
 
-        First the rest positions, confirmed: the first service call from a
-        freshly started program can take ~1 s, which would otherwise eat
-        the pre-brake. Then one command in flight at a time, always the
-        positions for *now*, re-sent after RETRY_SEC if PX4 did not confirm.
-        The sequence runs on the clock and never waits on a reply.
+        The same DropSequence decides the pulses and the same PayloadWriter
+        sends them; only the loop driving it differs (mission_node uses a
+        20 ms ROS timer). First the rest positions, confirmed: the first
+        service call from a freshly started program can take ~1 s, which
+        would otherwise eat the pre-brake.
         """
         config = self.config
         sequence = DropSequence(config, payload)
+        writer = PayloadWriter(config, self.client, self.get_logger())
+
         self.get_logger().info('Starting from rest (plate hold, clamp open)')
-        self.send(config.plate_hold_us, config.unclamped_us)
+        writer.set(config.plate_hold_us, config.unclamped_us)
+        if not self._spin_until(lambda: writer.settled, timeout_s=6.0):
+            self.get_logger().warn(
+                'PX4 did not confirm the rest positions; dropping anyway')
 
         self.get_logger().info(
             f"Dropping {payload}: clamp braking for {config.pre_drop_s:g}s, "
             f"then the plate moves; {config.total_duration_s:.2f}s total")
         start = time.monotonic()
-        pending = None            # (future, positions) awaiting PX4's reply
-        confirmed = None
-        retry_at = 0.0
-        sent = accepted = 0
+        sent_before, accepted_before = writer.sent, writer.accepted
         while True:
-            now = time.monotonic()
-            plate, clamp, done = sequence.positions_at(now - start)
-            desired = (plate, clamp)
-
-            if pending is not None and pending[0].done():
-                future, positions = pending
-                pending = None
-                response = future.result()
-                if response is not None and response.success:
-                    accepted += 1
-                    confirmed = positions
-                else:
-                    retry_at = now + RETRY_SEC
-
-            if pending is None and desired != confirmed and now >= retry_at:
-                pending = (self._call(plate, clamp), desired)
-                sent += 1
-
-            if done and pending is None and desired == confirmed:
+            plate, clamp, done = sequence.positions_at(time.monotonic() - start)
+            writer.set(plate, clamp)
+            writer.flush()
+            if done and writer.settled:
                 break
-            if now - start > config.total_duration_s + 10.0:
+            if time.monotonic() - start > config.total_duration_s + 10.0:
                 self.get_logger().error('Gave up waiting for PX4 to confirm')
                 break
-            rclpy.spin_once(self, timeout_sec=0.005)
+            rclpy.spin_once(self, timeout_sec=DROP_TICK_SEC)
 
         self.get_logger().info(
-            f'Drop complete: {accepted}/{sent} commands confirmed by PX4')
+            f'Drop complete: {writer.accepted - accepted_before}/'
+            f'{writer.sent - sent_before} commands confirmed by PX4')
+
+    def _spin_until(self, condition, timeout_s):
+        deadline = time.monotonic() + timeout_s
+        while not condition():
+            if time.monotonic() > deadline:
+                return False
+            rclpy.spin_once(self, timeout_sec=0.01)
+        return True
 
 
 def main(args=None):
