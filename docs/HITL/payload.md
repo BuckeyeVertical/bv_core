@@ -88,9 +88,10 @@ servos are on the AUX rail, the parameters are named `PWM_AUX_*` instead.
 
 Reboot the flight controller after changing `FUNC` or `TIM`.
 
-**The disarmed pulse matters.** PX4 only sends commanded values to these outputs
-while the vehicle is armed. At power-up, before arming, and after landing, each
-output sends its `DIS` pulse instead. The plate must hold the payloads at that
+**The disarmed pulse matters.** Each output sends its `DIS` pulse at power-up,
+until the first command arrives. With `COM_PREARM_MODE = 2` (this aircraft's
+setting) the servos then follow commands even while disarmed. With any other
+value they stay at `DIS` whenever the vehicle is disarmed. The plate must hold the payloads at that
 pulse. `ros2 run bv_core test_servo show` prints the current `DIS` values.
 
 `mission_node` also sends the hold and unclamped positions once at startup, before
@@ -110,8 +111,10 @@ so a bench drop runs exactly the code that flies. Only the trigger differs.
 
 ## Bench testing
 
-Remove the propellers. Then either arm the vehicle or set `COM_PREARM_MODE = 2`
-(Always) so the outputs respond while disarmed. Start MAVROS and run:
+Remove the propellers. The servos only respond while disarmed if
+`COM_PREARM_MODE = 2` (Always). That is this aircraft's normal setting, used in
+flight too, so there's nothing to change. With another value you'd have to arm to
+bench-test. Start MAVROS and run:
 
 ```bash
 ros2 run bv_core test_servo show            # configured pulses, range check, DIS values
@@ -127,8 +130,7 @@ Brake phases after the payload name (`toggle_ms:duration_s`, one or more, e.g.
 pre-brake still runs first, at the first given rhythm. The YAML isn't touched.
 
 The tool reads the mission config selected by `BV_MISSION_CONFIG` (default
-`real_params.yaml`). It ignores `payload.enabled` and the startup range check. Set
-`COM_PREARM_MODE` back to its flight value when you're done.
+`real_params.yaml`). It ignores `payload.enabled` and the startup range check.
 
 ## Turning the payload off
 
