@@ -93,7 +93,13 @@ class Localizer:
         dirs_cam /= np.linalg.norm(dirs_cam, axis=1, keepdims=True)
 
         r_mount = R.from_euler('xyz', self.camera_orientation)
-        r_drone = R.from_quat(drone_orientation, scalar_first=False)
+        # The camera is on a gimbal that holds it level, so drone roll and
+        # pitch never reach the camera. Keep only the drone's yaw (heading of
+        # the body x-axis in ENU) and treat roll/pitch as flat.
+        r_drone_full = R.from_quat(drone_orientation, scalar_first=False)
+        fwd_enu = r_drone_full.apply([1.0, 0.0, 0.0])
+        yaw = math.atan2(fwd_enu[1], fwd_enu[0])
+        r_drone = R.from_euler('z', yaw)
         r_total = r_drone * r_mount
 
         # 3) Get rotation from camera -> ENU
