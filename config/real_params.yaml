@@ -24,15 +24,15 @@ points:
 scan_sweep: long
 scan_start: top
 scan_boundary:
-  - [36.00088054, -95.84866941]
-  - [35.99963933, -95.84866941]
-  - [35.99963933, -95.84678650]
-  - [36.00088054, -95.84678650]
+  - [36.00082412, -95.84743291]
+  - [35.99977170, -95.84743291]
+  - [35.99977170, -95.84678918]
+  - [36.00082412, -95.84678918]
 
 Lap_velocity: 5.0
 Scan_transit_velocity: 5.0
 Takeoff_velocity: 5.0
-Scan_velocity: 3.0
+Scan_velocity: 4.0
 Deliver_velocity: 3.0
 RTL_velocity: 5.0
 
