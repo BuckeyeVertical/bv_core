@@ -65,7 +65,7 @@ payload:
     actuator_set: 1          # PWM_MAIN_FUNCn = 301 (Peripheral via Actuator Set 1)
     pwm_range_us: [800, 2200]  # MUST equal PWM_MAIN_MINn / PWM_MAIN_MAXn
     unclamped_us: 1900       # open; also its position at rest
-    bottle_clamped_us: 2020  # gripping for the water bottle
+    bottle_clamped_us: 2010  # gripping for the water bottle
     beacon_clamped_us: 1975  # gripping for the beacon
 
   # The clamp starts braking this long before the plate moves, while the
