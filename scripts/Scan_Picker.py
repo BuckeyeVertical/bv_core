@@ -168,6 +168,10 @@ PAGE = """<!doctype html>
     button.choice { background: #dfe4ef; color: #273044; }
     button.choice.active { background: #295bd6; color: white; }
     button:disabled { opacity: .45; cursor: default; }
+    .location-search { display: flex; gap: 7px; margin: 14px 0 8px; }
+    .location-search input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid #b8c0d0; border-radius: 6px; font: inherit; }
+    .location-search button { margin: 0; white-space: nowrap; }
+    .search-note { margin: -3px 0 9px; color: #596174; font-size: 11px; }
     .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 16px; }
     .tabs button { margin: 0; background: #dfe4ef; color: #273044; }
     .tabs button.active { background: #172033; color: white; }
@@ -213,6 +217,16 @@ PAGE = """<!doctype html>
     <button id="copy" disabled>Copy YAML</button>
     <button id="use-region" disabled>Use Region</button>
     <button id="reset" class="secondary">Reset</button>
+    <form id="location-search" class="location-search">
+      <input id="location-query" type="search" aria-label="Address or coordinates"
+        placeholder="Address or lat, lon" autocomplete="off">
+      <button id="search-location" type="submit" class="secondary">Find</button>
+    </form>
+    <div class="search-note">Submit-only address search by
+      <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> ·
+      <a href="https://operations.osmfoundation.org/policies/nominatim/"
+        target="_blank">usage policy</a>
+    </div>
     <button id="locate" class="secondary">My location</button>
     <button id="configured" class="secondary">Show configured region</button>
     <button id="quit" class="secondary">Stop server</button>
@@ -251,6 +265,9 @@ PAGE = """<!doctype html>
     const useRegionButton = document.getElementById('use-region');
     const planSummary = document.getElementById('plan-summary');
     const configuredButton = document.getElementById('configured');
+    const locateButton = document.getElementById('locate');
+    const locationQuery = document.getElementById('location-query');
+    const searchLocationButton = document.getElementById('search-location');
     const configuredRegion = __CONFIGURED_REGION__;
     const writeToken = __WRITE_TOKEN__;
     let firstCorner = null;
@@ -265,6 +282,9 @@ PAGE = """<!doctype html>
     let planRequest = 0;
     let activeBounds = null;
     let activeScanBoundary = null;
+    let locationLayer = null;
+    let locationRequest = 0;
+    let searchLayer = null;
 
     function setStatus(message) { statusBox.textContent = message; }
 
@@ -583,26 +603,111 @@ PAGE = """<!doctype html>
       if (firstCorner && rectangle) rectangle.setBounds([firstCorner, event.latlng]);
     });
 
+    function finishLocate(request) {
+      if (request !== locationRequest) return false;
+      locateButton.disabled = false;
+      locateButton.textContent = 'My location';
+      return true;
+    }
+
+    function locationErrorMessage(error) {
+      if (error && error.code === 1) {
+        return 'Location permission is blocked. Allow location for this page in your browser settings, then try again.';
+      }
+      if (error && error.code === 2) {
+        return 'Your location could not be determined. Check Location Services or pan/zoom the map manually.';
+      }
+      if (error && error.code === 3) {
+        return 'Finding your location timed out. Try again or pan/zoom the map manually.';
+      }
+      return 'Location is unavailable. Pan/zoom the map, then click the first corner.';
+    }
+
+    function coordinatesFor(query) {
+      const match = query.match(/^\\s*([-+]?\\d+(?:\\.\\d+)?)\\s*[, ]\\s*([-+]?\\d+(?:\\.\\d+)?)\\s*$/);
+      if (!match) return null;
+      const latitude = Number(match[1]);
+      const longitude = Number(match[2]);
+      if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+        return null;
+      }
+      return [latitude, longitude];
+    }
+
+    function showSearchLocation(latitude, longitude, label) {
+      const point = [latitude, longitude];
+      map.setView(point, 18);
+      if (searchLayer) map.removeLayer(searchLayer);
+      searchLayer = L.marker(point, {title: label}).addTo(map);
+      setStatus(`Showing ${label}. Click the first corner.`);
+    }
+
+    async function searchLocation(event) {
+      event.preventDefault();
+      const query = locationQuery.value.trim();
+      if (!query) {
+        setStatus('Enter an address or latitude, longitude.');
+        locationQuery.focus();
+        return;
+      }
+      searchLocationButton.disabled = true;
+      searchLocationButton.textContent = 'Finding…';
+      try {
+        const coordinates = coordinatesFor(query);
+        if (coordinates) {
+          showSearchLocation(coordinates[0], coordinates[1], query);
+          return;
+        }
+        const parameters = new URLSearchParams({
+          q: query, format: 'jsonv2', limit: '1'
+        });
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?${parameters}`,
+          {headers: {'Accept': 'application/json'}});
+        if (!response.ok) throw new Error(`search failed (${response.status})`);
+        const results = await response.json();
+        if (!results.length) throw new Error('address not found');
+        const latitude = Number(results[0].lat);
+        const longitude = Number(results[0].lon);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          throw new Error('search returned invalid coordinates');
+        }
+        showSearchLocation(latitude, longitude, results[0].display_name);
+      } catch (error) {
+        setStatus(`Could not find that location: ${error.message}.`);
+      } finally {
+        searchLocationButton.disabled = false;
+        searchLocationButton.textContent = 'Find';
+      }
+    }
+
     function locate(forceRecenter = false) {
+      const request = ++locationRequest;
       setStatus('Finding your location…');
+      locateButton.disabled = forceRecenter;
+      locateButton.textContent = 'Locating…';
       if (!navigator.geolocation) {
-        setStatus('Location is unavailable. Pan/zoom the map, then click the first corner.');
+        finishLocate(request);
+        setStatus(locationErrorMessage());
         return;
       }
       navigator.geolocation.getCurrentPosition(position => {
+        if (!finishLocate(request)) return;
         if (!forceRecenter && (firstCorner || rectangle || configuredLayer)) return;
         const here = [position.coords.latitude, position.coords.longitude];
         map.setView(here, 19);
-        L.circle(here, {
+        if (locationLayer) map.removeLayer(locationLayer);
+        locationLayer = L.circle(here, {
           radius: Math.max(position.coords.accuracy, 2),
           color: '#295bd6', fillOpacity: 0.10, weight: 2
         }).addTo(map).bindPopup(`Approximate location (±${Math.round(position.coords.accuracy)} m)`);
         setStatus(rectangle ? 'Centered on your location; the rectangle is unchanged.' :
           'Click the first corner.');
-      }, () => {
+      }, error => {
+        if (!finishLocate(request)) return;
         if (!forceRecenter && (firstCorner || rectangle || configuredLayer)) return;
-        setStatus('Location permission was unavailable. Pan/zoom the map, then click the first corner.');
-      }, {enableHighAccuracy: true, timeout: 10000, maximumAge: 30000});
+        setStatus(locationErrorMessage(error));
+      }, {enableHighAccuracy: false, timeout: 15000, maximumAge: 300000});
     }
 
     copyButton.addEventListener('click', async () => {
@@ -650,7 +755,9 @@ PAGE = """<!doctype html>
       }
     });
     document.getElementById('reset').addEventListener('click', clearSelection);
-    document.getElementById('locate').addEventListener('click', () => locate(true));
+    document.getElementById('location-search').addEventListener(
+      'submit', searchLocation);
+    locateButton.addEventListener('click', () => locate(true));
     const hasConfiguredRegion = configuredRegion.boundary.length >= 3 ||
       configuredRegion.lap_points.length >= 3;
     configuredButton.disabled = !hasConfiguredRegion;

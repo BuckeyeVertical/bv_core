@@ -154,3 +154,121 @@ assert.deepEqual(boundaryFor(bounds), [[37,-97],[36,-97],[36,-96],[37,-96]]);
     result = subprocess.run(
         [node, '-e', script], check=True, capture_output=True, text=True)
     assert yaml.safe_load(json.loads(result.stdout))['scan_boundary'] == boundary
+
+
+def test_location_button_recenters_and_reports_geolocation_errors():
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required for picker JavaScript regression')
+    module = load_script()
+    functions = []
+    for name in ('finishLocate', 'locationErrorMessage', 'locate'):
+        begin = module.PAGE.index(f'    function {name}(')
+        end = module.PAGE.index('\n    }', begin) + len('\n    }')
+        functions.append(module.PAGE[begin:end])
+    script = r'''
+const assert = require('node:assert/strict');
+let firstCorner = null, rectangle = null, configuredLayer = null;
+let locationLayer = null, locationRequest = 0;
+const statuses = [];
+const locateButton = {disabled: false, textContent: 'My location'};
+const map = {
+  views: [], removed: [],
+  setView(here, zoom) {this.views.push([here, zoom]);},
+  removeLayer(layer) {this.removed.push(layer);}
+};
+const L = {
+  circle(here, options) {
+    return {
+      here, options,
+      addTo() {return this;},
+      bindPopup() {return this;}
+    };
+  }
+};
+function setStatus(message) {statuses.push(message);}
+let success, failure, options;
+const navigator = {geolocation: {
+  getCurrentPosition(onSuccess, onFailure, suppliedOptions) {
+    success = onSuccess; failure = onFailure; options = suppliedOptions;
+  }
+}};
+FUNCTIONS
+locate(true);
+assert.equal(locateButton.disabled, true);
+assert.equal(locateButton.textContent, 'Locating…');
+assert.equal(options.enableHighAccuracy, false);
+success({coords: {latitude: 40.1, longitude: -83.2, accuracy: 12}});
+assert.deepEqual(map.views, [[[40.1, -83.2], 19]]);
+assert.equal(locateButton.disabled, false);
+assert.equal(locateButton.textContent, 'My location');
+assert.equal(statuses.at(-1), 'Click the first corner.');
+locate(true);
+failure({code: 1});
+assert.match(statuses.at(-1), /permission is blocked/);
+console.log(JSON.stringify(statuses));
+'''.replace('FUNCTIONS', '\n'.join(functions))
+    subprocess.run(
+        [node, '-e', script], check=True, capture_output=True, text=True)
+
+
+def test_address_search_accepts_coordinates_and_geocoder_results():
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required for picker JavaScript regression')
+    module = load_script()
+    functions = []
+    for name in ('coordinatesFor', 'showSearchLocation', 'searchLocation'):
+        prefix = '    async function' if name == 'searchLocation' else '    function'
+        begin = module.PAGE.index(f'{prefix} {name}(')
+        end = module.PAGE.index('\n    }', begin) + len('\n    }')
+        functions.append(module.PAGE[begin:end])
+    script = r'''
+import assert from 'node:assert/strict';
+const statuses = [];
+let searchLayer = null;
+const locationQuery = {value: '', focus() {}};
+const searchLocationButton = {disabled: false, textContent: 'Find'};
+const map = {
+  views: [], removed: [],
+  setView(point, zoom) {this.views.push([point, zoom]);},
+  removeLayer(layer) {this.removed.push(layer);}
+};
+const L = {marker(point, options) {
+  return {point, options, addTo() {return this;}};
+}};
+function setStatus(message) {statuses.push(message);}
+const URLSearchParams = globalThis.URLSearchParams;
+let fetchedUrl = null;
+async function fetch(url) {
+  fetchedUrl = String(url);
+  return {ok: true, json: async () => [{
+    lat: '40.101', lon: '-83.202', display_name: 'Test Address'
+  }]};
+}
+FUNCTIONS
+assert.deepEqual(coordinatesFor('40.1, -83.2'), [40.1, -83.2]);
+assert.equal(coordinatesFor('100, -83.2'), null);
+locationQuery.value = '40.2 -83.3';
+await searchLocation({preventDefault() {}});
+assert.deepEqual(map.views.at(-1), [[40.2, -83.3], 18]);
+locationQuery.value = '1 Test Street';
+await searchLocation({preventDefault() {}});
+assert.match(fetchedUrl, /nominatim\.openstreetmap\.org\/search/);
+assert.deepEqual(map.views.at(-1), [[40.101, -83.202], 18]);
+assert.equal(statuses.at(-1), 'Showing Test Address. Click the first corner.');
+assert.equal(searchLocationButton.textContent, 'Find');
+'''.replace('FUNCTIONS', '\n'.join(functions))
+    subprocess.run(
+        [node, '--input-type=module', '-e', script],
+        check=True, capture_output=True, text=True)
