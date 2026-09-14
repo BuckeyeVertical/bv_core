@@ -21,6 +21,8 @@ from collections import defaultdict
 from datetime import datetime
 
 from .mission_config import package_source_dir
+from .naive_stitch import build_naive_mosaic, layout_from_plan
+from .scan_plan import load_scan_plan
 
 
 def normalize_row_orientation(images, row_num):
@@ -46,6 +48,13 @@ class StitchingNode(Node):
         self.declare_parameter('match_confidence', 0.7)  # lowe's ratio threshold
         self.declare_parameter('gap_width', 50)
         self.declare_parameter('save_failed_frames', True)
+        # Dead-reckoned fallback mosaic. Runs before the feature-based path
+        # so an artifact exists even when that path fails outright.
+        self.declare_parameter('naive_fallback', True)
+        # Maps cross_track_m's left-positive convention onto image x.
+        # -1 for a nadir camera whose image +x points right of travel.
+        # If the strips come out mirrored across the flight axis, flip this.
+        self.declare_parameter('naive_camera_x_sign', -1)
         self._has_stitched = False # stops from stitching on every return publish
         self._stitch_timer = None
 
@@ -536,6 +545,72 @@ class StitchingNode(Node):
 
         return img[y:y+h, x:x+w]
 
+    def _run_naive_fallback(self, work_row_groups, output_dir, timestamp):
+        """Build and save the dead-reckoned mosaic.
+
+        Never raises: this is the floor under the feature-based path, so a
+        failure here must not take that path down with it.
+        """
+        if not self.get_parameter('naive_fallback').value:
+            return
+
+        try:
+            scan_plan = load_scan_plan()
+        except Exception as error:
+            self.get_logger().warning(
+                f"Naive fallback skipped, no scan plan: {error}")
+            return
+
+        max_width = max(100, self.get_parameter('max_width').value)
+        sign = int(self.get_parameter('naive_camera_x_sign').value)
+
+        rows = {}
+        frame_w = frame_h = None
+        for row_num in sorted(work_row_groups):
+            images = self._load_and_resize(work_row_groups[row_num], max_width)
+            if not images:
+                continue
+            if frame_w is None:
+                frame_h, frame_w = images[0].shape[:2]
+            uniform = [
+                image for image in images
+                if image.shape[:2] == (frame_h, frame_w)
+            ]
+            if len(uniform) != len(images):
+                self.get_logger().warning(
+                    f"Naive fallback row {row_num}: dropped "
+                    f"{len(images) - len(uniform)} frame(s) of mismatched size"
+                )
+            if uniform:
+                rows[row_num] = uniform
+
+        if not rows:
+            self.get_logger().warning("Naive fallback skipped, no frames")
+            return
+
+        try:
+            layout = layout_from_plan(
+                scan_plan, frame_w, frame_h, camera_x_sign=sign)
+            mosaic = build_naive_mosaic(rows, layout)
+        except Exception as error:
+            self.get_logger().error(f"Naive fallback failed: {error}")
+            return
+        finally:
+            rows.clear()
+
+        os.makedirs(output_dir, exist_ok=True)
+        save_path = os.path.join(output_dir, f"naive_mosaic_{timestamp}.jpg")
+        if cv2.imwrite(save_path, mosaic):
+            self.get_logger().info(
+                f"Naive fallback mosaic saved: {save_path} "
+                f"({mosaic.shape[1]}x{mosaic.shape[0]}px, "
+                f"along_step={layout.along_step_px}px, "
+                f"row_x={layout.row_x_px})"
+            )
+        else:
+            self.get_logger().error(
+                f"Could not write naive mosaic: {save_path}")
+
     def _perform_stitching(self):
         input_dir = self.get_parameter('input_dir').value
         output_dir = self.get_parameter('output_dir').value
@@ -583,6 +658,10 @@ class StitchingNode(Node):
             self._restore_files(all_work_paths, input_dir)
             shutil.rmtree(work_dir, ignore_errors=True)
             return False, f"Failed to lock input files: {e}"
+
+        # Before phase 1, not after: several branches below return early on
+        # failure, and the fallback has to exist precisely in that case.
+        self._run_naive_fallback(work_row_groups, output_dir, timestamp)
 
         start_time = time.time()
 
