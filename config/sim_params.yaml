@@ -4,24 +4,29 @@
 enable_mission_log: true
 num_objects: 2
 
-takeoff_alt: &TAKEOFF 60.96
-scan_altitude: 60.96
+takeoff_alt: 60.96            # AGL, relative to the takeoff point
+scan_altitude: 60.96          # AGL, relative to the takeoff point
 lap_count: 0
+
+# mission_node pushes the lap route in MAV_FRAME_GLOBAL (AMSL). SITL runs
+# with PX4_HOME_ALT=0 (see README), so AMSL and AGL coincide here and this
+# matches takeoff_alt. Raise lap_count above 0 to actually fly the lap.
+lap_alt_msl: &LAP_MSL 60.96   # AMSL
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
-  - [36.21531017, -96.00994545, *TAKEOFF]
-  - [36.21362892, -96.00981991, *TAKEOFF]
-  - [36.21359247, -96.00813694, *TAKEOFF]
-  - [36.21142292, -96.00821104, *TAKEOFF]
-  - [36.21146430, -96.00483924, *TAKEOFF]
-  - [36.21645553, -96.00483924, *TAKEOFF]
-  - [36.21883578, -96.00271530, *TAKEOFF]
-  - [36.21961682, -96.00447978, *TAKEOFF]
-  - [36.21998623, -96.00686465, *TAKEOFF]
-  - [36.21980137, -96.00921336, *TAKEOFF]
-  - [36.21911447, -96.01129465, *TAKEOFF]
-  - [36.21808622, -96.01282681, *TAKEOFF]
+  - [36.21531017, -96.00994545, *LAP_MSL]
+  - [36.21362892, -96.00981991, *LAP_MSL]
+  - [36.21359247, -96.00813694, *LAP_MSL]
+  - [36.21142292, -96.00821104, *LAP_MSL]
+  - [36.21146430, -96.00483924, *LAP_MSL]
+  - [36.21645553, -96.00483924, *LAP_MSL]
+  - [36.21883578, -96.00271530, *LAP_MSL]
+  - [36.21961682, -96.00447978, *LAP_MSL]
+  - [36.21998623, -96.00686465, *LAP_MSL]
+  - [36.21980137, -96.00921336, *LAP_MSL]
+  - [36.21911447, -96.01129465, *LAP_MSL]
+  - [36.21808622, -96.01282681, *LAP_MSL]
 
 scan_boundary:
   - [36.216341, -96.010424]

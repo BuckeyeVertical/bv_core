@@ -4,17 +4,22 @@
 enable_mission_log: true
 num_objects: 2
 
-takeoff_alt: &TAKEOFF 45.72
-scan_altitude: 45.72
+takeoff_alt: 45.72            # AGL, relative to the takeoff point
+scan_altitude: 45.72          # AGL, relative to the takeoff point
 lap_count: 2
+
+# Official lap waypoints are issued AMSL, so mission_node pushes the lap
+# route in MAV_FRAME_GLOBAL. REPLACE THIS WITH THE CHECK-IN NUMBER before
+# flying: 0.0 commands sea level, which is ~280 m below this field.
+lap_alt_msl: &LAP_MSL 0.0     # AMSL
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
-  - [40.15920833, -83.19985278, *TAKEOFF]
-  - [40.15777778, -83.19985278, *TAKEOFF]
-  - [40.15777778, -83.19580278, *TAKEOFF]
-  - [40.15920833, -83.19580278, *TAKEOFF]
-  - [40.15920833, -83.19985278, *TAKEOFF]
+  - [40.15920833, -83.19985278, *LAP_MSL]
+  - [40.15777778, -83.19985278, *LAP_MSL]
+  - [40.15777778, -83.19580278, *LAP_MSL]
+  - [40.15920833, -83.19580278, *LAP_MSL]
+  - [40.15920833, -83.19985278, *LAP_MSL]
 
 scan_sweep: long
 scan_start: bottom
