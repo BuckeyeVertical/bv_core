@@ -1634,7 +1634,7 @@ class MissionRunner(Node):
         # Cancel any existing localize timer to prevent orphaned timers
         if hasattr(self, '_localize_timer') and self._localize_timer is not None:
             self._localize_timer.cancel()
-        self._localize_timer = self.create_timer(1.0, localize_once)
+        self._localize_timer = self.create_timer(5.0, localize_once)
 
     # Main timer
     def main_timer_callback(self):

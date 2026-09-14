@@ -106,5 +106,5 @@ For an in-flight abort, command Loiter or RTL from the Herelink. Do not use
 
 Scp latest log
 ```bash
-scp "bvorinnano@192.168.144.2:$(ssh bvorinnano@192.168.144.2 'ls -t ~/bv_ws/src/bv_core/bv_core/logs/*.log | head -1')" .
+scp "bvorinnano@192.168.144.2:$(ssh bvorinnano@192.168.144.2 'ls -t ~/bv_ws/install/bv_core/lib/python3.10/site-packages/bv_core/logs/*.log | head -1')" .
 ```
