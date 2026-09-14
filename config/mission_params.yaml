@@ -4,7 +4,9 @@
 
 # (latitude, longitude, altitude).
 #
-# Altitude is relative to takeoff point (AGL - Above Ground Level)
+# Scan and takeoff altitudes are relative to the takeoff point (AGL).
+# Lap altitudes are AMSL: the official lap waypoints are issued that way
+# and mission_node pushes the lap route in MAV_FRAME_GLOBAL.
 
 # MISSION CONFIGURATION
 enable_mission_log: true
@@ -13,8 +15,12 @@ enable_mission_log: true
 num_objects: 2
 
 # Takeoff altitude used as anchor for all waypoints
-takeoff_alt: &TAKEOFF 15.24
-scan_altitude: *TAKEOFF
+takeoff_alt: &TAKEOFF 15.24   # AGL
+scan_altitude: *TAKEOFF       # AGL
+
+# The lap route is pushed AMSL. SITL runs with PX4_HOME_ALT=0 (see README),
+# so this matches takeoff_alt. Replace with the check-in number for real flight.
+lap_alt_msl: &LAP_MSL 15.24   # AMSL
 
 
 
@@ -22,10 +28,10 @@ scan_altitude: *TAKEOFF
 
 lap_count: 1
 points:
-  - [38.3876112, -76.4190542, *TAKEOFF]
+  - [38.3876112, -76.4190542, *LAP_MSL]
   # Add more lap waypoints as needed:
-  # - [38.3862744, -76.4182914, *TAKEOFF]
-  # - [38.3876112, -76.4190542, *TAKEOFF]
+  # - [38.3862744, -76.4182914, *LAP_MSL]
+  # - [38.3876112, -76.4190542, *LAP_MSL]
 
 
 

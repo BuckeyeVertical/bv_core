@@ -98,7 +98,8 @@ def confirmation_rejection_reason(message, scan_started_ns, handled_ids):
 
 # Mavlink constants
 MAV_CMD_NAV_WAYPOINT = 16
-MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
+MAV_FRAME_GLOBAL = 0                # Altitude is AMSL
+MAV_FRAME_GLOBAL_RELATIVE_ALT = 3   # Altitude is above the takeoff point
 
 
 # Mission runner class
@@ -557,7 +558,8 @@ class MissionRunner(Node):
         
         self.active_waypoint_list = self.build_waypoint_list(
             [self.takeoff_waypoint],
-            takeoff_tolerance
+            takeoff_tolerance,
+            frame=MAV_FRAME_GLOBAL,  # Takeoff flies to the first lap waypoint, which is AMSL
         )
         self.expected_final_waypoint_index = 0
         self.push_mission_to_autopilot()
@@ -584,7 +586,8 @@ class MissionRunner(Node):
         self.active_waypoint_list = self.build_waypoint_list(
             self.lap_waypoints,
             self.lap_tolerance,
-            pass_through_ratio=1.0  # Fly through without stopping
+            pass_through_ratio=1.0,  # Fly through without stopping
+            frame=MAV_FRAME_GLOBAL,  # Official lap altitudes are AMSL
         )
         self.expected_final_waypoint_index = len(self.active_waypoint_list) - 1
         self.push_mission_to_autopilot()
@@ -916,7 +919,8 @@ class MissionRunner(Node):
             self.set_flight_mode("AUTO.RTL")
 
     # Mavros utilities
-    def build_waypoint_list(self, points, tolerance, pass_through_ratio=0.0):
+    def build_waypoint_list(self, points, tolerance, pass_through_ratio=0.0,
+                            frame=MAV_FRAME_GLOBAL_RELATIVE_ALT):
         """
         Build a list of MAVROS Waypoint messages from coordinate tuples.
         
@@ -924,6 +928,9 @@ class MissionRunner(Node):
             points: List of (lat, lon, alt) tuples
             tolerance: Waypoint acceptance radius in meters
             pass_through_ratio: 0.0 = stop at waypoint, 1.0 = fly through
+            frame: MAVLink altitude frame for every point in this list.
+                Lap waypoints are AMSL because the official numbers are
+                issued that way; every other route is above takeoff.
             
         Returns:
             List of Waypoint messages
@@ -940,7 +947,7 @@ class MissionRunner(Node):
         
         for i, (lat, lon, alt) in enumerate(points):
             wp = Waypoint()
-            wp.frame = MAV_FRAME_GLOBAL_RELATIVE_ALT
+            wp.frame = frame
             wp.command = MAV_CMD_NAV_WAYPOINT
             wp.is_current = (i == 0)
             wp.autocontinue = True

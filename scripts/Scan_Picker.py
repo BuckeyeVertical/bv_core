@@ -115,7 +115,7 @@ def update_region_yaml(text, kind, boundary, *, sweep='long', start='top',
         corners[0], corners[3], corners[2], corners[1]
     ]
     route.append(route[0])
-    altitude = '*TAKEOFF'
+    altitude = '*LAP_MSL'
     match = next((POINT_WITH_ALT_PATTERN.match(line)
                   for line in text.splitlines()
                   if POINT_WITH_ALT_PATTERN.match(line)), None)
@@ -280,7 +280,7 @@ PAGE = """<!doctype html>
         const order = lapDirection === 'counterclockwise' ?
           ['nw', 'sw', 'se', 'ne', 'nw'] : ['nw', 'ne', 'se', 'sw', 'nw'];
         return `points:\n` + order.map(
-          corner => `  - [${corners[corner].slice(1, -1)}, *TAKEOFF]`
+          corner => `  - [${corners[corner].slice(1, -1)}, *LAP_MSL]`
         ).join('\\n');
       }
       return `scan_sweep: ${sweep}\n` +
