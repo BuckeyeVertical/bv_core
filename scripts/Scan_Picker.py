@@ -264,6 +264,7 @@ PAGE = """<!doctype html>
     let mode = 'scan';
     let planRequest = 0;
     let activeBounds = null;
+    let activeScanBoundary = null;
 
     function setStatus(message) { statusBox.textContent = message; }
 
@@ -286,8 +287,9 @@ PAGE = """<!doctype html>
       return `scan_sweep: ${sweep}\n` +
         `scan_start: ${routeStart}\n` +
         `scan_boundary:\n` +
-        `  - ${corners.nw}\n` + `  - ${corners.sw}\n` +
-        `  - ${corners.se}\n` + `  - ${corners.ne}`;
+        boundaryFor(bounds).map(
+          point => `  - [${point[0].toFixed(8)}, ${point[1].toFixed(8)}]`
+        ).join('\\n');
     }
 
     function regionSize(bounds) {
@@ -303,6 +305,7 @@ PAGE = """<!doctype html>
       if (rectangle) map.removeLayer(rectangle);
       rectangle = null;
       activeBounds = null;
+      activeScanBoundary = null;
       if (planLayer) map.removeLayer(planLayer);
       planLayer = null;
       cornerMarkers.forEach(marker => map.removeLayer(marker));
@@ -317,6 +320,9 @@ PAGE = """<!doctype html>
     }
 
     function boundaryFor(bounds) {
+      if (mode === 'scan' && activeScanBoundary) {
+        return activeScanBoundary.map(point => [...point]);
+      }
       return [bounds.getNorthWest(), bounds.getSouthWest(),
         bounds.getSouthEast(), bounds.getNorthEast()].map(
           point => [point.lat, point.lng]);
@@ -432,6 +438,7 @@ PAGE = """<!doctype html>
     }
 
     function updateFinishedRectangle() {
+      activeScanBoundary = null;
       const bounds = L.latLngBounds(
         cornerMarkers[0].getLatLng(), cornerMarkers[1].getLatLng());
       activeBounds = bounds;
@@ -475,6 +482,7 @@ PAGE = """<!doctype html>
       map.fitBounds(configuredLayer.getBounds(), {padding: [45, 45], maxZoom: 19});
       activeBounds = L.latLngBounds(configuredPoints);
       if (mode === 'scan') {
+        activeScanBoundary = configuredPoints.map(point => [...point]);
         sweep = configuredRegion.sweep;
         routeStart = configuredRegion.start;
       } else {

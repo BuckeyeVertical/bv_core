@@ -6,7 +6,7 @@ num_objects: 2
 
 takeoff_alt: 60.96            # AGL, relative to the takeoff point
 scan_altitude: 60.96          # AGL, relative to the takeoff point
-lap_count: 0
+lap_count: 2
 
 # mission_node pushes the lap route in MAV_FRAME_GLOBAL (AMSL). SITL runs
 # with PX4_HOME_ALT=0 (see README), so AMSL and AGL coincide here and this

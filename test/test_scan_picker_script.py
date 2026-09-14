@@ -97,3 +97,60 @@ def test_save_region_replaces_file_atomically(tmp_path):
     parsed = yaml.safe_load(config.read_text(encoding='utf-8'))
     assert parsed['scan_boundary'] == BOUNDARY
     assert list(tmp_path.glob('*.tmp')) == []
+
+
+def test_picker_preserves_rotated_boundary_for_preview_and_yaml():
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required for picker JavaScript regression')
+    module = load_script()
+    boundary = [
+        [36.216341, -96.010424], [36.216750, -96.007550],
+        [36.218054, -96.007835], [36.217645, -96.010709],
+    ]
+    functions = []
+    for name in ('yamlFor', 'boundaryFor', 'showConfiguredRegion'):
+        begin = module.PAGE.index(f'    function {name}(')
+        end = module.PAGE.index('\n    }', begin) + len('\n    }')
+        functions.append(module.PAGE[begin:end])
+    script = '''
+const assert = require('node:assert/strict');
+const configuredRegion = {boundary: BOUNDARY, sweep: 'long', start: 'bottom'};
+let mode = 'scan', activeScanBoundary = null, activeBounds = null;
+let configuredLayer = null, planLayer = null, sweep, routeStart;
+const yamlBox = {}, copyButton = {}, useRegionButton = {};
+const bounds = {
+  getNorth: () => 37, getSouth: () => 36,
+  getEast: () => -96, getWest: () => -97,
+  getNorthWest: () => ({lat: 37, lng: -97}),
+  getSouthWest: () => ({lat: 36, lng: -97}),
+  getSouthEast: () => ({lat: 36, lng: -96}),
+  getNorthEast: () => ({lat: 37, lng: -96})
+};
+const map = {fitBounds() {}, removeLayer() {}};
+const L = {
+  polygon: () => ({bindTooltip() {return this;}}),
+  featureGroup: () => ({addTo() {return this;}, getBounds: () => bounds}),
+  latLngBounds: () => bounds
+};
+function setStatus() {}
+function updateChoiceButtons() {}
+let preview;
+function refreshPreview(bounds) {preview = boundaryFor(bounds);}
+FUNCTIONS
+showConfiguredRegion();
+assert.deepEqual(preview, configuredRegion.boundary);
+assert.deepEqual(boundaryFor(activeBounds), configuredRegion.boundary);
+console.log(JSON.stringify(yamlBox.value));
+activeScanBoundary = null;
+assert.deepEqual(boundaryFor(bounds), [[37,-97],[36,-97],[36,-96],[37,-96]]);
+'''.replace('BOUNDARY', json.dumps(boundary)).replace('FUNCTIONS', '\n'.join(functions))
+    result = subprocess.run(
+        [node, '-e', script], check=True, capture_output=True, text=True)
+    assert yaml.safe_load(json.loads(result.stdout))['scan_boundary'] == boundary

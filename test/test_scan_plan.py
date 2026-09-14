@@ -115,3 +115,15 @@ def test_boundary_and_explicit_points_are_rejected_together():
 
     with pytest.raises(ValueError, match='scan_boundary or scan_points'):
         build_scan_plan(config, VISION, BEVY_CAMERA)
+
+
+@pytest.mark.parametrize('sweep,edge', [('long', (0, 1)), ('short', (1, 2))])
+def test_rotated_boundary_rows_follow_selected_edge(sweep, edge):
+    config = mission()
+    config['scan_sweep'] = sweep
+    plan = build_scan_plan(config, VISION, BEVY_CAMERA)
+    a, b = (BOUNDARY[index] for index in edge)
+    edge_lat, edge_lon = b[0] - a[0], b[1] - a[1]
+    for first, last in zip(plan.waypoints[::2], plan.waypoints[1::2]):
+        row_lat, row_lon = last[0] - first[0], last[1] - first[1]
+        assert row_lat * edge_lon - row_lon * edge_lat == pytest.approx(0, abs=1e-12)
