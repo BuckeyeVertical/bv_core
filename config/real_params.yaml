@@ -4,19 +4,19 @@
 enable_mission_log: true
 num_objects: 2
 
-takeoff_alt: 45.72            # AGL, relative to the takeoff point
-scan_altitude: 45.72          # AGL, relative to the takeoff point
+takeoff_alt: 23.0         # AGL, relative to the takeoff point
+scan_altitude: 48.768          # AGL, relative to the takeoff point
 lap_count: 2
 
 # Official lap waypoints are issued AMSL, so mission_node pushes the lap
 # route in MAV_FRAME_GLOBAL. REPLACE THIS WITH THE CHECK-IN NUMBER before
 # flying: 0.0 commands sea level, which is ~280 m below this field.
-lap_alt_msl: &LAP_MSL 220     # AMSL
+lap_alt_msl: &LAP_MSL 220.0     # AMSL
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
   - [36.00084148, -95.84860235, *LAP_MSL]
-  - [36.00084148, -95.84685624, 245]
+  - [36.00084148, -95.84685624, 245.0]
   - [35.99987586, -95.84685624, *LAP_MSL]
   - [35.99987586, -95.84860235, *LAP_MSL]
   - [36.00084148, -95.84860235, *LAP_MSL]
@@ -82,7 +82,7 @@ payload:
   brake_phases:
     bottle:
       - {duration_s: 0.0,  toggle_ms: 200}
-      - {duration_s: 3.0, toggle_ms: 150}
+      - {duration_s: 9.0, toggle_ms: 150}
       - {duration_s: 10.0,  toggle_ms: 100}
     beacon:
       - {duration_s: 5.0,  toggle_ms: 200}
