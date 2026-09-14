@@ -1,39 +1,5 @@
 # Payload Drop
 
-Two servos: the **plate** holds both payloads up, and the **clamp** brakes the
-line. Values are in the `payload:` block of `config/real_params.yaml`. The
-mission only drops when `payload.enabled: true`.
-
-## Flight controller (QGC)
-
-| Parameter | Plate | Clamp |
-|---|---|---|
-| `PWM_MAIN_FUNC` | 302 | 301 |
-| `PWM_MAIN_MIN` / `MAX` | 800 / 2200 | 800 / 2200 |
-| `PWM_MAIN_DIS` | 1685 | 1900 |
-| `PWM_MAIN_TIM` | 50 | 50 |
-
-`COM_PREARM_MODE = 2` lets the servos move while disarmed.
-
-## Update the Jetson
-
-From the laptop, fix the Jetson clock (a wrong clock makes the build silently
-keep old code), then sync:
-
-```bash
-cd ~/Code/bv_ws/src/bv_core
-./scripts/sync_jetson_clock.sh
-./scripts/sync_jetson.sh jetson-usbc
-```
-
-On the Jetson, rebuild:
-
-```bash
-cd ~/bv_ws
-colcon build --packages-select bv_core
-source install/setup.bash
-```
-
 ## Bench test
 
 Remove the propellers.
@@ -49,13 +15,7 @@ ros2 launch mavros px4.launch \
   fcu_url:=serial:///dev/ttyTHS1:921600
 ```
 
-Terminal 2 — watch the outputs (channel 1 = clamp, channel 2 = plate):
-
-```bash
-ros2 topic echo /mavros/rc/out --field channels
-```
-
-Terminal 3 — commands:
+Terminal 2 — commands:
 
 ```bash
 ros2 run bv_core test_servo show            # configured values
