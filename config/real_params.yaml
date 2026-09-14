@@ -15,11 +15,11 @@ lap_alt_msl: &LAP_MSL 220.0     # AMSL
 
 # One counter-clockwise lap; mission_node closes and repeats it.
 points:
-  - [36.00084148, -95.84860235, *LAP_MSL]
-  - [36.00084148, -95.84685624, 245.0]
-  - [35.99987586, -95.84685624, *LAP_MSL]
-  - [35.99987586, -95.84860235, *LAP_MSL]
-  - [36.00084148, -95.84860235, *LAP_MSL]
+  - [36.00038797, -95.84753484, *LAP_MSL]
+  - [36.00038797, -95.84725589, *LAP_MSL]
+  - [36.00025560, -95.84725589, *LAP_MSL]
+  - [36.00025560, -95.84753484, *LAP_MSL]
+  - [36.00038797, -95.84753484, *LAP_MSL]
 
 scan_sweep: long
 scan_start: top
@@ -29,12 +29,12 @@ scan_boundary:
   - [35.99963933, -95.84678650]
   - [36.00088054, -95.84678650]
 
-Lap_velocity: 12.0
-Scan_transit_velocity: 8.0
-Takeoff_velocity: 8.0
+Lap_velocity: 5.0
+Scan_transit_velocity: 5.0
+Takeoff_velocity: 5.0
 Scan_velocity: 3.0
 Deliver_velocity: 3.0
-RTL_velocity: 8.0
+RTL_velocity: 5.0
 
 Lap_tolerance: 40.0
 Scan_tolerance: 1.0
