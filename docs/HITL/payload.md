@@ -7,7 +7,7 @@ Remove the propellers.
 Terminal 1 — MAVROS:
 
 ```bash
-ssh jetson-usbc
+ssh bvorinnano@192.168.55.1
 source ~/bv_ws/.venv/bin/activate
 source ~/bv_ws/install/setup.bash
 
