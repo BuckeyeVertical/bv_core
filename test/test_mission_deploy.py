@@ -156,6 +156,12 @@ class TestDeploy(DeployTestCase):
         self.assertEqual(sent(node)[-1], (1685, 1900))
         self.assertIsNone(node._drop_sequence)
         node.destroy_timer.assert_called()
+        # The mission log gets one summary line per drop for debugging.
+        done = [c.args for c in node.log.event.call_args_list
+                if c.args[0] == 'DEPLOY_DONE']
+        self.assertEqual(len(done), 1)
+        self.assertIn('confirmed', done[0][1])
+        self.assertIn('skipped 0', done[0][1])
 
     def test_disabled_payload_skips_straight_to_complete(self):
         node = self.mission(payload=None)

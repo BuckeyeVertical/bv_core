@@ -40,4 +40,6 @@ ros2 run bv_core test_servo drop bottle 100:3
 A drop takes 1 s of braking with the plate holding, then the plate releases
 and the clamp brakes through that payload's own `brake_phases`, then both
 servos go back to rest.
-The last line should read `Drop complete: N/N commands confirmed by PX4`.
+Every step is logged (`t=` is seconds into the drop). The last line should
+read `Drop complete ... sent N, confirmed N, skipped 0`. Skipped pulses or slow
+replies there point at the command path; a clean line points at the servo.

@@ -43,26 +43,48 @@ class PayloadWriter:
 
     Nothing here blocks. Call set() whenever the wanted positions change and
     flush() periodically, which is what retries a failed command.
+
+    For debugging it keeps stats (see summary()) and, with log_commands, logs
+    every command sent and every reply.
     """
 
-    def __init__(self, config, client, logger, clock=None):
+    def __init__(self, config, client, logger, clock=None, log_commands=False):
         """Args:
             config: PayloadConfig (servo actuator sets and PWM ranges).
             client: rclpy client for mavros_msgs/srv/CommandLong.
             logger: rclpy logger.
             clock: monotonic seconds; defaults to time.monotonic.
+            log_commands: log one line per command sent and per reply.
         """
         self.config = config
         self.client = client
         self.logger = logger
         self.clock = clock or time.monotonic
+        self.log_commands = log_commands
         self.desired = None     # (plate_us, clamp_us) we want
         self.confirmed = None   # last (plate_us, clamp_us) PX4 confirmed
         self.pending = False    # a command awaits its reply
         self.retry_at = 0.0
         self.failures = 0       # consecutive unconfirmed commands
-        self.sent = 0
-        self.accepted = 0
+        self._in_flight = None  # positions of the pending command
+        self._wanted_at = 0.0   # when self.desired was set
+        self._sent_at = 0.0     # when the pending command went out
+        self.reset_stats()
+
+    def reset_stats(self):
+        """Start counting afresh, e.g. at the start of each drop."""
+        self.sent = 0           # commands sent
+        self.accepted = 0       # commands PX4 confirmed
+        self.skipped = 0        # wanted positions replaced before being sent
+        self.max_reply_s = 0.0  # slowest PX4 reply
+        self.max_late_s = 0.0   # longest wait between wanting and sending
+
+    def summary(self):
+        """One line of stats since the last reset_stats()."""
+        return (f"sent {self.sent}, confirmed {self.accepted}, "
+                f"skipped {self.skipped}, slowest reply "
+                f"{self.max_reply_s * 1000:.0f} ms, latest send "
+                f"{self.max_late_s * 1000:.0f} ms after wanted")
 
     @property
     def settled(self):
@@ -71,7 +93,14 @@ class PayloadWriter:
 
     def set(self, plate_us, clamp_us):
         """Want these pulses (us) on the plate and clamp."""
-        self.desired = (plate_us, clamp_us)
+        wanted = (plate_us, clamp_us)
+        if wanted != self.desired:
+            # The previous wanted positions never went out: they waited for
+            # a reply and are now stale. Each one is a skipped pulse.
+            if self.desired not in (None, self._in_flight, self.confirmed):
+                self.skipped += 1
+            self.desired = wanted
+            self._wanted_at = self.clock()
         self.flush()
 
     def flush(self):
@@ -80,8 +109,17 @@ class PayloadWriter:
         if (desired is None or self.pending or desired == self.confirmed
                 or self.clock() < self.retry_at):
             return
+        now = self.clock()
         self.pending = True
+        self._in_flight = desired
+        self._sent_at = now
         self.sent += 1
+        late_s = now - self._wanted_at
+        self.max_late_s = max(self.max_late_s, late_s)
+        if self.log_commands:
+            self.logger.info(
+                f"send #{self.sent}: plate={desired[0]:g} clamp={desired[1]:g} "
+                f"({late_s * 1000:.0f} ms after wanted)")
         future = self.client.call_async(
             actuator_request(self.config, *desired))
         future.add_done_callback(
@@ -90,12 +128,19 @@ class PayloadWriter:
     def _on_reply(self, future, sent):
         """Record PX4's verdict on one command. Never raises."""
         self.pending = False
+        self._in_flight = None
+        reply_s = self.clock() - self._sent_at
+        self.max_reply_s = max(self.max_reply_s, reply_s)
         try:
             response = future.result()
             ok = bool(response.success)
             detail = f"result={response.result}"
         except Exception as exc:  # noqa: BLE001 - a callback must not raise
             ok, detail = False, repr(exc)
+        if self.log_commands:
+            self.logger.info(
+                f"{'confirmed' if ok else 'NOT confirmed'} #{self.sent} after "
+                f"{reply_s * 1000:.0f} ms" + ('' if ok else f" ({detail})"))
         if ok:
             self.confirmed = sent
             self.failures = 0

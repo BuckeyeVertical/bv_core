@@ -133,43 +133,63 @@ class ServoBench(Node):
         return False
 
     def drop(self, payload):
-        """Run a drop through mission_node's own code.
+        """Run a drop through mission_node's own code, logging every step.
 
         The same DropSequence decides the pulses and the same PayloadWriter
         sends them; only the loop driving it differs (mission_node uses a
         20 ms ROS timer). First the rest positions, confirmed: the first
         service call from a freshly started program can take ~1 s, which
         would otherwise eat the pre-brake.
+
+        Logged for debugging: every change of wanted position (t = seconds
+        into the drop), every command sent (and how long after it was
+        wanted), every PX4 reply (and how long it took), a summary, and how
+        long each loop pass took at worst.
         """
         config = self.config
         sequence = DropSequence(config, payload)
-        writer = PayloadWriter(config, self.client, self.get_logger())
+        log = self.get_logger()
+        writer = PayloadWriter(config, self.client, log, log_commands=True)
 
-        self.get_logger().info('Starting from rest (plate hold, clamp open)')
+        phases = ', '.join(f'{p.toggle_ms:g} ms x {p.duration_s:g} s'
+                           for p in sequence.phases)
+        log.info(
+            f"{payload}: plate {config.plate_hold_us:g} -> "
+            f"{sequence.plate_us:g} us, clamp {config.unclamped_us:g} <-> "
+            f"{sequence.clamped_us:g} us; pre-brake {config.pre_drop_s:g} s, "
+            f"then {phases}")
+        log.info('Starting from rest (plate hold, clamp open)')
         writer.set(config.plate_hold_us, config.unclamped_us)
         if not self._spin_until(lambda: writer.settled, timeout_s=6.0):
-            self.get_logger().warn(
-                'PX4 did not confirm the rest positions; dropping anyway')
+            log.warn('PX4 did not confirm the rest positions; dropping anyway')
 
-        self.get_logger().info(
-            f"Dropping {payload}: clamp braking for {config.pre_drop_s:g}s, "
-            f"then the plate moves; {sequence.total_s:.2f}s total")
+        log.info(f"Dropping {payload}: {sequence.total_s:.2f}s total")
+        writer.reset_stats()
         start = time.monotonic()
-        sent_before, accepted_before = writer.sent, writer.accepted
+        wanted = None
+        slowest_pass_s = 0.0
         while True:
-            plate, clamp, done = sequence.positions_at(time.monotonic() - start)
+            pass_start = time.monotonic()
+            elapsed = pass_start - start
+            plate, clamp, done = sequence.positions_at(elapsed)
+            if (plate, clamp) != wanted:
+                wanted = (plate, clamp)
+                log.info(f"t={elapsed:6.3f}s want plate={plate:g} "
+                         f"clamp={clamp:g}")
             writer.set(plate, clamp)
             writer.flush()
             if done and writer.settled:
                 break
-            if time.monotonic() - start > sequence.total_s + 10.0:
-                self.get_logger().error('Gave up waiting for PX4 to confirm')
+            if elapsed > sequence.total_s + 10.0:
+                log.error('Gave up waiting for PX4 to confirm')
                 break
             rclpy.spin_once(self, timeout_sec=DROP_TICK_SEC)
+            slowest_pass_s = max(slowest_pass_s, time.monotonic() - pass_start)
 
-        self.get_logger().info(
-            f'Drop complete: {writer.accepted - accepted_before}/'
-            f'{writer.sent - sent_before} commands confirmed by PX4')
+        log.info(
+            f"Drop complete in {time.monotonic() - start:.2f}s: "
+            f"{writer.summary()}; slowest loop pass "
+            f"{slowest_pass_s * 1000:.0f} ms")
 
     def _spin_until(self, condition, timeout_s):
         deadline = time.monotonic() + timeout_s

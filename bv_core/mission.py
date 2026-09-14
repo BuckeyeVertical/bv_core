@@ -825,6 +825,7 @@ class MissionRunner(Node):
 
         self._drop_sequence = DropSequence(self.payload, payload)
         self._drop_started = time.monotonic()
+        self.payload_writer.reset_stats()
         self.get_logger().info(
             f"[DEPLOY] dropping {payload}: clamp pulsing "
             f"{self._drop_sequence.clamped_us:g}/{self.payload.unclamped_us:g} us, "
@@ -867,8 +868,9 @@ class MissionRunner(Node):
 
         if done:
             self._stop_drop()
-            self.get_logger().info("[DEPLOY] drop sequence complete")
-            self.log.event('DEPLOY_DONE', f"payload={sequence.payload}")
+            stats = self.payload_writer.summary()
+            self.get_logger().info(f"[DEPLOY] drop sequence complete: {stats}")
+            self.log.event('DEPLOY_DONE', f"payload={sequence.payload}, {stats}")
             self.on_deploy_complete()
 
     def _stop_drop(self):

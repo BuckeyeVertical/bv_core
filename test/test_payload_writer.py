@@ -101,3 +101,63 @@ def test_nothing_is_sent_before_anything_is_wanted():
     w, client = writer()
     w.flush()
     assert sent(client) == [] and w.settled
+
+
+def test_stats_record_reply_time_and_how_late_each_send_was():
+    clock = Clock()
+    w, client = writer(clock)
+    client.auto_reply = None
+    w.set(2050, 1577)                         # wanted and sent at t=0
+    clock.now += 0.012
+    client.futures[0].finish(success=True)    # PX4 replies after 12 ms
+    assert abs(w.max_reply_s - 0.012) < 1e-9
+    assert abs(w.max_late_s) < 1e-9           # sent the moment it was wanted
+
+
+def test_stats_count_positions_skipped_while_waiting_for_px4():
+    clock = Clock()
+    w, client = writer(clock)
+    client.auto_reply = None
+    w.set(2050, 1577)                         # in flight
+    clock.now += 0.2
+    w.set(2050, 1900)                         # waits for the reply...
+    clock.now += 0.2
+    w.set(1685, 1900)                         # ...replaced before it went out
+    assert w.skipped == 1
+    clock.now += 0.05
+    client.futures[0].finish(success=True)    # now sends the latest
+    assert sent(client) == [(2050, 1577), (1685, 1900)]
+    # The latest was wanted 0.05 s before the reply let it go out.
+    assert abs(w.max_late_s - 0.05) < 1e-9
+
+
+def test_nothing_resent_when_px4_already_holds_the_latest():
+    w, client = writer()
+    client.auto_reply = None
+    w.set(2050, 1577)                         # in flight
+    w.set(2050, 1900)                         # skipped...
+    w.set(2050, 1577)                         # ...and back where PX4 is going
+    client.futures[0].finish(success=True)
+    assert sent(client) == [(2050, 1577)] and w.settled
+    assert w.skipped == 1
+
+
+def test_command_log_lines_when_asked():
+    clock = Clock()
+    client = FakeCommandClient()
+    logger = Mock()
+    w = PayloadWriter(config(), client, logger, clock=clock, log_commands=True)
+    w.set(2050, 1577)
+    lines = [call.args[0] for call in logger.info.call_args_list]
+    assert any('send #1' in line and '2050' in line and '1577' in line
+               for line in lines)
+    assert any('confirmed #1' in line for line in lines)
+
+
+def test_reset_stats_starts_a_new_count():
+    w, client = writer()
+    w.set(1685, 1900)
+    w.reset_stats()
+    assert (w.sent, w.accepted, w.skipped, w.max_reply_s, w.max_late_s) == (
+        0, 0, 0, 0.0, 0.0)
+    assert 'sent 0' in w.summary()
