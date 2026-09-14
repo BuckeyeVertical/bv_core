@@ -4,14 +4,16 @@ set -euo pipefail
 
 if [[ ${1:-} == --help || $# -gt 2 ]]; then
   echo "Usage: $0 [ssh-host] [remote-repo]"
-  echo "Defaults: jetson-usbc, ~/bv_ws/src/bv_core on the Jetson"
+  echo "Defaults: whichever of bvorinnano@192.168.55.1 (USB-C) or"
+  echo "bvorinnano@192.168.144.2 (Herelink) answers; ~/bv_ws/src/bv_core on the Jetson"
   echo "Transfers committed HEAD only; leaves local uncommitted edits alone."
   exit 0
 fi
 
-jetson_host=${1:-jetson-usbc}
-remote_repo=${2:-bv_ws/src/bv_core}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/jetson_host.sh"
+jetson_host=$(find_jetson "${1:-}")
+remote_repo=${2:-bv_ws/src/bv_core}
 repo_dir=$(git -C "$script_dir" rev-parse --show-toplevel)
 branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD) || {
   echo "Cannot sync a detached HEAD; check out a branch first." >&2

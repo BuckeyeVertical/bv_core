@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Sync a USB-C-connected Jetson to this laptop's clock.
+# Sync the Jetson (USB-C or Herelink) to this laptop's clock.
+# Usage: sync_jetson_clock.sh [ssh-host]
 
 set -euo pipefail
 
-jetson_host="${1:-jetson-usbc}"
+source "$(dirname -- "${BASH_SOURCE[0]}")/jetson_host.sh"
+jetson_host="$(find_jetson "${1:-}")"
 laptop_utc="$(date -u '+%Y-%m-%d %H:%M:%S')"
 
 echo "Laptop UTC: ${laptop_utc}"
