@@ -16,17 +16,31 @@ class TestParseArgs:
     def test_rest_and_drop(self):
         assert parse_args(['show']) == ('show',)
         assert parse_args(['rest']) == ('rest',)
-        assert parse_args(['drop', 'bottle']) == ('drop', 'bottle', None)
-        assert parse_args(['drop', 'beacon']) == ('drop', 'beacon', None)
+        assert parse_args(['drop', 'bottle']) == ('drop', 'bottle', None, None)
+        assert parse_args(['drop', 'beacon']) == ('drop', 'beacon', None, None)
 
     def test_drop_with_phases_from_the_command_line(self):
         action = parse_args(['drop', 'bottle', '150:3'])
-        assert action[:2] == ('drop', 'bottle')
+        assert action[:2] == ('drop', 'bottle') and action[3] is None
         assert [(p.toggle_ms, p.duration_s) for p in action[2]] == [(150, 3.0)]
 
-    def test_bad_phase_prints_usage(self):
+    def test_drop_with_clamped_pulse_from_the_command_line(self):
+        assert parse_args(['drop', 'beacon', '2050']) == (
+            'drop', 'beacon', None, 2050.0)
+        action = parse_args(['drop', 'beacon', '2050', '200:10', '100:2'])
+        assert action[:2] == ('drop', 'beacon') and action[3] == 2050.0
+        assert [(p.toggle_ms, p.duration_s) for p in action[2]] == [
+            (200, 10.0), (100, 2.0)]
+
+    @pytest.mark.parametrize('argv', [
+        ['drop', 'bottle', 'abc'],             # not a pulse or a phase
+        ['drop', 'bottle', '2050', '1900'],    # second pulse
+        ['drop', 'bottle', '150:3', '2050'],   # pulse after the phases
+        ['drop', 'bottle', '150:x'],
+    ])
+    def test_bad_drop_arguments_print_usage(self, argv):
         with pytest.raises(SystemExit, match='usage'):
-            parse_args(['drop', 'bottle', '150'])
+            parse_args(argv)
 
     @pytest.mark.parametrize('argv', [
         [], ['plate'], ['plate', 'abc'], ['slider', '1500'],

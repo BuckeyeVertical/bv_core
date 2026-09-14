@@ -35,7 +35,14 @@ ros2 run bv_core test_servo drop beacon
 ros2 run bv_core test_servo drop bottle 200:3   # one rhythm: toggle_ms:seconds
 ros2 run bv_core test_servo drop bottle 150:3
 ros2 run bv_core test_servo drop bottle 100:3
+
+ros2 run bv_core test_servo drop beacon 2050         # clamped pulse, this drop only
+ros2 run bv_core test_servo drop beacon 2050 200:10  # clamped pulse and rhythm
 ```
+
+Overrides on the command line apply to that one drop; the YAML is not
+touched. Put the value you settle on into `config/real_params.yaml` and
+rebuild `bv_core`.
 
 A drop takes 1 s of braking with the plate holding, then the plate releases
 and the clamp brakes through that payload's own `brake_phases`, then both

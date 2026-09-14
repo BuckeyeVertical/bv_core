@@ -7,9 +7,11 @@
     ros2 run bv_core test_servo rest            # plate hold + clamp open
     ros2 run bv_core test_servo drop bottle     # full drop sequence (or beacon)
     ros2 run bv_core test_servo drop bottle 150:3   # ...braking at 150 ms for 3 s
+    ros2 run bv_core test_servo drop beacon 2050 200:10  # ...clamped at 2050 us
 
-Brake phases given after the payload (toggle_ms:duration_s, one or more)
-replace the configured ones for that drop only; the YAML is not touched.
+After the payload, a plain number replaces that payload's clamped pulse and
+toggle_ms:duration_s arguments (one or more) replace its brake phases, for
+that drop only; the YAML is not touched.
 
 Reads the payload block from the mission config selected by BV_MISSION_CONFIG
 (default real_params.yaml), ignoring payload.enabled and the startup range
@@ -45,21 +47,26 @@ DROP_TICK_SEC = 0.005
 
 
 def parse_args(argv):
-    """('servo', name, us) | ('show',) | ('rest',) | ('drop', payload, phases).
+    """('servo', name, us) | ('show',) | ('rest',)
+    | ('drop', payload, phases, clamped_us).
 
     phases is None for the configured brake phases, else a tuple of
-    BrakePhase from 'toggle_ms:duration_s' arguments. Raises SystemExit with
-    the usage text on anything else.
+    BrakePhase from 'toggle_ms:duration_s' arguments. clamped_us is None for
+    the configured clamped pulse, else the plain number given right after the
+    payload. Raises SystemExit with the usage text on anything else.
     """
     if argv in (['show'], ['rest']):
         return (argv[0],)
     if len(argv) >= 2 and argv[0] == 'drop' and argv[1] in PAYLOADS:
-        if len(argv) == 2:
-            return ('drop', argv[1], None)
+        rest = argv[2:]
+        clamped_us = None
         try:
-            return ('drop', argv[1], parse_brake_phases(argv[2:]))
+            if rest and ':' not in rest[0]:
+                clamped_us = float(rest.pop(0))
+            phases = parse_brake_phases(rest) if rest else None
         except ValueError as exc:
             raise SystemExit(f"{exc}\nusage:\n{USAGE}") from None
+        return ('drop', argv[1], phases, clamped_us)
     if len(argv) == 2 and argv[0] in ('plate', 'clamp'):
         try:
             return ('servo', argv[0], float(argv[1]))
@@ -216,6 +223,14 @@ def main(args=None):
             f"{path}: {exc}\nThis config has no servo values; pick one that "
             f"does, e.g. BV_MISSION_CONFIG=real_params.yaml") from None
 
+    if action[0] == 'drop' and action[3] is not None:
+        # Refused rather than clamped by PX4: a typo like "drop bottle 150"
+        # (meant as 150:3) must not run a whole drop at the range limit.
+        reason = unreachable_reason(config.clamp, action[3])
+        if reason:
+            rclpy.shutdown()
+            raise SystemExit(f"clamp: {reason}")
+
     if action[0] == 'show':
         # Pure config readout; needs no MAVROS.
         print(f"config: {mission_config_path()}")
@@ -228,15 +243,24 @@ def main(args=None):
         if action[0] == 'rest':
             node.send(config.plate_hold_us, config.unclamped_us)
         elif action[0] == 'drop':
-            if action[2] is not None:
+            _, payload, phases, clamped_us = action
+            if clamped_us is not None:
+                clamp = node.config.clamp
+                node.config = dataclasses.replace(node.config, clamp=(
+                    dataclasses.replace(clamp, positions_us={
+                        **clamp.positions_us,
+                        f'{payload}_clamped': clamped_us})))
+                node.get_logger().info(
+                    f'Clamped pulse from the command line: {clamped_us:g} us')
+            if phases is not None:
                 node.config = dataclasses.replace(
-                    config, brake_phases={**config.brake_phases,
-                                          action[1]: action[2]})
+                    node.config, brake_phases={**config.brake_phases,
+                                               payload: phases})
                 node.get_logger().info(
                     'Brake phases from the command line: ' + ', '.join(
                         f'{p.toggle_ms:g} ms for {p.duration_s:g} s'
-                        for p in action[2]))
-            node.drop(action[1])
+                        for p in phases))
+            node.drop(payload)
         elif action[1] == 'plate':
             node.send(plate_us=action[2])
         else:
