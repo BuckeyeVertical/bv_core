@@ -559,7 +559,7 @@ class MissionRunner(Node):
         self.active_waypoint_list = self.build_waypoint_list(
             [self.takeoff_waypoint],
             takeoff_tolerance,
-            frame=MAV_FRAME_GLOBAL if self.lap_waypoints else MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            frame=MAV_FRAME_GLOBAL,  # Takeoff flies to the first lap waypoint, which is AMSL
         )
         self.expected_final_waypoint_index = 0
         self.push_mission_to_autopilot()
