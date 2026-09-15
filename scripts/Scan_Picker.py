@@ -26,7 +26,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import yaml
 
-from bv_core.scan_plan import build_scan_plan
+from bv_core.scan_plan import build_scan_plan, terrain_reference
+from bv_core.terrain import DEM_FILENAME, load_terrain_model
 
 
 FLOAT_PATTERN = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
@@ -179,6 +180,7 @@ PAGE = """<!doctype html>
     .controls { margin: 15px 0 8px; padding: 12px; border: 1px solid #d2d7e2; border-radius: 8px; background: white; }
     .controls label { display: block; margin-bottom: 7px; font-size: 13px; font-weight: 700; }
     #plan-summary { min-height: 24px; margin: 8px 0; font-weight: 700; color: #24533c; }
+    #plan-summary.warn { color: #9c2a1c; }
     .direction-arrow { color: #123caa; font-size: 20px; font-weight: 900; line-height: 20px; text-shadow: 0 0 3px white, 0 0 3px white; }
     .waypoint-number { width: 25px; height: 25px; border-radius: 50%; background: #7b2fc4; color: white; border: 2px solid white; text-align: center; font: 700 13px/21px system-ui, sans-serif; box-shadow: 0 1px 4px #0008; }
     .hint { margin-top: 14px; color: #596174; font-size: 13px; }
@@ -363,6 +365,32 @@ PAGE = """<!doctype html>
       });
     }
 
+    function altitudeSummary(plan) {
+      const agl = plan.altitude_m.toFixed(1);
+      if (plan.terrain_status === 'ok') {
+        const altitudes = plan.waypoints.map(point => point[2]);
+        const low = Math.min(...altitudes);
+        const high = Math.max(...altitudes);
+        const ground = (low - plan.altitude_m).toFixed(0);
+        const groundHigh = (high - plan.altitude_m).toFixed(0);
+        return `${agl} m AGL · ground ${ground}–${groundHigh} m · ` +
+          `AMSL ${low.toFixed(0)}–${high.toFixed(0)} m`;
+      }
+      if (plan.terrain_status === 'uncovered') {
+        return `⚠ region reaches past dem.tif — the scan would fall ` +
+          `back to a flat ${agl} m above takeoff`;
+      }
+      if (plan.terrain_status === 'no_dem') {
+        return `${agl} m above takeoff (no dem.tif)`;
+      }
+      return `${agl} m above takeoff (terrain_follow off)`;
+    }
+
+    function altitudeLabel(plan, point) {
+      return plan.terrain_status === 'ok' ?
+        ` · ${point[2].toFixed(0)} m AMSL` : '';
+    }
+
     function drawPlan(plan) {
       if (planLayer) map.removeLayer(planLayer);
       const layers = [];
@@ -379,18 +407,25 @@ PAGE = """<!doctype html>
           layers.push(L.circleMarker(points[index], {
             radius: 6, color: '#fff', weight: 2,
             fillColor: color, fillOpacity: 1
-          }).bindTooltip(`Row ${index / 2 + 1} start`));
+          }).bindTooltip(
+            `Row ${index / 2 + 1} start` +
+            altitudeLabel(plan, plan.waypoints[index])));
         }
       }
       if (points.length) {
         layers.push(L.circleMarker(points[points.length - 1], {
           radius: 6, color: '#fff', weight: 2,
           fillColor: '#172033', fillOpacity: 1
-        }).bindTooltip('Scan finish'));
+        }).bindTooltip(
+          'Scan finish' +
+          altitudeLabel(plan, plan.waypoints[plan.waypoints.length - 1])));
       }
       planLayer = L.featureGroup(layers).addTo(map);
-      planSummary.textContent = `${plan.row_count} row${plan.row_count === 1 ? '' : 's'} · ` +
-        `${plan.row_spacing_m.toFixed(1)} m apart · ${plan.waypoints.length} waypoints`;
+      planSummary.classList.toggle('warn', plan.terrain_status === 'uncovered');
+      planSummary.textContent =
+        `${plan.row_count} row${plan.row_count === 1 ? '' : 's'} · ` +
+        `${plan.row_spacing_m.toFixed(1)} m apart · ` +
+        `${plan.waypoints.length} waypoints · ${altitudeSummary(plan)}`;
     }
 
     function lapRouteFor(bounds) {
@@ -784,6 +819,7 @@ class MapHandler(BaseHTTPRequestHandler):
     vision = {}
     camera = {}
     config_path = None
+    terrain = None
     write_token = ''
     write_lock = threading.Lock()
 
@@ -826,15 +862,34 @@ class MapHandler(BaseHTTPRequestHandler):
             mission['scan_sweep'] = request['sweep']
             mission['scan_start'] = request['start']
             plan = build_scan_plan(mission, self.vision, self.camera)
+            # The same conversion load_scan_plan() applies for the mission, so
+            # the preview shows the altitudes the aircraft will actually be
+            # commanded rather than the planner's flat AGL.
+            plan = terrain_reference(plan, mission, terrain=self.terrain)
             result = {
                 'waypoints': plan.waypoints,
                 'row_count': plan.row_count,
                 'row_spacing_m': plan.row_spacing_m,
                 'capture_spacing_m': plan.capture_spacing_m,
+                'altitude_m': plan.altitude_m,
+                'terrain_referenced': plan.terrain_referenced,
+                'terrain_status': self._terrain_status(mission, plan),
             }
             self._send_json(200, result)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self._send_json(400, {'error': str(error)})
+
+    def _terrain_status(self, mission, plan):
+        """Explain why the preview is or is not showing AMSL altitudes."""
+        if plan.terrain_referenced:
+            return 'ok'
+        if not bool(mission.get('terrain_follow', True)):
+            return 'off'
+        if self.terrain is None:
+            return 'no_dem'
+        # A DEM is loaded but could not cover every waypoint, which is what
+        # would silently drop the real mission back to flat altitudes.
+        return 'uncovered'
 
     def _use_region(self):
         """Persist a browser-selected scan or lap region to the active config."""
@@ -983,6 +1038,14 @@ def main():
     MapHandler.vision = vision
     MapHandler.camera = camera
     MapHandler.config_path = config_path
+    # dem.tif lives beside the mission YAML, the same relationship the
+    # installed share/config directory has at runtime.
+    dem = config_path.parent / DEM_FILENAME
+    MapHandler.terrain = load_terrain_model(path=dem) if dem.is_file() else None
+    if MapHandler.terrain is not None:
+        print(f'Terrain model: {dem}')
+    elif mission.get('terrain_follow', True):
+        print(f'No terrain model at {dem}; previews show flat altitudes.')
     MapHandler.write_token = write_token
     try:
         server = ThreadingHTTPServer(('127.0.0.1', args.port), MapHandler)
