@@ -6,7 +6,7 @@ scan_altitude: 48.768
 lap_count: 2
 
 lap_alt_msl: &LAP_MSL 274.32
-
+#304.8
 points:
   - [36.2187499, -96.0027362, *LAP_MSL]
   - [36.2114374, -96.0027516, *LAP_MSL]
@@ -37,10 +37,10 @@ scan_boundary:
 
 Lap_velocity: 20.0
 Scan_transit_velocity: 20.0
-Takeoff_velocity: 8.0
+Takeoff_velocity: 20.0
 Scan_velocity: 3.0
 Deliver_velocity: 3.0
-RTL_velocity: 8.0
+RTL_velocity: 20.0
 
 Lap_tolerance: 40.0
 Scan_tolerance: 1.0
@@ -59,21 +59,21 @@ payload:
   clamp:
     actuator_set: 1
     pwm_range_us: [800, 2200]
-    unclamped_us: 1850
-    bottle_clamped_us: 1700
-    beacon_clamped_us: 1975
+    unclamped_us: 1900
+    bottle_clamped_us: 2020
+    beacon_clamped_us: 2020
 
   pre_drop_s: 1.0
 
   brake_phases:
     bottle:
-      - {duration_s: 5.0,  toggle_ms: 200}
-      - {duration_s: 3.76, toggle_ms: 150}
-      - {duration_s: 2.0,  toggle_ms: 100}
+      - {duration_s: 0.0,  toggle_ms: 200}
+      - {duration_s: 9.0, toggle_ms: 150}
+      - {duration_s: 10.0,  toggle_ms: 100}
     beacon:
-      - {duration_s: 5.0,  toggle_ms: 200}
-      - {duration_s: 3.76, toggle_ms: 150}
-      - {duration_s: 2.0,  toggle_ms: 100}
+      - {duration_s: 0.0,  toggle_ms: 200}
+      - {duration_s: 8.0, toggle_ms: 150}
+      - {duration_s: 15.0,  toggle_ms: 100}
 
 Approval_required: true
 Approval_timeout_sec: 180.0
