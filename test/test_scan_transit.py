@@ -6,9 +6,10 @@ from unittest.mock import Mock
 from bv_core.mission import MissionRunner
 
 
-def mission(state='lap'):
+def mission(state='lap', scan_frame=3):
     node = SimpleNamespace(
         current_state=state,
+        scan_frame=scan_frame,
         lap_waypoints=[(40.0, -83.0, 45.0), (40.001, -83.0, 45.0)],
         scan_waypoints=[
             (40.002, -83.002, 45.0),
@@ -108,3 +109,22 @@ def test_zero_lap_takeoff_still_uses_existing_scan_entry():
     node.handle_state_completion()
 
     node.enter_scan_state.assert_called_once()
+
+
+def test_transit_pushes_relative_altitudes_without_a_dem():
+    node = mission()
+
+    node.enter_scan_transit_state()
+
+    # MAV_FRAME_GLOBAL_RELATIVE_ALT: altitudes are above the takeoff point.
+    assert all(wp.frame == 3 for wp in node.active_waypoint_list)
+
+
+def test_transit_pushes_amsl_when_the_plan_is_terrain_referenced():
+    """Terrain-referenced altitudes are absolute, so the frame must say so."""
+    node = mission(scan_frame=0)
+
+    node.enter_scan_transit_state()
+
+    # MAV_FRAME_GLOBAL: altitudes are AMSL, matching the lap route.
+    assert all(wp.frame == 0 for wp in node.active_waypoint_list)
