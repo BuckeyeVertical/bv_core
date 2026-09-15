@@ -56,6 +56,7 @@ from .mission_config import mission_config_path, package_source_dir
 from .preview_stream import PreviewConfig, PreviewStream, pin_libgcc_unwinder
 from .stitch_geometry import distance_m
 from .scan_plan import load_scan_plan
+from .terrain import load_terrain_model
 from .stitch_capture import StitchCaptureScheduler
 from .frame_metadata import SimulationFrameMetadata, apply_simulation_metadata
 
@@ -235,8 +236,18 @@ class VisionNode(Node):
         mission_yaml = mission_config_path()
         with open(mission_yaml, 'r') as f:
             mcfg = yaml.safe_load(f)
-        self.scan_plan = load_scan_plan()
+        self.scan_plan = load_scan_plan(logger=self.get_logger())
         self.scan_points = self.scan_plan.waypoints
+        # Terrain-referenced flight breaks the assumption that rel_alt is the
+        # height above ground, which is what the localizer's ray cast needs.
+        # See _agl_above_ground.
+        self.terrain = (
+            load_terrain_model(self.get_logger())
+            if self.scan_plan.terrain_referenced else None)
+        self.home_lat = None
+        self.home_lon = None
+        self._home_elevation = None
+        self._warned_terrain_agl = False
         self.scan_tolerance = float(mcfg.get('Scan_tolerance', 2.0))
 
     def _init_state(self):
@@ -659,6 +670,9 @@ class VisionNode(Node):
     def _on_gps(self, msg: NavSatFix):
         """Buffer GPS messages for localization."""
         self.gps_buffer.append(msg)
+        if self.home_lat is None:
+            self.home_lat = msg.latitude
+            self.home_lon = msg.longitude
 
     def _on_pose(self, msg: PoseStamped):
         """Buffer pose messages for localization."""
@@ -667,6 +681,39 @@ class VisionNode(Node):
     def _on_rel_alt(self, msg: Float64):
         """Store latest relative altitude for localization."""
         self.last_rel_alt = msg
+
+    def _agl_above_ground(self, lat, lon, rel_alt):
+        """Convert an above-home altitude into a true height above ground.
+
+        The localizer intersects each pixel ray with a ground plane that
+        distance below the aircraft, so it needs AGL. Without terrain
+        following the aircraft holds a fixed offset from home and rel_alt is
+        already AGL. With it the aircraft tracks the terrain, so rel_alt runs
+        high over low ground and low over high ground by exactly the terrain
+        difference from home - and that error projects straight into the
+        localized coordinate.
+
+        Correcting with a difference of two DEM samples rather than an
+        absolute elevation is deliberate: the DEM's vertical datum cancels,
+        so this is right whether the raster is orthometric or ellipsoidal.
+        """
+        if self.terrain is None:
+            return rel_alt
+        if self.home_lat is None:
+            return rel_alt
+
+        if self._home_elevation is None:
+            self._home_elevation = self.terrain.elevation_at(
+                self.home_lat, self.home_lon)
+        here = self.terrain.elevation_at(lat, lon)
+        if self._home_elevation is None or here is None:
+            if not self._warned_terrain_agl:
+                self.get_logger().warn(
+                    "No DEM coverage for the AGL correction - localizing "
+                    "against the above-home altitude instead")
+                self._warned_terrain_agl = True
+            return rel_alt
+        return rel_alt - (here - self._home_elevation)
 
     def _handle_localize_request(self, request, response):
         """
@@ -742,7 +789,13 @@ class VisionNode(Node):
         best_gps = self.gps_buffer[-1]
         best_pose = self.pose_buffer[-1]
         
-        drone_pose = (best_gps.latitude, best_gps.longitude, self.last_rel_alt.data)
+        drone_pose = (
+            best_gps.latitude,
+            best_gps.longitude,
+            self._agl_above_ground(
+                best_gps.latitude, best_gps.longitude,
+                self.last_rel_alt.data),
+        )
         drone_orientation = (
             best_pose.pose.orientation.x,
             best_pose.pose.orientation.y,

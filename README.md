@@ -233,6 +233,9 @@ Configuration files:
 - `config/mission_params.yaml`
 	- Waypoint lists: `points` (lap), `scan_points`, `stitch_points`, `deliver_points`
 	- Velocities/tolerances: `Lap_velocity`, `Scan_velocity`, `Stitch_velocity`, `*_tolerance`
+	- Altitudes: `takeoff_alt`, `scan_altitude` (above ground), `lap_alt_msl` (AMSL), `terrain_follow`
+- `config/dem.tif` (optional)
+	- Terrain model for the scan region; see [Terrain-relative altitudes](#terrain-relative-altitudes)
 - `config/vision_params.yaml`
 	- `detection_threshold`, `num_scan_wp`, `detector_type`, `ml_model_path`
 - `config/filtering_params.yaml`
@@ -259,6 +262,40 @@ Choose clockwise or counterclockwise and use **Use Region** to replace the activ
 mission YAML's `points` route with the displayed closed rectangle. The generated
 lap points retain the `*TAKEOFF` altitude anchor. Other configuration values and
 comments remain unchanged.
+
+### Terrain-relative altitudes
+
+`scan_altitude` is a height above ground, but PX4 flies a mission waypoint at
+either a fixed offset from the takeoff point or a true AMSL altitude — over
+anything but flat ground those are not the same. Drop a DEM GeoTIFF at
+`config/dem.tif` covering the scan region and, with `terrain_follow: true`,
+`bv_core.scan_plan` resolves every scan waypoint against it and pushes the
+scan, loiter and delivery routes in `MAV_FRAME_GLOBAL` as
+`dem(waypoint) + scan_altitude`. The lap route is unaffected; it was already
+AMSL from `lap_alt_msl`.
+
+```bash
+# Any orthometric DEM covering the field works. Clip it with a margin around
+# scan_boundary - a waypoint the raster does not reach disables the feature.
+gdalwarp -te <lon_min> <lat_min> <lon_max> <lat_max> source.tif config/dem.tif
+```
+
+Two things to check before flying it:
+
+- **Vertical datum.** The DEM must be orthometric (EGM96/EGM2008/NAVD88), the
+  same reference PX4 uses for AMSL. An ellipsoidal DEM offsets the entire scan
+  by the geoid separation, roughly 30 m over the continental US. `mission_node`
+  compares the DEM at home against the reported home altitude on startup and
+  warns when the gap is implausible.
+- **Coverage.** Terrain referencing is all-or-nothing per route, because a
+  route is pushed under a single altitude frame. One waypoint outside the
+  raster, or on nodata, logs a warning and reverts the whole scan to the flat
+  above-takeoff behavior — the mission still flies, just without terrain
+  following. The same happens with no `dem.tif` at all, or without `rasterio`
+  installed.
+
+`terrain_follow` is `false` in `sim_params.yaml`: SITL's ground is flat, so a
+DEM of real terrain would command altitudes the simulated world does not match.
 
 The picker only binds to localhost and needs an internet connection to load
 Leaflet and map tiles. Treat imagery and browser location as selection aids;
