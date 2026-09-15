@@ -19,9 +19,9 @@ points:
   - [36.2195914, -96.0051012, *LAP_MSL]
   - [36.2187431, -96.0027409, *LAP_MSL]
 
+# Search Boundary 1 (NEW)
 scan_sweep: long
 scan_start: top
-# Search Boundary 1 (NEW)
 scan_boundary:
   - [36.211822, -96.005545]
   - [36.211822, -96.002627]
