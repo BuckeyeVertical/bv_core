@@ -21,12 +21,14 @@ points:
 
 scan_sweep: long
 scan_start: top
+# Search Boundary 1 (NEW)
 scan_boundary:
-  - [36.21634100, -96.01042400]
-  - [36.21675000, -96.00755000]
-  - [36.21805400, -96.00783500]
-  - [36.21764500, -96.01070900]
+  - [36.211822, -96.005545]
+  - [36.211822, -96.002627]
+  - [36.213147, -96.002627]
+  - [36.213147, -96.005545]
 
+# Search Boundary 2
 # scan_sweep: long
 # scan_start: top
 # scan_boundary:
