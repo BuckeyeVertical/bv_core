@@ -15,7 +15,7 @@ setup(
             'config/mission_params.yaml',
             'config/real_params.yaml',
             'config/sim_params.yaml',
-            'config/suas_params.yaml',
+            'config/park_params.yaml',
         ]),
         # Terrain model for scan altitudes. data_files has no glob, so a DEM
         # that is not listed here never reaches the share directory and
