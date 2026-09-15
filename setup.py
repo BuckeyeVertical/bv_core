@@ -21,6 +21,7 @@ setup(
         # that is not listed here never reaches the share directory and
         # load_terrain_model cannot find it.
         ('share/' + package_name + '/config', glob('config/dem.tif')),
+        ('share/' + package_name + '/config', glob('config/haikey.tif')),
         ('share/' + package_name + '/config', ['config/vision_params.yaml']),
         ('share/' + package_name + '/config',
          ['config/filtering_params.yaml']),
