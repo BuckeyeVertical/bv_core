@@ -131,10 +131,18 @@ class TerrainModel:
         return elevation + float(agl_m)
 
 
-def load_terrain_model(logger=None):
-    """Load the DEM, or return ``None`` after explaining why it is unusable."""
+def load_terrain_model(logger=None, path=None):
+    """Load the DEM, or return ``None`` after explaining why it is unusable.
+
+    Args:
+        logger: Optional logger for the loading decision.
+        path: An explicit DEM location. Tools that run outside a built ROS
+            workspace - the scan picker reads the source tree, not the install
+            share directory - pass their own path rather than resolving one
+            through ament.
+    """
     try:
-        path = dem_path()
+        path = dem_path() if path is None else str(path)
     except Exception as error:
         _warn(logger, f"Terrain following disabled, no DEM path: {error}")
         return None
