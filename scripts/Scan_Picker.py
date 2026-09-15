@@ -282,6 +282,7 @@ PAGE = """<!doctype html>
     let planRequest = 0;
     let activeBounds = null;
     let activeScanBoundary = null;
+    let activeLapRoute = null;
     let locationLayer = null;
     let locationRequest = 0;
     let searchLayer = null;
@@ -289,19 +290,9 @@ PAGE = """<!doctype html>
     function setStatus(message) { statusBox.textContent = message; }
 
     function yamlFor(bounds) {
-      const north = bounds.getNorth().toFixed(8);
-      const south = bounds.getSouth().toFixed(8);
-      const east = bounds.getEast().toFixed(8);
-      const west = bounds.getWest().toFixed(8);
-      const corners = {
-        nw: `[${north}, ${west}]`, sw: `[${south}, ${west}]`,
-        se: `[${south}, ${east}]`, ne: `[${north}, ${east}]`
-      };
       if (mode === 'lap') {
-        const order = lapDirection === 'counterclockwise' ?
-          ['nw', 'sw', 'se', 'ne', 'nw'] : ['nw', 'ne', 'se', 'sw', 'nw'];
-        return `points:\n` + order.map(
-          corner => `  - [${corners[corner].slice(1, -1)}, *LAP_MSL]`
+        return `points:\n` + lapRouteFor(bounds).map(
+          point => `  - [${point.lat.toFixed(8)}, ${point.lng.toFixed(8)}, *LAP_MSL]`
         ).join('\\n');
       }
       return `scan_sweep: ${sweep}\n` +
@@ -326,6 +317,7 @@ PAGE = """<!doctype html>
       rectangle = null;
       activeBounds = null;
       activeScanBoundary = null;
+      activeLapRoute = null;
       if (planLayer) map.removeLayer(planLayer);
       planLayer = null;
       cornerMarkers.forEach(marker => map.removeLayer(marker));
@@ -402,6 +394,11 @@ PAGE = """<!doctype html>
     }
 
     function lapRouteFor(bounds) {
+      if (activeLapRoute) {
+        const route = activeLapRoute.map(point => L.latLng(point[0], point[1]));
+        if (!route[0].equals(route[route.length - 1])) route.push(route[0]);
+        return route;
+      }
       const corners = [bounds.getNorthWest(), bounds.getSouthWest(),
         bounds.getSouthEast(), bounds.getNorthEast()];
       const route = lapDirection === 'counterclockwise' ? corners :
@@ -426,7 +423,9 @@ PAGE = """<!doctype html>
       }
       planLayer = L.featureGroup(layers).addTo(map);
       const laps = configuredRegion.lap_count;
-      planSummary.textContent = `4 lap waypoints · ${lapDirection} · ` +
+      const waypointCount = route[0].equals(route[route.length - 1]) ?
+        route.length - 1 : route.length;
+      planSummary.textContent = `${waypointCount} lap waypoints · ${lapDirection} · ` +
         `${laps} configured lap${laps === 1 ? '' : 's'} · closes at waypoint 1`;
     }
 
@@ -494,24 +493,25 @@ PAGE = """<!doctype html>
         setStatus(`No configured ${mode} region found in ${configuredRegion.label}.`);
         return;
       }
-      const layers = [];
-      layers.push(L.polygon(configuredPoints, {
-        color: '#20a464', weight: 4, fillOpacity: 0.12
-      }).bindTooltip(`${configuredRegion.label}: ${mode} region`));
-      configuredLayer = L.featureGroup(layers).addTo(map);
-      map.fitBounds(configuredLayer.getBounds(), {padding: [45, 45], maxZoom: 19});
       activeBounds = L.latLngBounds(configuredPoints);
       if (mode === 'scan') {
+        configuredLayer = L.featureGroup([
+          L.polygon(configuredPoints, {
+            color: '#20a464', weight: 4, fillOpacity: 0.12
+          }).bindTooltip(`${configuredRegion.label}: scan region`)
+        ]).addTo(map);
         activeScanBoundary = configuredPoints.map(point => [...point]);
         sweep = configuredRegion.sweep;
         routeStart = configuredRegion.start;
       } else {
+        activeLapRoute = configuredPoints.map(point => [...point]);
         lapDirection = configuredRegion.lap_direction;
       }
+      map.fitBounds(activeBounds, {padding: [45, 45], maxZoom: 19});
       updateChoiceButtons();
       yamlBox.value = yamlFor(activeBounds);
       copyButton.disabled = false;
-      useRegionButton.disabled = false;
+      useRegionButton.disabled = mode === 'lap';
       refreshPreview(activeBounds);
       setStatus(`Showing the configured ${mode} region from ${configuredRegion.label}.`);
     }
@@ -557,6 +557,7 @@ PAGE = """<!doctype html>
       if (rectangle) map.removeLayer(rectangle);
       rectangle = null;
       activeBounds = null;
+      activeLapRoute = null;
       cornerMarkers.forEach(marker => map.removeLayer(marker));
       cornerMarkers = [];
       if (configuredLayer) map.removeLayer(configuredLayer);

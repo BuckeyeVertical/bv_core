@@ -272,3 +272,52 @@ assert.equal(searchLocationButton.textContent, 'Find');
     subprocess.run(
         [node, '--input-type=module', '-e', script],
         check=True, capture_output=True, text=True)
+
+
+def test_configured_lap_keeps_arbitrary_shape_and_numbers_every_waypoint():
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required for picker JavaScript regression')
+    module = load_script()
+    functions = []
+    for name in ('lapRouteFor', 'drawLapPlan'):
+        begin = module.PAGE.index(f'    function {name}(')
+        end = module.PAGE.index('\n    }', begin) + len('\n    }')
+        functions.append(module.PAGE[begin:end])
+    script = r'''
+const assert = require('node:assert/strict');
+const activeLapRoute = [
+  [36.21, -96.00], [36.20, -96.01], [36.22, -96.03],
+  [36.24, -96.02], [36.23, -96.005]
+];
+let planLayer = null;
+let lapDirection = 'counterclockwise';
+const configuredRegion = {lap_count: 2};
+const planSummary = {};
+const map = {removeLayer() {}};
+const L = {
+  latLng(lat, lng) {
+    return {lat, lng, equals(other) {
+      return lat === other.lat && lng === other.lng;
+    }};
+  },
+  polyline() {return {};},
+  marker() {return {bindTooltip() {return this;}};},
+  divIcon() {return {};},
+  featureGroup() {return {addTo() {return this;}};}
+};
+function arrowFor() {return {};}
+FUNCTIONS
+const route = lapRouteFor(null);
+assert.equal(route.length, 6);
+assert.equal(route[0], route.at(-1));
+drawLapPlan(route);
+assert.match(planSummary.textContent, /^5 lap waypoints/);
+'''.replace('FUNCTIONS', '\n'.join(functions))
+    subprocess.run(
+        [node, '-e', script], check=True, capture_output=True, text=True)
