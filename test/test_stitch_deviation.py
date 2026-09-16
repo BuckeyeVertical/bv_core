@@ -90,6 +90,13 @@ class StitchHarness(VisionNode):
         self.latest_wp = None
         self.frame_number = 1
         self.gps_buffer = deque(maxlen=200)
+        self.pose_buffer = deque(maxlen=200)
+        # Geotagging reads these; no DEM and no rel_alt means the EXIF
+        # altitude falls back to the fix's own, which is all this needs.
+        self.terrain = None
+        self.last_rel_alt = None
+        self._exif_enabled = True
+        self._exif_profile = None
         self.raw_frames_dir = 'raw_frames'
         self.raw_frames_cleared = True      # keep the filesystem out of it
         self.pipeline_calls = []
@@ -112,6 +119,7 @@ class StitchHarness(VisionNode):
         latitude, longitude = at(along_m, cross_m)
         fix = NavSatFix()
         fix.latitude, fix.longitude = latitude, longitude
+        fix.altitude = ALT
         self.gps_buffer.append(fix)
 
     def fly(self, along_m, cross_m=0.0):
@@ -127,10 +135,22 @@ class StitchHarness(VisionNode):
         out = []
         while True:
             try:
-                path, _frame, capture = self.stitch_write_queue.get_nowait()
+                path, _frame, capture, _geotag = (
+                    self.stitch_write_queue.get_nowait())
             except queue.Empty:
                 return out
             out.append((path, capture))
+
+    def geotags(self):
+        """Geotags queued for the stitch writer, in order."""
+        out = []
+        while True:
+            try:
+                _path, _frame, _capture, geotag = (
+                    self.stitch_write_queue.get_nowait())
+            except queue.Empty:
+                return out
+            out.append(geotag)
 
 
 @pytest.fixture(scope='module')

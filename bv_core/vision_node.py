@@ -17,12 +17,15 @@ and detection processing.
 import bv_core._unwinder  # noqa: F401  # isort: skip  (side-effect; keep first)
 
 import json
+import math
 import os
 import queue
 import threading
 import time
 import traceback
+from datetime import datetime
 import numpy as np
+import piexif
 import yaml
 import cv2
 
@@ -58,7 +61,14 @@ from .stitch_geometry import distance_m
 from .scan_plan import load_scan_plan
 from .terrain import load_terrain_model
 from .stitch_capture import StitchCaptureScheduler
-from .frame_metadata import SimulationFrameMetadata, apply_simulation_metadata
+from .frame_metadata import (
+    CameraExifProfile,
+    FrameGeotag,
+    SimulationFrameMetadata,
+    apply_simulation_metadata,
+    build_exif_bytes,
+    heading_deg_from_quaternion,
+)
 
 # ROS2 utilities
 from ament_index_python.packages import get_package_share_directory
@@ -76,6 +86,9 @@ import supervision as sv
 pin_libgcc_unwinder()
 
 CLASS_NAMES = ("person", "tent")
+
+# sensor_msgs/NavSatFix: COVARIANCE_TYPE_UNKNOWN. The fix carries no accuracy.
+COVARIANCE_TYPE_UNKNOWN = 0
 
 # How long destroy_node waits for the preview toggle worker. Comfortably above
 # PreviewStream.start()'s worst case (one encoder tier x a 3 s get_state, plus
@@ -168,6 +181,7 @@ class VisionNode(Node):
         self._init_publishers()
         self._init_detector()
         self._init_localizer()
+        self._init_exif()
         self._init_services()
         self._start_worker_threads()
         # Index retained for legacy image naming conventions.
@@ -231,6 +245,14 @@ class VisionNode(Node):
             max_px=int(cfg.get('crop_max_px', 1024)),
             jpeg_quality=int(cfg.get('crop_jpeg_quality', 85)),
         )
+
+        # EXIF geotagging of stitch frames for offline photogrammetry.
+        # Intrinsics are NOT configured here - see _init_exif.
+        self._exif_enabled = bool(cfg.get('exif_enabled', True))
+        self._exif_make = str(cfg.get('exif_make', 'SONY'))
+        self._exif_model = str(cfg.get('exif_model', 'DSC-RX0M2'))
+        self._exif_sensor_width_mm = float(
+            cfg.get('exif_sensor_width_mm', 13.2))
 
         # Scan geometry and altitude use the same mission config as mission_node.
         mission_yaml = mission_config_path()
@@ -483,6 +505,51 @@ class VisionNode(Node):
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs
         )
+
+    def _init_exif(self):
+        """Build the static EXIF profile from the calibration being flown.
+
+        The intrinsics come from filtering_params.yaml rather than a second
+        set of configured numbers, so the focal length written into every
+        frame cannot drift from the matrix localizer.py actually projects
+        with. A recalibration updates both or neither.
+        """
+        self._exif_profile = None
+        if not self._exif_enabled:
+            self.get_logger().info("EXIF geotagging disabled by config")
+            return
+
+        filtering_yaml = os.path.join(
+            get_package_share_directory('bv_core'),
+            'config',
+            'filtering_params.yaml'
+        )
+        try:
+            # Explicit encoding: the file carries a non-ASCII comment, and a
+            # non-UTF-8 default locale would otherwise raise here.
+            with open(filtering_yaml, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f)
+            c_matrix = cfg['c_matrix']
+            self._exif_profile = CameraExifProfile.from_calibration(
+                make=self._exif_make,
+                model=self._exif_model,
+                fx=float(c_matrix[0]),
+                fy=float(c_matrix[4]),
+                calib_width_px=int(cfg['image_width_px']),
+                calib_height_px=int(cfg['image_height_px']),
+                sensor_width_mm=self._exif_sensor_width_mm,
+            )
+        except (OSError, KeyError, IndexError, TypeError, ValueError) as error:
+            self._exif_enabled = False
+            self.get_logger().error(
+                f"EXIF geotagging disabled, unusable calibration: {error}")
+            return
+
+        self.get_logger().info(
+            f"EXIF geotagging on: {self._exif_make} {self._exif_model}, "
+            f"focal={self._exif_profile.focal_length_mm:.3f}mm, sensor="
+            f"{self._exif_profile.sensor_width_mm:.2f}x"
+            f"{self._exif_profile.sensor_height_mm:.2f}mm")
 
     def _init_services(self):
         """Initialize ROS2 services."""
@@ -1009,20 +1076,97 @@ class VisionNode(Node):
             time.sleep(0.05)
             return None
 
+    def _capture_altitude(self, gps):
+        """Altitude for the EXIF tag, and whether it is really AMSL.
+
+        NavSatFix.altitude is a height above the WGS84 ellipsoid, which over
+        Ohio sits roughly 34 m from mean sea level - mission.py:488 documents
+        the same trap. The DEM is orthometric, so its ground elevation plus a
+        true AGL is an AMSL altitude.
+
+        That absolute elevation is the one thing _agl_above_ground is careful
+        NOT to depend on: it differences two DEM samples precisely so the
+        raster's vertical datum cancels. Taking an absolute value here gives
+        that up, so this is AMSL only if dem.tif is orthometric - the same bet
+        every scan waypoint is already flown on.
+        """
+        if self.terrain is not None and self.last_rel_alt is not None:
+            ground_m = self.terrain.elevation_at(gps.latitude, gps.longitude)
+            if ground_m is not None:
+                agl_m = self._agl_above_ground(
+                    gps.latitude, gps.longitude, self.last_rel_alt.data)
+                return ground_m + agl_m, True
+        return gps.altitude, False
+
+    def _horizontal_error(self, gps):
+        """Horizontal accuracy in metres, or None when the fix omits it.
+
+        ODM weights a camera position by its stated accuracy, so an unknown
+        accuracy has to be absent from the tags rather than guessed at.
+        """
+        covariance_type = getattr(
+            gps, 'position_covariance_type', COVARIANCE_TYPE_UNKNOWN)
+        if covariance_type == COVARIANCE_TYPE_UNKNOWN:
+            return None
+        covariance = getattr(gps, 'position_covariance', None)
+        if covariance is None or len(covariance) < 5:
+            return None
+        east_variance, north_variance = covariance[0], covariance[4]
+        if east_variance < 0.0 or north_variance < 0.0:
+            return None
+        return math.sqrt(east_variance + north_variance)
+
+    def _camera_heading_deg(self):
+        """Compass heading of the camera, or None without an attitude.
+
+        The gimbal holds the camera level, so the camera's heading is the
+        aircraft's and its pitch stays at nadir - the same decoupling
+        localizer.py relies on when it keeps drone yaw and discards the rest.
+        """
+        if not len(self.pose_buffer):
+            return None
+        orientation = self.pose_buffer[-1].pose.orientation
+        return heading_deg_from_quaternion(
+            orientation.x, orientation.y, orientation.z, orientation.w)
+
+    def _geotag_for_capture(self, gps):
+        """Snapshot where, when and which way, for the frame being captured.
+
+        Sampled here rather than on the writer thread because the write can
+        lag the shutter by a queue's worth of frames: a position read there
+        would describe a different part of the row.
+        """
+        if not self._exif_enabled:
+            return None
+
+        altitude_m, altitude_is_msl = self._capture_altitude(gps)
+        return FrameGeotag(
+            latitude=gps.latitude,
+            longitude=gps.longitude,
+            altitude_m=altitude_m,
+            altitude_is_msl=altitude_is_msl,
+            # Wall clock, NOT get_clock(): under use_sim_time the ROS clock
+            # starts near zero and would stamp every frame in 1970.
+            captured_at=datetime.now(),
+            horizontal_error_m=self._horizontal_error(gps),
+            heading_deg=self._camera_heading_deg(),
+        )
+
     def _capture_stitch_frame(self, frame):
         if self.stitch_paused or len(self.gps_buffer) == 0:
             return
 
         gps = self.gps_buffer[-1]
         position = (gps.latitude, gps.longitude)
+        geotag = self._geotag_for_capture(gps)
         with self.stitch_lock:
             self.stitch_frame_id += 1
             frame_id = self.stitch_frame_id
-            self.latest_stitch_frame = (frame, position, frame_id)
+            self.latest_stitch_frame = (frame, position, frame_id, geotag)
             capture = self.stitch_capture.consider(position, frame_id)
 
         if capture is not None:
-            self._queue_stitch_capture(frame, capture)
+            self._queue_stitch_capture(frame, capture, geotag)
 
     def _finish_stitch_row(self):
         with self.stitch_lock:
@@ -1030,21 +1174,48 @@ class VisionNode(Node):
             if latest is None:
                 self.stitch_capture.cancel_row()
                 return
-            frame, position, frame_id = latest
+            frame, position, frame_id, geotag = latest
             capture = self.stitch_capture.finish_row(position, frame_id)
             self.latest_stitch_frame = None
 
         if capture is not None:
-            self._queue_stitch_capture(frame, capture)
+            self._queue_stitch_capture(frame, capture, geotag)
 
-    def _queue_stitch_capture(self, frame, capture):
+    def _queue_stitch_capture(self, frame, capture, geotag=None):
         path = os.path.join(
             self.raw_frames_dir,
             f"row{capture.row}_{capture.column}.jpg")
         try:
-            self.stitch_write_queue.put_nowait((path, frame.copy(), capture))
+            self.stitch_write_queue.put_nowait(
+                (path, frame.copy(), capture, geotag))
         except queue.Full:
             self.get_logger().error(f"Stitch writer queue full; dropped {path}")
+
+    def _apply_exif(self, path, frame, geotag):
+        """Geotag a frame already safely on disk, or leave it untagged.
+
+        piexif splices the metadata into the file that is already there rather
+        than re-encoding it, so the pixels ODM reconstructs from stay
+        bit-identical to what cv2.imwrite produced. Re-encoding would put a
+        second round of JPEG loss into the photogrammetry input.
+
+        Tagging must never cost a frame, so a failure here degrades to an
+        untagged but perfectly valid JPEG - the same fail-soft rule terrain.py
+        follows. Runs on the writer thread, which the queue already keeps off
+        the shutter path.
+        """
+        if (not self._exif_enabled
+                or geotag is None
+                or self._exif_profile is None):
+            return
+
+        height, width = frame.shape[:2]
+        try:
+            piexif.insert(
+                build_exif_bytes(self._exif_profile, geotag, width, height),
+                path)
+        except Exception as error:  # noqa: BLE001 - a frame outranks its tags
+            self.get_logger().warn(f"Could not geotag {path}: {error}")
 
     def _stitch_writer_loop(self):
         while True:
@@ -1053,12 +1224,13 @@ class VisionNode(Node):
                 self.stitch_write_queue.task_done()
                 return
 
-            path, frame, capture = item
+            path, frame, capture, geotag = item
             try:
                 written = cv2.imwrite(path, frame)
                 if not written:
                     self.get_logger().error(f"Could not write stitch frame: {path}")
                     continue
+                self._apply_exif(path, frame, geotag)
                 skipped = (
                     f", skipped={capture.skipped_targets}"
                     if capture.skipped_targets else ""

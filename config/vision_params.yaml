@@ -63,3 +63,19 @@ crop_jpeg_quality: 85
 preview_width: 640           # output width; height follows source aspect
 preview_fps: 12.0             # decimation target — the knob for CPU and bitrate
 preview_bitrate_bps: 500000  # encoder target bitrate
+
+# ============================================================
+# EXIF geotagging of stitch frames
+# ============================================================
+# Frames in raw_frames/ are reconstructed by OpenDroneMap off the aircraft,
+# and ODM does far better with frames that carry their own position, time and
+# camera model. The camera INTRINSICS are deliberately not repeated here: the
+# focal length and focal-plane resolution are derived at startup from c_matrix
+# in filtering_params.yaml, so recalibrating cannot leave the tags describing
+# a camera that never flew. Only the physical facts a matrix cannot give live
+# here. Tagging is pure Python (piexif), so there is no system package to
+# install and no subprocess on the writer thread.
+exif_enabled: true
+exif_make: SONY
+exif_model: DSC-RX0M2
+exif_sensor_width_mm: 13.2   # 1" sensor; 4K is a 16:9 crop of it
