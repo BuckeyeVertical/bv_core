@@ -20,22 +20,22 @@ points:
   - [36.2187431, -96.0027409, *LAP_MSL]
 
 # Search Boundary 1 (NEW)
-scan_sweep: long
-scan_start: top
-scan_boundary:
-  - [36.211822, -96.005545]
-  - [36.211822, -96.002627]
-  - [36.213147, -96.002627]
-  - [36.213147, -96.005545]
-
-# Search Boundary 2
 # scan_sweep: long
 # scan_start: top
 # scan_boundary:
-#   - [36.213469, -96.002635]
-#   - [36.215795, -96.002635]
-#   - [36.215795, -96.004286]
-#   - [36.213469, -96.004286]
+#   - [36.211822, -96.005545]
+#   - [36.211822, -96.002627]
+#   - [36.213147, -96.002627]
+#   - [36.213147, -96.005545]
+
+# Search Boundary 2
+scan_sweep: long
+scan_start: top
+scan_boundary:
+  - [36.213469, -96.002635]
+  - [36.215795, -96.002635]
+  - [36.215795, -96.004286]
+  - [36.213469, -96.004286]
 
 Lap_velocity: 20.0
 Scan_transit_velocity: 20.0
@@ -73,9 +73,9 @@ payload:
       - {duration_s: 9.0, toggle_ms: 150}
       - {duration_s: 10.0,  toggle_ms: 100}
     beacon:
-      - {duration_s: 0.0,  toggle_ms: 200}
-      - {duration_s: 8.0, toggle_ms: 150}
+      - {duration_s: 3.0,  toggle_ms: 200}
+      - {duration_s: 5.0, toggle_ms: 150}
       - {duration_s: 15.0,  toggle_ms: 100}
 
 Approval_required: true
-Approval_timeout_sec: 180.0
+Approval_timeout_sec: 60.0
