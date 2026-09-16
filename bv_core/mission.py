@@ -39,6 +39,7 @@ from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String, Bool
+from std_srvs.srv import Trigger
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ConfirmedDetection, ObjectLocations
@@ -351,6 +352,9 @@ class MissionRunner(Node):
         )
         
         
+        self.end_laps_service = self.create_service(
+            Trigger, "/mission/end_laps", self.on_end_laps)
+
         # Subscribers
         
         # GPS for home position
@@ -512,6 +516,76 @@ class MissionRunner(Node):
         self.get_logger().info("All services available")
 
     # State machine core
+    def on_end_laps(self, request, response):
+        """End the lap phase through the same path as normal completion."""
+        if self.current_state != STATE_LAP:
+            response.success = False
+            response.message = "End laps is only available during laps"
+            return response
+        if getattr(self, '_end_laps_requested', False):
+            response.success = False
+            response.message = "End laps is already pending"
+            return response
+        self._end_laps_requested = True
+        self.get_logger().info('End laps requested: LOITER, then 10-second hold before scan')
+        self.log.event('END_LAPS_REQUESTED', 'operator requested scan transition')
+        self._process_end_laps_request()
+        response.success = True
+        response.message = "End laps accepted; waiting for LOITER, then holding 10 seconds before scan"
+        return response
+
+    def _cancel_end_laps(self):
+        self._end_laps_requested = False
+        self._end_laps_hold_phase = None
+        timer = getattr(self, '_end_laps_hold_timer', None)
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+            self._end_laps_hold_timer = None
+
+    def _process_end_laps_request(self):
+        if not getattr(self, '_end_laps_requested', False):
+            return
+        if self.current_state != STATE_LAP:
+            self._cancel_end_laps()
+        elif not self.is_transitioning:
+            self.is_transitioning = True
+            self._end_laps_hold_phase = 'waiting'
+            self.last_waypoint_reached = None
+            request = SetMode.Request()
+            request.base_mode = 0
+            request.custom_mode = 'AUTO.LOITER'
+            self.get_logger().info('End laps: requesting AUTO.LOITER; waiting for vehicle confirmation')
+            try:
+                future = self.set_mode_client.call_async(request)
+                future.add_done_callback(self._on_end_laps_loiter_complete)
+            except Exception as exc:
+                self.get_logger().error(f"End laps LOITER request failed: {exc}")
+                self._cancel_end_laps()
+
+    def _on_end_laps_loiter_complete(self, future):
+        if not getattr(self, '_end_laps_requested', False):
+            return
+        try:
+            accepted = future.result().mode_sent
+        except Exception as exc:
+            self.get_logger().error(f"End laps LOITER request failed: {exc}")
+            accepted = False
+        if not accepted:
+            self.get_logger().error("End laps cancelled: LOITER was not accepted")
+            self._cancel_end_laps()
+
+    def _finish_end_laps_hold(self):
+        if (not getattr(self, '_end_laps_requested', False)
+                or self.current_state != STATE_LAP
+                or getattr(self, '_end_laps_hold_phase', None) != 'holding'):
+            return
+        self.get_logger().info('End laps: 10-second LOITER hold complete; starting scan transit')
+        self._cancel_end_laps()
+        # Ignore old lap notifications until the replacement upload finishes.
+        self._early_scan_upload_pending = True
+        self.handle_state_completion()
+
     def handle_state_completion(self):
         """
         Called when the current state's objective is complete.
@@ -526,7 +600,10 @@ class MissionRunner(Node):
                 self.enter_scan_state()
             
         elif self.current_state == STATE_LAP:
-            self.enter_scan_transit_state()
+            if getattr(self, '_end_laps_requested', False):
+                self._process_end_laps_request()
+            else:
+                self.enter_scan_transit_state()
 
         elif self.current_state == STATE_SCAN_TRANSIT:
             self.activate_scan_state()
@@ -959,6 +1036,7 @@ class MissionRunner(Node):
         """
         Stop mission work and return; skip the command if RTL is already observed.
         """
+        MissionRunner._cancel_end_laps(self)
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
@@ -1311,6 +1389,7 @@ class MissionRunner(Node):
                 self._pending_scan_confirmation = None
             return
         
+        self._early_scan_upload_pending = False
         self.get_logger().info("Waypoints uploaded successfully")
         if not self.has_armed:
             self.arm_vehicle()
@@ -1598,6 +1677,9 @@ class MissionRunner(Node):
 
     def on_waypoint_reached(self, msg):
         """Callback when a waypoint is reached."""
+        if (getattr(self, "_early_scan_upload_pending", False)
+                or getattr(self, "_end_laps_hold_phase", None) is not None):
+            return
         waypoint_index = msg.wp_seq
         
         # Ignore duplicate waypoint messages (MAVROS publishes repeatedly)
@@ -1648,6 +1730,21 @@ class MissionRunner(Node):
         if msg.mode == 'AUTO.RTL' and self.current_state != STATE_RTL:
             self.get_logger().info("External RTL detected - stopping mission actions")
             self.enter_rtl_state(command_mode=False)
+
+        if getattr(self, '_end_laps_requested', False):
+            phase = getattr(self, '_end_laps_hold_phase', None)
+            if self.current_state != STATE_LAP or not msg.armed:
+                self._cancel_end_laps()
+            elif msg.mode == 'AUTO.LOITER' and phase == 'waiting':
+                self._end_laps_hold_phase = 'holding'
+                self.get_logger().info('End laps: vehicle reports AUTO.LOITER; starting 10-second hold')
+                self.log.event('END_LAPS_HOLD', 'LOITER observed; holding for 10 seconds')
+                self._end_laps_hold_timer = self.create_timer(
+                    5.0, self._finish_end_laps_hold)
+            elif ((phase == 'holding' and msg.mode != 'AUTO.LOITER')
+                  or msg.mode not in ('AUTO.MISSION', 'AUTO.LOITER')):
+                self.get_logger().warn('End laps cancelled: vehicle mode changed')
+                self._cancel_end_laps()
 
         if self.current_state == STATE_RTL and not msg.armed and not self.rtl_completed:
             self.rtl_completed = True
@@ -1760,6 +1857,7 @@ class MissionRunner(Node):
         Publishes state; the payload drop runs on its own DEPLOY_TICK_SEC timer.
         Also retries any payload command PX4 has not confirmed.
         """
+        self._process_end_laps_request()
         self.publish_mission_state()
         if self.payload_writer is not None:
             self.payload_writer.flush()
