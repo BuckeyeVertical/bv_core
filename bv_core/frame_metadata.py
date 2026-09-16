@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import piexif
+
 
 @dataclass(frozen=True)
 class SimulationFrameMetadata:
@@ -50,17 +52,48 @@ def apply_simulation_metadata(
     message.sim_time_ns = metadata.time_ns
 
 
-# EXIF/XMP geotagging for stitch frames
+# EXIF geotagging for stitch frames
 #
-# The frames written to raw_frames/ are fed to OpenDroneMap off the aircraft,
-# and ODM reconstructs far better from frames that carry their own position,
-# time and camera model than from bare pixels. Everything needed exists only
-# at the moment of capture, so it is gathered there and written here.
+# The frames written to raw_frames/ are reconstructed by OpenDroneMap off the
+# aircraft, and ODM does far better with frames that carry their own position,
+# time and camera model than with bare pixels. All of that exists only at the
+# moment of capture, so it is gathered there and encoded here.
 #
-# These build exiftool argument lists rather than touching files, so the whole
-# derivation is testable without exiftool, OpenCV or ROS on the path.
+# These build piexif dictionaries rather than touching files, so the whole
+# derivation is testable without ROS or OpenCV on the path.
 
 MM_PER_INCH = 25.4
+
+# EXIF stores every real number as a RATIONAL: a pair of UNSIGNED 32-BIT
+# integers. That ceiling of 4294967295 is what picks the scales below - a
+# focal-plane resolution of 7389.09 at a millionth would need 7389090909 and
+# silently overflow - so each quantity gets the finest scale its own range
+# can afford.
+_FOCAL_SCALE = 1000000          # mm, to a nanometre
+_RESOLUTION_SCALE = 10000       # pixels per inch, to a ten-thousandth
+_METRE_SCALE = 1000             # metres, to a millimetre
+_DEGREE_SCALE = 1000            # degrees, to a thousandth
+_ARCSECOND_SCALE = 10000        # arcseconds, to ~3 mm of ground
+
+
+def _rational(value, scale):
+    """Encode a real number as an EXIF RATIONAL at a fixed denominator."""
+    return (int(round(value * scale)), scale)
+
+
+def _dms_rationals(decimal_degrees):
+    """Split a decimal degree into EXIF's degree/minute/second triple.
+
+    EXIF predates decimal coordinates, so a position is three rationals and
+    the sign lives in a separate reference tag. The magnitude is taken here;
+    the caller supplies the reference.
+    """
+    remaining = abs(decimal_degrees)
+    degrees = int(remaining)
+    minutes_total = (remaining - degrees) * 60.0
+    minutes = int(minutes_total)
+    seconds = (minutes_total - minutes) * 60.0
+    return [(degrees, 1), (minutes, 1), _rational(seconds, _ARCSECOND_SCALE)]
 
 
 @dataclass(frozen=True)
@@ -111,12 +144,12 @@ class CameraExifProfile:
             sensor_height_mm=sensor_height_mm,
         )
 
-    def tags(self, image_width_px: int, image_height_px: int) -> list:
-        """exiftool arguments for an image of this pixel size.
+    def exif_dict(self, image_width_px: int, image_height_px: int) -> dict:
+        """piexif IFDs for an image of this pixel size.
 
         ``FocalLength`` is a physical length and does not move with the output
         resolution, but ``FocalPlane*Resolution`` counts pixels per inch of
-        sensor and does — so a downscaled stream must be tagged against the
+        sensor and does - so a downscaled stream must be tagged against the
         size actually written, not the size the camera was calibrated at.
         """
         if min(image_width_px, image_height_px) <= 0:
@@ -124,26 +157,27 @@ class CameraExifProfile:
 
         x_res = image_width_px * MM_PER_INCH / self.sensor_width_mm
         y_res = image_height_px * MM_PER_INCH / self.sensor_height_mm
-        return [
-            f"-Make={self.make}",
-            f"-Model={self.model}",
-            f"-FocalLength={self.focal_length_mm:.4f}",
-            f"-FocalPlaneXResolution={x_res:.4f}",
-            f"-FocalPlaneYResolution={y_res:.4f}",
-            # The '#' forces the numeric value. Without it exiftool expects the
-            # word 'inches' and rejects the 2.
-            "-FocalPlaneResolutionUnit#=2",
-        ]
+        return {
+            "0th": {
+                piexif.ImageIFD.Make: self.make.encode('ascii', 'replace'),
+                piexif.ImageIFD.Model: self.model.encode('ascii', 'replace'),
+            },
+            "Exif": {
+                piexif.ExifIFD.FocalLength:
+                    _rational(self.focal_length_mm, _FOCAL_SCALE),
+                piexif.ExifIFD.FocalPlaneXResolution:
+                    _rational(x_res, _RESOLUTION_SCALE),
+                piexif.ExifIFD.FocalPlaneYResolution:
+                    _rational(y_res, _RESOLUTION_SCALE),
+                # 2 == inches, which is what the resolutions above are in.
+                piexif.ExifIFD.FocalPlaneResolutionUnit: 2,
+            },
+        }
 
 
 @dataclass(frozen=True)
 class FrameGeotag:
-    """Where, when and which way the aircraft was when one frame was taken.
-
-    ``pitch_deg``/``roll_deg`` default to nadir because the camera rides a
-    gimbal that holds it level - the same fact ``localizer.py`` relies on when
-    it discards drone roll and pitch and keeps only yaw.
-    """
+    """Where, when and which way the aircraft was when one frame was taken."""
 
     latitude: float
     longitude: float
@@ -152,44 +186,71 @@ class FrameGeotag:
     captured_at: Any
     horizontal_error_m: Any = None
     heading_deg: Any = None
-    pitch_deg: float = -90.0
-    roll_deg: float = 0.0
 
-    def tags(self) -> list:
-        """exiftool arguments for this frame.
+    def exif_dict(self) -> dict:
+        """piexif IFDs for this frame.
 
-        Signed coordinates are split into an unsigned magnitude and a
-        reference: handing exiftool a negative value AND a reference lets the
-        reference win silently, so a southern latitude written as -33.87 with
-        an 'S' ref would land in the northern hemisphere.
+        Camera pitch and roll are deliberately absent. They have no standard
+        EXIF tag - only vendor XMP - and for a gimbal that holds the camera
+        level they are the constants -90 and 0, so they carry no information
+        that config does not already state.
         """
-        tags = [
-            f"-GPSLatitude={abs(self.latitude):.8f}",
-            f"-GPSLatitudeRef={'N' if self.latitude >= 0.0 else 'S'}",
-            f"-GPSLongitude={abs(self.longitude):.8f}",
-            f"-GPSLongitudeRef={'E' if self.longitude >= 0.0 else 'W'}",
-            f"-GPSAltitude={abs(self.altitude_m):.3f}",
-            f"-GPSAltitudeRef={0 if self.altitude_m >= 0.0 else 1}",
-            f"-DateTimeOriginal={self.captured_at.strftime('%Y:%m:%d %H:%M:%S')}",
-            f"-SubSecTimeOriginal={self.captured_at.microsecond // 1000:03d}",
-        ]
+        gps = {
+            piexif.GPSIFD.GPSLatitude: _dms_rationals(self.latitude),
+            piexif.GPSIFD.GPSLatitudeRef:
+                b'N' if self.latitude >= 0.0 else b'S',
+            piexif.GPSIFD.GPSLongitude: _dms_rationals(self.longitude),
+            piexif.GPSIFD.GPSLongitudeRef:
+                b'E' if self.longitude >= 0.0 else b'W',
+            piexif.GPSIFD.GPSAltitude:
+                _rational(abs(self.altitude_m), _METRE_SCALE),
+            piexif.GPSIFD.GPSAltitudeRef: 0 if self.altitude_m >= 0.0 else 1,
+        }
 
         # ODM weights a position by its reported accuracy, so an unknown
         # accuracy must be absent rather than guessed at.
         if self.horizontal_error_m is not None:
-            tags.append(
-                f"-GPSHPositioningError={self.horizontal_error_m:.3f}")
+            gps[piexif.GPSIFD.GPSHPositioningError] = _rational(
+                self.horizontal_error_m, _METRE_SCALE)
 
-        # A wrong orientation prior is worse than none: it steers ODM's
-        # matcher instead of merely failing to help it.
+        # GPSImgDirection is the standard home for a camera heading, which is
+        # why this needs no vendor XMP. 'T' declares it against true north
+        # rather than magnetic - the pose is already in ENU, so there is no
+        # declination in it.
         if self.heading_deg is not None:
-            tags.extend([
-                f"-XMP-Camera:Yaw={self.heading_deg:.2f}",
-                f"-XMP-Camera:Pitch={self.pitch_deg:.2f}",
-                f"-XMP-Camera:Roll={self.roll_deg:.2f}",
-            ])
+            gps[piexif.GPSIFD.GPSImgDirection] = _rational(
+                self.heading_deg, _DEGREE_SCALE)
+            gps[piexif.GPSIFD.GPSImgDirectionRef] = b'T'
 
-        return tags
+        return {
+            "Exif": {
+                piexif.ExifIFD.DateTimeOriginal:
+                    self.captured_at.strftime('%Y:%m:%d %H:%M:%S').encode(
+                        'ascii'),
+                piexif.ExifIFD.SubSecTimeOriginal:
+                    f"{self.captured_at.microsecond // 1000:03d}".encode(
+                        'ascii'),
+            },
+            "GPS": gps,
+        }
+
+
+def build_exif_bytes(
+    profile: CameraExifProfile,
+    geotag: FrameGeotag,
+    image_width_px: int,
+    image_height_px: int,
+) -> bytes:
+    """Merge the camera and frame metadata into one EXIF block."""
+    camera = profile.exif_dict(image_width_px, image_height_px)
+    frame = geotag.exif_dict()
+    return piexif.dump({
+        "0th": dict(camera["0th"]),
+        "Exif": {**camera["Exif"], **frame["Exif"]},
+        "GPS": dict(frame["GPS"]),
+        "1st": {},
+        "thumbnail": None,
+    })
 
 
 def heading_deg_from_quaternion(qx, qy, qz, qw) -> float:
@@ -208,6 +269,6 @@ def heading_deg_from_quaternion(qx, qy, qz, qw) -> float:
     heading = (90.0 - math.degrees(math.atan2(north, east))) % 360.0
     # Due north rounds to a hair BELOW zero before the modulo - the quaternion
     # for a quarter turn puts `east` at -2e-16 rather than 0 - and the modulo
-    # then returns exactly 360.0, which is outside the range promised above
-    # and would be written to the tag as Yaw=360.00. Snapping first folds it.
+    # then returns exactly 360.0, which is outside the range promised above.
+    # Snapping first folds it.
     return round(heading, 6) % 360.0

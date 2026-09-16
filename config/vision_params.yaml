@@ -73,8 +73,8 @@ preview_bitrate_bps: 500000  # encoder target bitrate
 # focal length and focal-plane resolution are derived at startup from c_matrix
 # in filtering_params.yaml, so recalibrating cannot leave the tags describing
 # a camera that never flew. Only the physical facts a matrix cannot give live
-# here. Requires exiftool on the aircraft; without it frames are still
-# written, just untagged.
+# here. Tagging is pure Python (piexif), so there is no system package to
+# install and no subprocess on the writer thread.
 exif_enabled: true
 exif_make: SONY
 exif_model: DSC-RX0M2

@@ -20,12 +20,12 @@ import json
 import math
 import os
 import queue
-import subprocess
 import threading
 import time
 import traceback
 from datetime import datetime
 import numpy as np
+import piexif
 import yaml
 import cv2
 
@@ -66,6 +66,7 @@ from .frame_metadata import (
     FrameGeotag,
     SimulationFrameMetadata,
     apply_simulation_metadata,
+    build_exif_bytes,
     heading_deg_from_quaternion,
 )
 
@@ -85,11 +86,6 @@ import supervision as sv
 pin_libgcc_unwinder()
 
 CLASS_NAMES = ("person", "tent")
-
-# Ceiling on one exiftool call. Captures are a full capture_spacing apart -
-# seconds of flight - so this is orders of magnitude above the real cost and
-# exists only so a wedged subprocess cannot stall the stitch writer thread.
-EXIF_TIMEOUT_SEC = 10.0
 
 # sensor_msgs/NavSatFix: COVARIANCE_TYPE_UNKNOWN. The fix carries no accuracy.
 COVARIANCE_TYPE_UNKNOWN = 0
@@ -1198,40 +1194,28 @@ class VisionNode(Node):
     def _apply_exif(self, path, frame, geotag):
         """Geotag a frame already safely on disk, or leave it untagged.
 
-        Tagging must never cost a frame, so every failure here degrades to an
-        untagged but perfectly valid JPEG - the same fail-soft rule terrain.py
-        follows. A missing exiftool disables tagging for the rest of the run
-        rather than logging once per capture for the whole scan.
+        piexif splices the metadata into the file that is already there rather
+        than re-encoding it, so the pixels ODM reconstructs from stay
+        bit-identical to what cv2.imwrite produced. Re-encoding would put a
+        second round of JPEG loss into the photogrammetry input.
 
-        Runs on the writer thread, which the queue already keeps off the
-        shutter path, and captures are a capture_spacing of flight apart - so
-        the subprocess costs nothing that competes with detection.
+        Tagging must never cost a frame, so a failure here degrades to an
+        untagged but perfectly valid JPEG - the same fail-soft rule terrain.py
+        follows. Runs on the writer thread, which the queue already keeps off
+        the shutter path.
         """
-        if not self._exif_enabled or geotag is None or self._exif_profile is None:
+        if (not self._exif_enabled
+                or geotag is None
+                or self._exif_profile is None):
             return
 
         height, width = frame.shape[:2]
-        args = ['exiftool', '-overwrite_original', '-quiet']
-        args.extend(self._exif_profile.tags(width, height))
-        args.extend(geotag.tags())
-        args.append(path)
-
         try:
-            result = subprocess.run(
-                args, capture_output=True, timeout=EXIF_TIMEOUT_SEC)
-        except FileNotFoundError:
-            self._exif_enabled = False
-            self.get_logger().error(
-                "exiftool not found - stitch frames will be written untagged. "
-                "Install libimage-exiftool-perl.")
-            return
-        except subprocess.TimeoutExpired:
-            self.get_logger().warn(f"exiftool timed out tagging {path}")
-            return
-
-        if result.returncode != 0:
-            detail = result.stderr.decode('utf-8', 'replace').strip()
-            self.get_logger().warn(f"exiftool failed on {path}: {detail}")
+            piexif.insert(
+                build_exif_bytes(self._exif_profile, geotag, width, height),
+                path)
+        except Exception as error:  # noqa: BLE001 - a frame outranks its tags
+            self.get_logger().warn(f"Could not geotag {path}: {error}")
 
     def _stitch_writer_loop(self):
         while True:
