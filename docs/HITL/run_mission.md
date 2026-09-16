@@ -104,6 +104,11 @@ Open the GCS from the laptop:
 For an in-flight abort, command Loiter or RTL from the Herelink. Do not use
 `Ctrl-C` as a flight abort.
 
+Run stitching:
+```bash
+scripts/run_odm.sh "$HOME/Downloads"
+```
+
 Scp latest log
 ```bash
 scp "bvorinnano@192.168.144.2:$(ssh bvorinnano@192.168.144.2 'ls -t ~/bv_ws/install/bv_core/lib/python3.10/site-packages/bv_core/logs/*.log | head -1')" .
