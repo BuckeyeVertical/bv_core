@@ -93,7 +93,19 @@ def _dms_rationals(decimal_degrees):
     minutes_total = (remaining - degrees) * 60.0
     minutes = int(minutes_total)
     seconds = (minutes_total - minutes) * 60.0
-    return [(degrees, 1), (minutes, 1), _rational(seconds, _ARCSECOND_SCALE)]
+
+    # Round the seconds FIRST, then carry. Rounding in place would let a value
+    # a hair under a full minute - 59.99996 arcsec at this scale - encode as
+    # exactly 60 arcseconds, which is out of range for the field and which no
+    # reader is obliged to interpret sensibly.
+    ticks = int(round(seconds * _ARCSECOND_SCALE))
+    if ticks >= 60 * _ARCSECOND_SCALE:
+        ticks -= 60 * _ARCSECOND_SCALE
+        minutes += 1
+    if minutes >= 60:
+        minutes -= 60
+        degrees += 1
+    return [(degrees, 1), (minutes, 1), (ticks, _ARCSECOND_SCALE)]
 
 
 @dataclass(frozen=True)
@@ -182,6 +194,8 @@ class FrameGeotag:
     latitude: float
     longitude: float
     altitude_m: float
+    # False means altitude_m is a height above the WGS84 ellipsoid, which has
+    # no EXIF representation - see exif_dict.
     altitude_is_msl: bool
     captured_at: Any
     horizontal_error_m: Any = None
@@ -202,10 +216,19 @@ class FrameGeotag:
             piexif.GPSIFD.GPSLongitude: _dms_rationals(self.longitude),
             piexif.GPSIFD.GPSLongitudeRef:
                 b'E' if self.longitude >= 0.0 else b'W',
-            piexif.GPSIFD.GPSAltitude:
-                _rational(abs(self.altitude_m), _METRE_SCALE),
-            piexif.GPSIFD.GPSAltitudeRef: 0 if self.altitude_m >= 0.0 else 1,
         }
+
+        # EXIF can only say "above" or "below sea level" - it has no way to
+        # express a height above the WGS84 ellipsoid, which is what the GPS
+        # reports when no DEM is available. Over the continental US the two
+        # differ by around 30 m, so writing an ellipsoidal height under
+        # GPSAltitudeRef=0 would be a silent 30 m lie in every frame.
+        # Omitting it instead makes the gap visible to the consumer.
+        if self.altitude_is_msl:
+            gps[piexif.GPSIFD.GPSAltitude] = _rational(
+                abs(self.altitude_m), _METRE_SCALE)
+            gps[piexif.GPSIFD.GPSAltitudeRef] = (
+                0 if self.altitude_m >= 0.0 else 1)
 
         # ODM weights a position by its reported accuracy, so an unknown
         # accuracy must be absent rather than guessed at.

@@ -45,7 +45,7 @@ from sensor_msgs.msg import NavSatFix
 from bv_msgs.msg import ObjectDetections
 from bv_msgs.srv import LocalizeObject
 from geometry_msgs.msg import Vector3, PoseStamped
-from mavros_msgs.msg import WaypointReached
+from mavros_msgs.msg import Altitude, WaypointReached
 from collections import deque
 
 # Local - using factory functions for lazy imports
@@ -284,6 +284,7 @@ class VisionNode(Node):
         self.gps_buffer = deque(maxlen=200)
         self.pose_buffer = deque(maxlen=200)
         self.last_rel_alt = None
+        self.last_amsl = None
 
         # Stitch capture state
         self.step_m = self.scan_plan.capture_spacing_m
@@ -428,6 +429,15 @@ class VisionNode(Node):
             Float64,
             '/mavros/global_position/rel_alt',
             self._on_rel_alt,
+            qos_best_effort
+        )
+
+        # The autopilot's own AMSL altitude, for the EXIF tag. Separate from
+        # rel_alt above, which is above-home and is what the localizer wants.
+        self.altitude_sub = self.create_subscription(
+            Altitude,
+            '/mavros/altitude',
+            self._on_altitude,
             qos_best_effort
         )
 
@@ -748,6 +758,14 @@ class VisionNode(Node):
     def _on_rel_alt(self, msg: Float64):
         """Store latest relative altitude for localization."""
         self.last_rel_alt = msg
+
+    def _on_altitude(self, msg: Altitude):
+        """Store the latest AMSL altitude for geotagging.
+
+        Every field of this message is NaN until the autopilot fills it in,
+        so the value is kept as published and checked at use.
+        """
+        self.last_amsl = msg.amsl
 
     def _agl_above_ground(self, lat, lon, rel_alt):
         """Convert an above-home altitude into a true height above ground.
@@ -1079,17 +1097,26 @@ class VisionNode(Node):
     def _capture_altitude(self, gps):
         """Altitude for the EXIF tag, and whether it is really AMSL.
 
-        NavSatFix.altitude is a height above the WGS84 ellipsoid, which over
-        Ohio sits roughly 34 m from mean sea level - mission.py:488 documents
-        the same trap. The DEM is orthometric, so its ground elevation plus a
-        true AGL is an AMSL altitude.
+        /mavros/altitude is the preferred source: the autopilot has already
+        applied its own geoid model there, so `amsl` is mean sea level
+        without this node betting on any other vertical datum. The field is
+        NaN until the autopilot populates it, so it is checked rather than
+        trusted - a NaN would otherwise be written as a sea-level altitude.
 
+        The DEM fallback rebuilds AMSL as ground elevation plus a true AGL.
         That absolute elevation is the one thing _agl_above_ground is careful
         NOT to depend on: it differences two DEM samples precisely so the
         raster's vertical datum cancels. Taking an absolute value here gives
-        that up, so this is AMSL only if dem.tif is orthometric - the same bet
+        that up, so it is AMSL only if dem.tif is orthometric - the same bet
         every scan waypoint is already flown on.
+
+        Last is NavSatFix.altitude, a height above the WGS84 ellipsoid that
+        sits roughly 34 m from mean sea level over Ohio - mission.py:488
+        documents the same trap. It is returned flagged False, and exif_dict
+        omits the tag rather than pass it off as sea level.
         """
+        if self.last_amsl is not None and not math.isnan(self.last_amsl):
+            return self.last_amsl, True
         if self.terrain is not None and self.last_rel_alt is not None:
             ground_m = self.terrain.elevation_at(gps.latitude, gps.longitude)
             if ground_m is not None:
