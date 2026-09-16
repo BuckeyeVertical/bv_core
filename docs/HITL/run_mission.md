@@ -108,3 +108,14 @@ Scp latest log
 ```bash
 scp "bvorinnano@192.168.144.2:$(ssh bvorinnano@192.168.144.2 'ls -t ~/bv_ws/install/bv_core/lib/python3.10/site-packages/bv_core/logs/*.log | head -1')" .
 ```
+Scp stitching
+```bash
+scp 'jetson-herelink:~/bv_ws/src/bv_core/stitching_results/mosaic_*.jpg' \
+    'jetson-herelink:~/bv_ws/src/bv_core/stitching_results/naive_mosaic_*.jpg' \
+    ~/Downloads/
+```
+
+Scp raw frames
+```bash
+scp -r 'jetson-herelink:~/bv_ws/src/bv_core/raw_frames' ~/Downloads/
+```

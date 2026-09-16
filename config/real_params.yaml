@@ -3,38 +3,52 @@ num_objects: 2
 
 takeoff_alt: 48.768
 scan_altitude: 48.768
-lap_count: 1
+lap_count: 3
 
-lap_alt_msl: &LAP_MSL 237
-
+lap_alt_msl: &LAP_MSL 274.32
+#304.8
 points:
-  - [36.00082846, -95.84746242, *LAP_MSL]
-  - [36.00082846, -95.84689379, *LAP_MSL]
-  - [35.99981293, -95.84689379, *LAP_MSL]
-  - [35.99981293, -95.84746242, *LAP_MSL]
-  - [36.00082846, -95.84746242, *LAP_MSL]
+  - [36.2187499, -96.0027362, *LAP_MSL]
+  - [36.2114374, -96.0027516, *LAP_MSL]
+  - [36.2114893, -96.0064316, *LAP_MSL]
+  - [36.2142680, -96.0093499, *LAP_MSL]
+  - [36.2170466, -96.0122681, *LAP_MSL]
+  - [36.2186393, -96.0121286, *LAP_MSL]
+  - [36.2194875, -96.0099721, *LAP_MSL]
+  - [36.2198857, -96.0076332, *LAP_MSL]
+  - [36.2195914, -96.0051012, *LAP_MSL]
+  - [36.2187431, -96.0027409, *LAP_MSL]
 
-scan_sweep: short
+# Search Boundary 1 (NEW)
+scan_sweep: long
 scan_start: top
 scan_boundary:
-  - [36.00087620, -95.84773064]
-  - [35.99980859, -95.84773064]
-  - [35.99980859, -95.84682941]
-  - [36.00087620, -95.84682941]
+  - [36.211822, -96.005545]
+  - [36.211822, -96.002627]
+  - [36.213147, -96.002627]
+  - [36.213147, -96.005545]
 
+# Search Boundary 2
+# scan_sweep: long
+# scan_start: top
+# scan_boundary:
+#   - [36.213469, -96.002635]
+#   - [36.215795, -96.002635]
+#   - [36.215795, -96.004286]
+#   - [36.213469, -96.004286]
 
 Lap_velocity: 20.0
 Scan_transit_velocity: 20.0
-Takeoff_velocity: 8.0
+Takeoff_velocity: 20.0
 Scan_velocity: 3.0
 Deliver_velocity: 3.0
-RTL_velocity: 8.0
+RTL_velocity: 20.0
 
 Lap_tolerance: 40.0
 Scan_tolerance: 1.0
 Deliver_tolerance: 1.0
 
-ayload:
+payload:
   enabled: true
 
   plate:
