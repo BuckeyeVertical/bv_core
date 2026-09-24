@@ -3,9 +3,9 @@ num_objects: 2
 
 takeoff_alt: 48.768
 scan_altitude: 48.768
-lap_count: 3
+lap_count: 5
 
-lap_alt_msl: &LAP_MSL 274.32
+lap_alt_msl: &LAP_MSL 304.8
 #304.8
 points:
   - [36.2187499, -96.0027362, *LAP_MSL]
@@ -17,12 +17,12 @@ points:
   - [36.2194875, -96.0099721, *LAP_MSL]
   - [36.2198857, -96.0076332, *LAP_MSL]
   - [36.2195914, -96.0051012, *LAP_MSL]
-  - [36.2187431, -96.0027409, *LAP_MSL]
+  - [36.2187499, -96.0027362, *LAP_MSL]
 
 # Search Boundary 1 (NEW)
-# scan_sweep: long
-# scan_start: top
-# scan_boundary:
+#scan_sweep: long
+#scan_start: top
+#scan_boundary:
 #   - [36.211822, -96.005545]
 #   - [36.211822, -96.002627]
 #   - [36.213147, -96.002627]
