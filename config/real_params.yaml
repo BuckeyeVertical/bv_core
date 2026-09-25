@@ -4,8 +4,6 @@ num_objects: 2
 takeoff_alt: 48.768
 scan_altitude: 48.768
 lap_count: 2
-#304.8
-lap_alt_msl: &LAP_MSL 274.32
 
 lap_alt_msl: &LAP_MSL 353.8
 #304.8

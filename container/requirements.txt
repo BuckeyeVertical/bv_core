@@ -20,4 +20,7 @@ numpy<2,>=1.23
 scikit-learn
 opencv-python
 geographiclib
+# Terrain DEM lookup for scan altitudes. <1.5 keeps it on the
+# numpy 1.x ABI pinned above.
+rasterio>=1.3,<1.5
 pytest>=8,<9
