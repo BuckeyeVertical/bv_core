@@ -7,7 +7,9 @@
   <maintainer email="Eashan.Vytla@gmail.com">eashan</maintainer>
   <license>TODO: License declaration</license>
 
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>bv_msgs</exec_depend>
+  <exec_depend>python3-rasterio</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

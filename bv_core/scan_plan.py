@@ -2,12 +2,13 @@
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import yaml
 
 from .mission_config import mission_config_path
 from .stitch_geometry import compute_step_m, distance_m
+from .terrain import apply_terrain_altitudes, load_terrain_model
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,11 @@ class ScanPlan:
     row_spacing_m: float
     row_count: int
     cross_footprint_m: float = 0.0
+    # True once every waypoint altitude has been converted to AMSL from
+    # the DEM. Callers push the route in MAV_FRAME_GLOBAL when set and in
+    # MAV_FRAME_GLOBAL_RELATIVE_ALT when not; altitude_m stays AGL either
+    # way, because the camera footprint depends on height above ground.
+    terrain_referenced: bool = False
 
 
 def build_scan_plan(mission, vision, camera) -> ScanPlan:
@@ -75,7 +81,14 @@ def build_scan_plan(mission, vision, camera) -> ScanPlan:
     )
 
 
-def load_scan_plan() -> ScanPlan:
+def load_scan_plan(terrain=None, logger=None) -> ScanPlan:
+    """Build the scan plan from config, terrain-referencing it when possible.
+
+    Args:
+        terrain: A preloaded TerrainModel, or None to load ``dem.tif`` itself.
+            Tests inject a stub here rather than writing a raster.
+        logger: Optional ROS logger for the terrain-following decision.
+    """
     from ament_index_python.packages import get_package_share_directory
 
     config_dir = os.path.join(get_package_share_directory('bv_core'), 'config')
@@ -86,7 +99,31 @@ def load_scan_plan() -> ScanPlan:
     camera_path = os.path.join(config_dir, 'filtering_params.yaml')
     with open(camera_path, 'r') as stream:
         camera = yaml.safe_load(stream)
-    return build_scan_plan(mission, vision, camera)
+    plan = build_scan_plan(mission, vision, camera)
+    return terrain_reference(plan, mission, terrain=terrain, logger=logger)
+
+
+def terrain_reference(plan, mission, terrain=None, logger=None) -> ScanPlan:
+    """Convert a plan's flat AGL waypoints to AMSL against the DEM.
+
+    Returns the plan unchanged when terrain following is switched off, when
+    the route came from explicit ``scan_points``, or when the DEM cannot cover
+    every waypoint.
+    """
+    if not bool(mission.get('terrain_follow', True)):
+        return plan
+    if mission.get('scan_boundary') is None:
+        # scan_points carry authored per-point altitudes; overwriting them
+        # would discard exactly what the author spelled out.
+        return plan
+
+    if terrain is None:
+        terrain = load_terrain_model(logger)
+    waypoints, applied = apply_terrain_altitudes(
+        plan.waypoints, plan.altitude_m, terrain, logger)
+    if not applied:
+        return plan
+    return replace(plan, waypoints=waypoints, terrain_referenced=True)
 
 
 def _snake_waypoints(

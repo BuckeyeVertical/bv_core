@@ -1,6 +1,6 @@
 import pytest
 
-from bv_core.scan_plan import build_scan_plan
+from bv_core.scan_plan import build_scan_plan, terrain_reference
 
 
 BOUNDARY = [
@@ -127,3 +127,82 @@ def test_rotated_boundary_rows_follow_selected_edge(sweep, edge):
     for first, last in zip(plan.waypoints[::2], plan.waypoints[1::2]):
         row_lat, row_lon = last[0] - first[0], last[1] - first[1]
         assert row_lat * edge_lon - row_lon * edge_lat == pytest.approx(0, abs=1e-12)
+
+
+class SlopedTerrain:
+    """A DEM stand-in whose ground rises 10000 m per degree of latitude."""
+
+    def __init__(self, missing=()):
+        self.missing = set(missing)
+
+    def msl_for_agl(self, lat, lon, agl_m):
+        """Return AMSL for this point, or None where the DEM has no data."""
+        if round(lat, 6) in self.missing:
+            return None
+        return (lat - 36.0) * 10000.0 + agl_m
+
+
+def test_plan_without_a_dem_keeps_flat_above_takeoff_altitudes():
+    plan = terrain_reference(
+        build_scan_plan(mission(), VISION, BEVY_CAMERA),
+        mission(), terrain=None)
+
+    assert plan.terrain_referenced is False
+    assert all(point[2] == 60.96 for point in plan.waypoints)
+
+
+def test_terrain_reference_converts_every_waypoint_to_amsl():
+    flat = build_scan_plan(mission(), VISION, BEVY_CAMERA)
+
+    plan = terrain_reference(flat, mission(), terrain=SlopedTerrain())
+
+    assert plan.terrain_referenced is True
+    # altitude_m stays AGL - the camera footprint depends on height above
+    # ground, not on where sea level happens to be.
+    assert plan.altitude_m == 60.96
+    assert plan.capture_spacing_m == flat.capture_spacing_m
+    for flat_point, point in zip(flat.waypoints, plan.waypoints):
+        assert point[:2] == pytest.approx(flat_point[:2])
+        assert point[2] == pytest.approx((point[0] - 36.0) * 10000.0 + 60.96)
+    # The route climbs with the ground rather than holding one altitude.
+    assert len({round(point[2], 3) for point in plan.waypoints}) > 1
+
+
+def test_one_uncovered_waypoint_keeps_the_whole_route_flat():
+    """A route is pushed under one frame, so it cannot be half-converted."""
+    flat = build_scan_plan(mission(), VISION, BEVY_CAMERA)
+    gap = round(flat.waypoints[2][0], 6)
+
+    plan = terrain_reference(
+        flat, mission(), terrain=SlopedTerrain(missing=[gap]))
+
+    assert plan.terrain_referenced is False
+    assert all(point[2] == 60.96 for point in plan.waypoints)
+
+
+def test_terrain_follow_false_opts_out_entirely():
+    config = mission()
+    config['terrain_follow'] = False
+
+    plan = terrain_reference(
+        build_scan_plan(config, VISION, BEVY_CAMERA),
+        config, terrain=SlopedTerrain())
+
+    assert plan.terrain_referenced is False
+    assert all(point[2] == 60.96 for point in plan.waypoints)
+
+
+def test_explicit_scan_points_keep_their_authored_altitudes():
+    """scan_points spell out each altitude; the DEM must not overwrite them."""
+    config = {
+        'takeoff_alt': 30.0,
+        'scan_altitude': 60.96,
+        'scan_points': [[36.216, -96.010, 44.0], [36.217, -96.009, 55.0]],
+    }
+
+    plan = terrain_reference(
+        build_scan_plan(config, VISION, BEVY_CAMERA),
+        config, terrain=SlopedTerrain())
+
+    assert plan.terrain_referenced is False
+    assert [point[2] for point in plan.waypoints] == [44.0, 55.0]

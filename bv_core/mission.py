@@ -39,6 +39,7 @@ from mavros_msgs.msg import Waypoint, State as MavState, WaypointReached
 from mavros_msgs.srv import WaypointPush, SetMode, CommandBool, CommandLong, ParamSetV2
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String, Bool
+from std_srvs.srv import Trigger
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from bv_msgs.srv import LocalizeObject
 from bv_msgs.msg import ConfirmedDetection, ObjectLocations
@@ -50,6 +51,7 @@ from .mission_config import (
     select_takeoff_waypoint,
 )
 from .scan_plan import load_scan_plan
+from .terrain import load_terrain_model
 from .payload import (
     DropSequence,
     load_payload_config,
@@ -79,6 +81,11 @@ STATE_RTL      = "return"
 # keeps a dead ground station from leaving the aircraft in an indefinite loiter.
 MIN_APPROVAL_TIMEOUT_SEC = 10.0
 LOCALIZATION_TIMEOUT_SEC = 15.0
+
+# Gap between the DEM at home and the autopilot's reported home altitude that
+# is large enough to suspect a datum mismatch rather than geoid separation.
+# Ellipsoid-to-geoid separation over the continental US stays within ~40 m.
+TERRAIN_DATUM_WARN_M = 45.0
 
 
 def confirmation_rejection_reason(message, scan_started_ns, handled_ids):
@@ -167,8 +174,21 @@ class MissionRunner(Node):
         lap_route = config.get('points', [])
         lap_count = int(config.get('lap_count', 1))
         self.lap_waypoints = expand_lap_route(lap_route, lap_count)
-        scan_plan = load_scan_plan()
+        scan_plan = load_scan_plan(logger=self.get_logger())
         self.scan_waypoints = scan_plan.waypoints
+        # scan_altitude is AGL. With a DEM the plan has already converted every
+        # waypoint to AMSL, so the route is pushed in MAV_FRAME_GLOBAL and the
+        # loiter and delivery points must use the same convention; without one
+        # everything stays above the takeoff point, exactly as before.
+        self.scan_plan = scan_plan
+        self.scan_altitude_agl = scan_plan.altitude_m
+        self.terrain = (
+            load_terrain_model(self.get_logger())
+            if scan_plan.terrain_referenced else None)
+        self.scan_frame = (
+            MAV_FRAME_GLOBAL if scan_plan.terrain_referenced
+            else MAV_FRAME_GLOBAL_RELATIVE_ALT)
+        self._last_terrain_msl = None
         self.takeoff_waypoint = select_takeoff_waypoint(
             self.lap_waypoints, self.scan_waypoints)
         
@@ -219,7 +239,11 @@ class MissionRunner(Node):
             f"Prepared {len(self.scan_waypoints)} scan waypoints across "
             f"{scan_plan.row_count} row(s): capture_spacing="
             f"{scan_plan.capture_spacing_m:.2f}m, "
-            f"row_spacing={scan_plan.row_spacing_m:.2f}m"
+            f"row_spacing={scan_plan.row_spacing_m:.2f}m, "
+            f"altitude={scan_plan.altitude_m:.2f}m "
+            + ("AGL, terrain-referenced (pushed AMSL)"
+               if scan_plan.terrain_referenced
+               else "above the takeoff point (flat)")
         )
 
     def init_state_variables(self):
@@ -328,6 +352,9 @@ class MissionRunner(Node):
         )
         
         
+        self.end_laps_service = self.create_service(
+            Trigger, "/mission/end_laps", self.on_end_laps)
+
         # Subscribers
         
         # GPS for home position
@@ -430,6 +457,43 @@ class MissionRunner(Node):
             f"Home position set: lat={self.home_lat:.6f}, "
             f"lon={self.home_lon:.6f}, alt={self.home_alt:.2f}m"
         )
+        self.check_terrain_datum()
+
+    def check_terrain_datum(self):
+        """Warn when the DEM's vertical datum looks unlike the autopilot's.
+
+        Every terrain-referenced waypoint is pushed as an absolute AMSL
+        altitude, so a DEM on the wrong vertical datum offsets the entire scan.
+        An ellipsoidal DEM read as orthometric is roughly 30 m out over the
+        continental US, which is most of a scan altitude.
+        """
+        if self.terrain is None or self.home_lat is None:
+            return
+
+        elevation = self.terrain.elevation_at(self.home_lat, self.home_lon)
+        if elevation is None:
+            self.get_logger().warn(
+                "Home position is outside the DEM - terrain following will "
+                "hold a fallback altitude wherever the raster does not reach")
+            return
+
+        difference = float(self.home_alt) - elevation
+        self.get_logger().info(
+            f"DEM at home: {elevation:.1f}m vs reported home altitude "
+            f"{self.home_alt:.1f}m (difference {difference:.1f}m)")
+        self.log.event(
+            'TERRAIN_DATUM',
+            f"dem={elevation:.1f}, home_alt={self.home_alt:.1f}, "
+            f"difference={difference:.1f}")
+        if abs(difference) > TERRAIN_DATUM_WARN_M:
+            self.get_logger().warn(
+                f"DEM elevation at home differs from the reported home "
+                f"altitude by {difference:.1f}m. Some offset is expected - "
+                f"MAVROS publishes NavSatFix.altitude as height above the "
+                f"WGS84 ellipsoid, while a DEM is normally orthometric - but "
+                f"a gap this large may mean the DEM is on the wrong vertical "
+                f"datum, which would offset every scan altitude by the same "
+                f"amount")
 
     def wait_for_services(self):
         """Wait for all required MAVROS services to become available."""
@@ -452,6 +516,76 @@ class MissionRunner(Node):
         self.get_logger().info("All services available")
 
     # State machine core
+    def on_end_laps(self, request, response):
+        """End the lap phase through the same path as normal completion."""
+        if self.current_state != STATE_LAP:
+            response.success = False
+            response.message = "End laps is only available during laps"
+            return response
+        if getattr(self, '_end_laps_requested', False):
+            response.success = False
+            response.message = "End laps is already pending"
+            return response
+        self._end_laps_requested = True
+        self.get_logger().info('End laps requested: LOITER, then 10-second hold before scan')
+        self.log.event('END_LAPS_REQUESTED', 'operator requested scan transition')
+        self._process_end_laps_request()
+        response.success = True
+        response.message = "End laps accepted; waiting for LOITER, then holding 10 seconds before scan"
+        return response
+
+    def _cancel_end_laps(self):
+        self._end_laps_requested = False
+        self._end_laps_hold_phase = None
+        timer = getattr(self, '_end_laps_hold_timer', None)
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+            self._end_laps_hold_timer = None
+
+    def _process_end_laps_request(self):
+        if not getattr(self, '_end_laps_requested', False):
+            return
+        if self.current_state != STATE_LAP:
+            self._cancel_end_laps()
+        elif not self.is_transitioning:
+            self.is_transitioning = True
+            self._end_laps_hold_phase = 'waiting'
+            self.last_waypoint_reached = None
+            request = SetMode.Request()
+            request.base_mode = 0
+            request.custom_mode = 'AUTO.LOITER'
+            self.get_logger().info('End laps: requesting AUTO.LOITER; waiting for vehicle confirmation')
+            try:
+                future = self.set_mode_client.call_async(request)
+                future.add_done_callback(self._on_end_laps_loiter_complete)
+            except Exception as exc:
+                self.get_logger().error(f"End laps LOITER request failed: {exc}")
+                self._cancel_end_laps()
+
+    def _on_end_laps_loiter_complete(self, future):
+        if not getattr(self, '_end_laps_requested', False):
+            return
+        try:
+            accepted = future.result().mode_sent
+        except Exception as exc:
+            self.get_logger().error(f"End laps LOITER request failed: {exc}")
+            accepted = False
+        if not accepted:
+            self.get_logger().error("End laps cancelled: LOITER was not accepted")
+            self._cancel_end_laps()
+
+    def _finish_end_laps_hold(self):
+        if (not getattr(self, '_end_laps_requested', False)
+                or self.current_state != STATE_LAP
+                or getattr(self, '_end_laps_hold_phase', None) != 'holding'):
+            return
+        self.get_logger().info('End laps: 10-second LOITER hold complete; starting scan transit')
+        self._cancel_end_laps()
+        # Ignore old lap notifications until the replacement upload finishes.
+        self._early_scan_upload_pending = True
+        self.handle_state_completion()
+
     def handle_state_completion(self):
         """
         Called when the current state's objective is complete.
@@ -466,7 +600,10 @@ class MissionRunner(Node):
                 self.enter_scan_state()
             
         elif self.current_state == STATE_LAP:
-            self.enter_scan_transit_state()
+            if getattr(self, '_end_laps_requested', False):
+                self._process_end_laps_request()
+            else:
+                self.enter_scan_transit_state()
 
         elif self.current_state == STATE_SCAN_TRANSIT:
             self.activate_scan_state()
@@ -556,10 +693,15 @@ class MissionRunner(Node):
         route = self.lap_waypoints if self.lap_waypoints else self.scan_waypoints
         self.publish_path_progress(route_name, 0, len(route))
         
+        # The takeoff waypoint IS the first point of whichever route follows,
+        # so it has to be pushed in that route's frame: the lap route is AMSL,
+        # and the scan route is AMSL only when the DEM was applied.
+        takeoff_frame = (
+            MAV_FRAME_GLOBAL if self.lap_waypoints else self.scan_frame)
         self.active_waypoint_list = self.build_waypoint_list(
             [self.takeoff_waypoint],
             takeoff_tolerance,
-            frame=MAV_FRAME_GLOBAL,  # Takeoff flies to the first lap waypoint, which is AMSL
+            frame=takeoff_frame,
         )
         self.expected_final_waypoint_index = 0
         self.push_mission_to_autopilot()
@@ -645,7 +787,8 @@ class MissionRunner(Node):
         self.active_waypoint_list = self.build_waypoint_list(
             remaining_scan_points,
             self.scan_tolerance,
-            pass_through_ratio=1.0  # Continuous flight for scanning
+            pass_through_ratio=1.0,  # Continuous flight for scanning
+            frame=self.scan_frame,
         )
         self.expected_final_waypoint_index = len(self.active_waypoint_list) - 1
         # -1 means this newly uploaded segment has not reached an actual scan
@@ -675,6 +818,7 @@ class MissionRunner(Node):
             self.scan_waypoints,
             self.scan_tolerance,
             pass_through_ratio=1.0,
+            frame=self.scan_frame,
         )
         self.expected_final_waypoint_index = 0
         self.last_reached_scan_waypoint = -1
@@ -779,9 +923,15 @@ class MissionRunner(Node):
         self.log.event('DELIVER_TARGET',
             f"lat={lat:.6f}, lon={lon:.6f}, class={cls_name}({self.current_target_class_id})")
 
+        # alt is the drone's own relative altitude at the moment it localized,
+        # which is what the delivery has always flown - but it means nothing in
+        # an AMSL frame. With a DEM, command the scan's AGL over the terrain
+        # under the target instead.
+        deliver_alt = self._altitude_for(lat, lon) if self.terrain else alt
         self.active_waypoint_list = self.build_waypoint_list(
-            [self.current_target_coords],
-            self.deliver_tolerance
+            [(lat, lon, deliver_alt)],
+            self.deliver_tolerance,
+            frame=self.scan_frame,
         )
         self.expected_final_waypoint_index = 0
         self.push_mission_to_autopilot()
@@ -886,6 +1036,7 @@ class MissionRunner(Node):
         """
         Stop mission work and return; skip the command if RTL is already observed.
         """
+        MissionRunner._cancel_end_laps(self)
         if self.approval_gate is not None and self.approval_gate.is_pending():
             self.approval_gate.cancel('rtl')
 
@@ -921,6 +1072,45 @@ class MissionRunner(Node):
             self.set_flight_mode("AUTO.RTL")
 
     # Mavros utilities
+    def _altitude_for(self, lat, lon):
+        """Return this point's altitude in the scan route's own frame.
+
+        Without a DEM this is the scan route's own above-takeoff altitude.
+        With one it is AMSL, because self.scan_frame is MAV_FRAME_GLOBAL and
+        every point sharing that push must use the same datum. A lookup that
+        misses therefore cannot fall back to the relative number - PX4 would
+        read it as an absolute altitude near sea level and dive. Reuse the last
+        good AMSL instead, or the terrain under home, and say so.
+        """
+        if self.terrain is None:
+            if self.scan_waypoints:
+                return self.scan_waypoints[0][2]
+            return self.scan_altitude_agl
+
+        msl = None
+        if lat is not None and lon is not None:
+            msl = self.terrain.msl_for_agl(lat, lon, self.scan_altitude_agl)
+        if msl is not None:
+            self._last_terrain_msl = msl
+            return msl
+
+        fallback = self._last_terrain_msl
+        if fallback is None and self.home_lat is not None:
+            fallback = self.terrain.msl_for_agl(
+                self.home_lat, self.home_lon, self.scan_altitude_agl)
+        if fallback is None:
+            # Nothing in the DEM to anchor to. Hold the scan route's own
+            # altitude, which is already AMSL in this branch.
+            fallback = self.scan_waypoints[0][2] if self.scan_waypoints else (
+                self.scan_altitude_agl)
+        self.get_logger().warn(
+            f"No DEM elevation at ({lat}, {lon}) - holding "
+            f"{fallback:.1f}m AMSL for this waypoint")
+        self.log.event(
+            'TERRAIN_MISS',
+            f"lat={lat}, lon={lon}, held_msl={fallback:.1f}")
+        return fallback
+
     def build_waypoint_list(self, points, tolerance, pass_through_ratio=0.0,
                             frame=MAV_FRAME_GLOBAL_RELATIVE_ALT):
         """
@@ -932,7 +1122,9 @@ class MissionRunner(Node):
             pass_through_ratio: 0.0 = stop at waypoint, 1.0 = fly through
             frame: MAVLink altitude frame for every point in this list.
                 Lap waypoints are AMSL because the official numbers are
-                issued that way; every other route is above takeoff.
+                issued that way. The scan, loiter and delivery points share
+                self.scan_frame: AMSL once the DEM has resolved their
+                altitudes against the terrain, above takeoff otherwise.
             
         Returns:
             List of Waypoint messages
@@ -1197,6 +1389,7 @@ class MissionRunner(Node):
                 self._pending_scan_confirmation = None
             return
         
+        self._early_scan_upload_pending = False
         self.get_logger().info("Waypoints uploaded successfully")
         if not self.has_armed:
             self.arm_vehicle()
@@ -1484,6 +1677,9 @@ class MissionRunner(Node):
 
     def on_waypoint_reached(self, msg):
         """Callback when a waypoint is reached."""
+        if (getattr(self, "_early_scan_upload_pending", False)
+                or getattr(self, "_end_laps_hold_phase", None) is not None):
+            return
         waypoint_index = msg.wp_seq
         
         # Ignore duplicate waypoint messages (MAVROS publishes repeatedly)
@@ -1534,6 +1730,21 @@ class MissionRunner(Node):
         if msg.mode == 'AUTO.RTL' and self.current_state != STATE_RTL:
             self.get_logger().info("External RTL detected - stopping mission actions")
             self.enter_rtl_state(command_mode=False)
+
+        if getattr(self, '_end_laps_requested', False):
+            phase = getattr(self, '_end_laps_hold_phase', None)
+            if self.current_state != STATE_LAP or not msg.armed:
+                self._cancel_end_laps()
+            elif msg.mode == 'AUTO.LOITER' and phase == 'waiting':
+                self._end_laps_hold_phase = 'holding'
+                self.get_logger().info('End laps: vehicle reports AUTO.LOITER; starting 10-second hold')
+                self.log.event('END_LAPS_HOLD', 'LOITER observed; holding for 10 seconds')
+                self._end_laps_hold_timer = self.create_timer(
+                    5.0, self._finish_end_laps_hold)
+            elif ((phase == 'holding' and msg.mode != 'AUTO.LOITER')
+                  or msg.mode not in ('AUTO.MISSION', 'AUTO.LOITER')):
+                self.get_logger().warn('End laps cancelled: vehicle mode changed')
+                self._cancel_end_laps()
 
         if self.current_state == STATE_RTL and not msg.armed and not self.rtl_completed:
             self.rtl_completed = True
@@ -1607,7 +1818,10 @@ class MissionRunner(Node):
 
         # Save drone's current position so we can return here after delivery
         if self.current_lat is not None and self.current_lon is not None:
-            scan_alt = self.scan_waypoints[0][2]  # Use scan altitude
+            # Terrain under the drone right now, not under the route's first
+            # waypoint - that one is the wrong elevation anywhere else in the
+            # field, and this point is prepended to the scan push.
+            scan_alt = self._altitude_for(self.current_lat, self.current_lon)
             self.loiter_resume_coords = (self.current_lat, self.current_lon, scan_alt)
             self.log.event('LOITER_SAVED',
                 f"lat={self.current_lat:.6f}, lon={self.current_lon:.6f}, "
@@ -1643,6 +1857,7 @@ class MissionRunner(Node):
         Publishes state; the payload drop runs on its own DEPLOY_TICK_SEC timer.
         Also retries any payload command PX4 has not confirmed.
         """
+        self._process_end_laps_request()
         self.publish_mission_state()
         if self.payload_writer is not None:
             self.payload_writer.flush()

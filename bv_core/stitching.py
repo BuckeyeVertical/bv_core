@@ -20,6 +20,12 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
+from .gps_stitch import (
+    build_gps_transforms,
+    canvas_bounds,
+    frames_from_row_groups,
+    px_per_m_from_plan,
+)
 from .mission_config import package_source_dir
 from .naive_stitch import build_naive_mosaic, layout_from_plan
 from .scan_plan import load_scan_plan
@@ -55,6 +61,26 @@ class StitchingNode(Node):
         # -1 for a nadir camera whose image +x points right of travel.
         # If the strips come out mirrored across the flight axis, flip this.
         self.declare_parameter('naive_camera_x_sign', -1)
+        # Geotag-driven mosaic. Runs after the naive one and before the
+        # feature-based path, for the same reason: it is another artifact
+        # that cannot fail to converge, and it beats dead reckoning whenever
+        # the aircraft did not fly the plan exactly.
+        self.declare_parameter('gps_mosaic', True)
+        # Map the image axes onto (perpendicular, heading). Their product
+        # must be +1. Flip BOTH together if the mosaic comes out rotated a
+        # half turn; flipping one mirrors it, which gps_stitch rejects.
+        self.declare_parameter('gps_camera_x_sign', -1)
+        self.declare_parameter('gps_camera_y_sign', -1)
+        # Pixels per ground metre. 0.0 derives it from the scan plan's
+        # footprint, which tracks the frame downscale automatically.
+        self.declare_parameter('gps_px_per_m', 0.0)
+        # Feather ramp width in pixels. 0 hard-pastes instead, later frame wins.
+        self.declare_parameter('gps_feather_px', 200)
+        # Refuse to allocate a canvas larger than this. The blend holds two
+        # float32 buffers, so the peak is ~16 bytes per pixel: 80 MP is
+        # about 1.3 GB, which an Orin Nano can take and a bad geotag cannot
+        # be allowed to exceed.
+        self.declare_parameter('gps_max_canvas_mpx', 80.0)
         self._has_stitched = False # stops from stitching on every return publish
         self._stitch_timer = None
 
@@ -611,6 +637,167 @@ class StitchingNode(Node):
             self.get_logger().error(
                 f"Could not write naive mosaic: {save_path}")
 
+    def _run_gps_mosaic(self, work_row_groups, output_dir, timestamp):
+        """Build and save the geotag-driven mosaic.
+
+        Never raises, for the same reason `_run_naive_fallback` never does:
+        this runs ahead of the feature-based path and must not be able to
+        take it down.
+        """
+        if not self.get_parameter('gps_mosaic').value:
+            return
+
+        frames = frames_from_row_groups(dict(work_row_groups))
+        if not frames:
+            self.get_logger().info(
+                "GPS mosaic skipped, no frames carry a geotag")
+            return
+
+        total = sum(len(paths) for paths in work_row_groups.values())
+        if len(frames) < total:
+            self.get_logger().warning(
+                f"GPS mosaic: {total - len(frames)} of {total} frame(s) have "
+                f"no usable GPS fix and were dropped"
+            )
+
+        max_width = max(100, self.get_parameter('max_width').value)
+        images, located = self._load_uniform_frames(frames, max_width)
+        if not images:
+            self.get_logger().warning("GPS mosaic skipped, no frames loaded")
+            return
+
+        frame_h, frame_w = images[0].shape[:2]
+
+        px_per_m = float(self.get_parameter('gps_px_per_m').value)
+        if px_per_m <= 0.0:
+            try:
+                px_per_m = px_per_m_from_plan(load_scan_plan(), frame_w)
+            except Exception as error:
+                self.get_logger().warning(
+                    f"GPS mosaic skipped, no scale available: {error}")
+                return
+
+        try:
+            placed = build_gps_transforms(
+                located, frame_w, frame_h, px_per_m,
+                camera_x_sign=int(self.get_parameter('gps_camera_x_sign').value),
+                camera_y_sign=int(self.get_parameter('gps_camera_y_sign').value),
+            )
+            mosaic = self._blend_gps_mosaic(
+                images, [transform for _, transform in placed], frame_w, frame_h)
+        except Exception as error:
+            self.get_logger().error(f"GPS mosaic failed: {error}")
+            return
+        finally:
+            images.clear()
+
+        if mosaic is None:
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+        save_path = os.path.join(output_dir, f"gps_mosaic_{timestamp}.jpg")
+        if cv2.imwrite(save_path, mosaic):
+            self.get_logger().info(
+                f"GPS mosaic saved: {save_path} "
+                f"({mosaic.shape[1]}x{mosaic.shape[0]}px, "
+                f"{len(placed)} frames, {px_per_m:.2f}px/m)"
+            )
+        else:
+            self.get_logger().error(f"Could not write GPS mosaic: {save_path}")
+
+    def _load_uniform_frames(self, frames, max_width):
+        """Load frames, keeping only those that share the first one's size.
+
+        `build_gps_transforms` places every frame with the same width and
+        height, so an odd-sized frame would be positioned as if it were the
+        common size and land in the wrong place.
+        """
+        images = []
+        located = []
+        frame_shape = None
+        for frame in frames:
+            loaded = self._load_and_resize([frame.path], max_width)
+            if not loaded:
+                continue
+            image = loaded[0]
+            if frame_shape is None:
+                frame_shape = image.shape[:2]
+            elif image.shape[:2] != frame_shape:
+                self.get_logger().warning(
+                    f"GPS mosaic: dropped {os.path.basename(frame.path)}, "
+                    f"{image.shape[1]}x{image.shape[0]} does not match "
+                    f"{frame_shape[1]}x{frame_shape[0]}"
+                )
+                continue
+            images.append(image)
+            located.append(frame)
+        return images, located
+
+    def _blend_gps_mosaic(self, images, transforms, frame_w, frame_h):
+        """Warp every frame onto one canvas and blend the overlaps.
+
+        Feathering by distance to the frame border cross-fades the seams.
+        Placement here is metadata-only and not registered to the pixel, so
+        a wide ramp trades a visible step for a little blur; `gps_feather_px`
+        set to 0 hard-pastes instead, which keeps detail and shows the true
+        misalignment. That is the more honest view when diagnosing.
+        """
+        offset, width, height = canvas_bounds(transforms, frame_w, frame_h)
+        budget = float(self.get_parameter('gps_max_canvas_mpx').value)
+        if width <= 0 or height <= 0:
+            self.get_logger().error(
+                f"GPS mosaic failed: degenerate canvas {width}x{height}")
+            return None
+        if width * height > budget * 1e6:
+            self.get_logger().error(
+                f"GPS mosaic skipped: canvas {width}x{height} exceeds the "
+                f"{budget:.0f} MP budget, check the geotags for an outlier"
+            )
+            return None
+
+        feather = int(self.get_parameter('gps_feather_px').value)
+        if feather <= 0:
+            canvas = np.zeros((height, width, 3), dtype=np.uint8)
+            for image, transform in zip(images, transforms):
+                matrix = offset @ transform
+                warped = cv2.warpPerspective(
+                    image, matrix, (width, height), flags=cv2.INTER_LINEAR)
+                covered = cv2.warpPerspective(
+                    np.full((frame_h, frame_w), 255, np.uint8), matrix,
+                    (width, height), flags=cv2.INTER_NEAREST)
+                canvas[covered > 0] = warped[covered > 0]
+            return canvas
+
+        weight = self._feather_weight(frame_h, frame_w, feather)
+        total = np.zeros((height, width, 3), dtype=np.float32)
+        weights = np.zeros((height, width, 1), dtype=np.float32)
+        for image, transform in zip(images, transforms):
+            matrix = offset @ transform
+            warped = cv2.warpPerspective(
+                image.astype(np.float32), matrix, (width, height),
+                flags=cv2.INTER_LINEAR)
+            warped_weight = cv2.warpPerspective(
+                weight, matrix, (width, height), flags=cv2.INTER_LINEAR)
+            warped_weight = warped_weight[:, :, None]
+            total += warped * warped_weight
+            weights += warped_weight
+
+        np.maximum(weights, 1e-6, out=weights)
+        total /= weights
+        return np.clip(total, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _feather_weight(height, width, falloff):
+        """Distance-to-border ramp, clamped above zero.
+
+        Uncovered canvas is found by the weight sum being ~0, so every
+        covered pixel has to carry some weight even at the very edge.
+        """
+        rows = np.minimum(np.arange(height), height - 1 - np.arange(height))
+        cols = np.minimum(np.arange(width), width - 1 - np.arange(width))
+        ramp = np.minimum(rows[:, None], cols[None, :]).astype(np.float32)
+        return np.clip(ramp / max(1, falloff), 0.02, 1.0)
+
     def _perform_stitching(self):
         input_dir = self.get_parameter('input_dir').value
         output_dir = self.get_parameter('output_dir').value
@@ -662,6 +849,7 @@ class StitchingNode(Node):
         # Before phase 1, not after: several branches below return early on
         # failure, and the fallback has to exist precisely in that case.
         self._run_naive_fallback(work_row_groups, output_dir, timestamp)
+        self._run_gps_mosaic(work_row_groups, output_dir, timestamp)
 
         start_time = time.time()
 
